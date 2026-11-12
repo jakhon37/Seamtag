@@ -170,15 +170,32 @@ describe('posed objects in an image', () => {
       ['warning', 'pose-no-box', "a.jpg: group 2 has keypoints of hand but no box, and the box around its one point has no area: add a box with the class's label"]
     ])
   })
-  test('two boxes in a group, unknown keypoint names and repeated ones are errors, which stop a pose export', () => {
+  test('shapes of two classes in a group, unknown keypoint names and repeated ones are errors, which stop a pose export', () => {
     const { instances, issues } = poseInstances(image([
-      box('person', 1), box('person', 1), point('nose', 1, 20, 20),
+      box('person', 1), box('hand', 1), point('nose', 1, 20, 20),
       box('person', 2), point('tail', 2, 20, 20), point('nose', 2, 20, 20), point('nose', 2, 25, 25)
     ]), SCHEMA)
     expect(issues.map((i) => [i.severity, i.code, i.shape])).toEqual([
-      ['error', 'pose-two-boxes', 1], ['error', 'pose-unknown-keypoint', 4], ['error', 'pose-repeated-keypoint', 6]
+      ['error', 'pose-two-classes', 1], ['error', 'pose-unknown-keypoint', 4], ['error', 'pose-repeated-keypoint', 6]
     ])
+    expect(issues[0].message).toBe("a.jpg: group 1 has shapes of person and hand, so it's left out: give each object its own group")
     expect(instances).toEqual([{ label: 'person', group: 2, box: [10, 10, 50, 60], keypoints: [[20, 20, 2], null, null], shapes: [3, 5] }])
+  })
+  test("shapes of one class in a group are one object in parts, its box around them all, as labelme draws a person hidden in part", () => {
+    const { instances, issues } = poseInstances(image([
+      newShape('person', 'polygon', [[10, 20], [30, 20], [20, 40]], { group_id: 0 }), newShape('person', 'polygon', [[50, 30], [70, 30], [60, 55]], { group_id: 0 }),
+      point('nose', 0, 20, 25),
+      // With no keypoints, as labelme's own example 2011_000003.json has one
+      newShape('person', 'polygon', [[1, 1], [5, 1], [3, 6]], { group_id: 3 }), box('person', 3, [[80, 60], [90, 70]])
+    ]), SCHEMA)
+    expect(instances).toEqual([
+      { label: 'person', group: 0, box: [10, 20, 70, 55], keypoints: [[20, 25, 2], null, null], shapes: [0, 1, 2] },
+      { label: 'person', group: 3, box: [1, 1, 90, 70], keypoints: [null, null, null], shapes: [3, 4] }
+    ])
+    expect(issues.map((i) => [i.severity, i.code, i.shape, i.message])).toEqual([
+      ['info', 'pose-parts', 0, 'a.jpg: person is 2 shapes of group 0, one object, so its box is around them all'],
+      ['info', 'pose-parts', 3, 'a.jpg: person is 2 shapes of group 3, one object, so its box is around them all']
+    ])
   })
   test('keypoints without a group are left out with a warning; a box without one has no keypoints; groups of other shapes are left alone', () => {
     const { instances, issues } = poseInstances(image([

@@ -238,7 +238,9 @@ function instances(entry: CocoEntry, categoryOf: (label: string) => number, issu
     if (!part) return
     // A shape without a group_id is an object of its own, as labelme2coco has it
     const key = s.group_id === null ? i : `${s.label}\u0000${s.group_id}`
-    objects.set(key, [...(objects.get(key) ?? []), part])
+    const parts = objects.get(key)
+    if (parts) parts.push(part)
+    else objects.set(key, [part])
   })
   const kept: { parts: Part[]; crowd: boolean; category: number; made: ReturnType<typeof segment> }[] = []
   for (const parts of objects.values()) {
@@ -310,8 +312,11 @@ function poses(entry: CocoEntry, schema: KeypointSchema | undefined, categoryOf:
     const outline = parts.length ? segment(parts, w, h, false) : null
     const area = outline?.area ? outline.area : bw * bh
     const segmentation = outline?.area ? outline.segmentation : [[box[0], box[1], box[2], box[1], box[2], box[3], box[0], box[3]]]
-    // Its outline's shapes are kept as the instances file keeps them, so this file alone gives them back
-    const attributes = outline?.area ? attributesOf(parts, pose.group, outline.rle, w, h, false) : pose.group === null ? {} : { group_id: pose.group }
+    // Its outline's shapes are kept as the instances file keeps them, so this file alone gives them
+    // back; the box written for one with no outline is marked as a rectangle, which tells it from a
+    // polygon lying on its box
+    const attributes = outline?.area ? attributesOf(parts, pose.group, outline.rle, w, h, false)
+      : { ...(pose.group === null ? {} : { group_id: pose.group }), shape_type: 'rectangle' }
     out.push({
       category_id: categoryOf(pose.label), segmentation, area, bbox: [box[0], box[1], bw, bh], iscrowd: 0, keypoints, num_keypoints: seen,
       ...(Object.keys(attributes).length ? { attributes } : {})
@@ -452,7 +457,7 @@ const made = (p: Pixels): MaskBits => ({ ...rleToMaskBits(p.rle, p.box), x: p.x,
 // The shapes an annotation's segmentation gives, and whether Seamtag's attributes gave them back
 type Outline = { shapes: Read[]; restored: boolean }
 // What a file's annotations are summed up by, in one Issue each
-type Tally = { box: number; hidden: number; plain: number; crowd: number }
+type Tally = { box: number; rotated: number; hidden: number; plain: number; crowd: number }
 
 /**
  * A COCO file (instances or keypoints, from Seamtag, pycocotools, CVAT, X-AnyLabeling or
@@ -519,7 +524,7 @@ export function readCoco(text: string, file: string, { pixels = true }: { pixels
     nextGroup.set(image, g + 1)
     return g
   }
-  const counted: Tally = { box: 0, hidden: 0, plain: 0, crowd: 0 }
+  const counted: Tally = { box: 0, rotated: 0, hidden: 0, plain: 0, crowd: 0 }
   // Each shape's place in its label file, by image, where Seamtag's attributes keep it
   const places = new Map<number, (number | undefined)[]>()
   annotations.forEach((a: unknown, k: number) => {
@@ -532,7 +537,7 @@ export function readCoco(text: string, file: string, { pixels = true }: { pixels
     if (!category) return issues.push(issue('warning', 'coco-unknown-category', name, `${pathOf(name)}: ${which} is of category ${quote(a.category_id)}, which isn't in the categories list, so it's left out`))
     const what = `${which} (“${short(category.name)}”)`
     const note: Note = (severity, code, why) => issues.push(issue(severity, code, name, `${pathOf(name)}: ${what} ${why}`))
-    const tally: Tally = { box: 0, hidden: 0, plain: 0, crowd: 0 }
+    const tally: Tally = { box: 0, rotated: 0, hidden: 0, plain: 0, crowd: 0 }
     let read: { shapes: Read[]; pose: CocoPose | null }
     let masks: (MaskBits | null)[]
     try {
@@ -562,6 +567,10 @@ export function readCoco(text: string, file: string, { pixels = true }: { pixels
     result.masks = order.map((k) => masks[k])
   }
   if (counted.box) issues.push(issue('info', 'coco-box-only', null, `${file}: ${counted.box} ${counted.box === 1 ? 'annotation holds' : 'annotations hold'} only a box, so ${counted.box === 1 ? 'it becomes a rectangle' : 'they become rectangles'}`))
+  if (counted.rotated) {
+    const one = counted.rotated === 1
+    issues.push(issue('info', 'coco-rotated-box', null, `${file}: ${counted.rotated} ${one ? 'annotation is a box' : 'annotations are boxes'} CVAT rotated (attributes.rotation), so ${one ? 'it becomes a rotated box, as CVAT shows it' : 'they become rotated boxes, as CVAT shows them'}`))
+  }
   if (counted.hidden) issues.push(issue('info', 'coco-unlabelled-keypoints', null, `${file}: ${counted.hidden} ${counted.hidden === 1 ? 'keypoint is' : 'keypoints are'} marked not labelled (visibility 0), so ${counted.hidden === 1 ? "it's" : "they're"} left out`))
   if (counted.plain) {
     const one = counted.plain === 1
@@ -632,8 +641,9 @@ function readKeypoints(a: Record<string, unknown>, names: string[], note: Note):
   return { keypoints, unlabelled }
 }
 
-// Whether an outline is only a box: one polygon of nothing but the box's four corners, each
-// next to the one before, which is what Seamtag writes for a posed object made of points alone
+// Whether another tool's outline is only a box: one polygon of nothing but the box's four corners,
+// each next to the one before, as a tool may write a posed object it has only the box of. Seamtag
+// marks the box it writes for a posed object made of points alone as a rectangle.
 function boxOutline(s: Shape, box: [number, number, number, number] | null) {
   if (!box || s.shape_type !== 'polygon' || s.points.length !== 4) return false
   if (s.description || s.locked || Object.keys(s.flags).length || Object.keys(s.other).length) return false
@@ -653,7 +663,9 @@ function readPose(a: Record<string, unknown>, category: CocoCategory, image: Coc
   let shapes = outline && outline !== 'none' ? outline.shapes : []
   const bbox = cocoBox(a.bbox)
   let box: [number, number, number, number] | null = bbox && [bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]]
-  if (shapes.length === 1 && boxOutline(shapes[0].shape, bbox)) {
+  // Seamtag's own shapes come back as they were, a polygon lying on its box too
+  const restored = !!outline && outline !== 'none' && outline.restored
+  if (!restored && shapes.length === 1 && boxOutline(shapes[0].shape, bbox)) {
     // The box's own numbers, which its width and height may have rounded
     box = around(shapes[0].shape.points)
     shapes = []
@@ -682,12 +694,32 @@ function readObject(a: Record<string, unknown>, label: string, image: CocoImage,
     note('warning', 'coco-no-pixels', "has neither a shape nor a box with an area, so it's left out")
     return { shapes: [], restored: false }
   }
+  const [x, y, bw, bh] = box
+  const turned = turnedBox(label, box, isObject(a.attributes) ? a.attributes.rotation : undefined)
   // Its polygons, if any, were all left out, each with its own note
   const seg = a.segmentation
-  if (Array.isArray(seg) && seg.some((p) => !Array.isArray(p) || p.length)) note('warning', 'coco-box-only', 'keeps only its box, so it becomes a rectangle')
+  if (Array.isArray(seg) && seg.some((p) => !Array.isArray(p) || p.length)) note('warning', 'coco-box-only', `keeps only its box, so it becomes ${turned ? 'a rotated box' : 'a rectangle'}`)
+  else if (turned) tally.rotated++
   else tally.box++
-  const [x, y, bw, bh] = box
-  return { shapes: [{ shape: newShape(label, 'rectangle', [[x, y], [x + bw, y + bh]]), pixels: null }], restored: false }
+  return { shapes: [{ shape: turned ?? newShape(label, 'rectangle', [[x, y], [x + bw, y + bh]]), pixels: null }], restored: false }
+}
+
+/**
+ * CVAT's rotated box, as its COCO export writes one through datumaro: the box upright, as COCO
+ * keeps it, and how far CVAT turns it, clockwise in degrees, in attributes.rotation. Its corners
+ * turn about the box's centre, as CVAT's RotatedBoxesToPolygons turns them. Null when that leaves
+ * the box as it was: no rotation, or none or half a turn to a hundredth of a pixel at its corners.
+ */
+function turnedBox(label: string, [x, y, bw, bh]: [number, number, number, number], rotation: unknown): Shape | null {
+  if (typeof rotation !== 'number' || !Number.isFinite(rotation)) return null
+  const turn = ((rotation % 360) + 360) % 360, quarters = Math.round(turn / 90)
+  // Within a hundredth of a pixel of a quarter turn at every corner, it's that turn exactly
+  const exact = (Math.hypot(bw, bh) / 2) * Math.abs(turn - quarters * 90) * (Math.PI / 180) <= 0.01
+  if (exact && quarters % 2 === 0) return null
+  const t = (turn * Math.PI) / 180, c = exact ? 0 : Math.cos(t), s = exact ? (quarters === 1 ? 1 : -1) : Math.sin(t)
+  const cx = x + bw / 2, cy = y + bh / 2
+  const corners = [[x, y], [x + bw, y], [x + bw, y + bh], [x, y + bh]]
+  return newShape(label, 'oriented_rectangle', corners.map(([px, py]) => [cx + c * (px - cx) - s * (py - cy), cy + s * (px - cx) + c * (py - cy)]))
 }
 
 // An annotation's segmentation as shapes: Seamtag's own when its attributes give them back,
@@ -846,6 +878,8 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
 export type CocoMatch = {
   /** COCO image id to the image's path in the folder */
   names: Map<number, string>
+  /** The ids of those matched by their file's name alone, their paths not being in the folder */
+  byName: Set<number>
   missing: CocoImage[]
   ambiguous: { image: CocoImage; candidates: string[] }[]
   issues: Issue[]
@@ -865,37 +899,61 @@ function normal(p: string): string | null {
 // A file's name: the last part of its path, wherever the path leads
 const baseName = (p: string) => p.slice(p.replace(/\\/g, '/').lastIndexOf('/') + 1)
 
+// Adds an item to the list of those with its key, which grows in place: a copy at each would take
+// as long as the square of how many share the key, as 100,000 images named rgb.png do
+function addTo(lists: Map<string, string[]>, key: string, item: string) {
+  const list = lists.get(key)
+  if (list) list.push(item)
+  else lists.set(key, [item])
+}
+
 /**
  * COCO images matched to a folder's images (paths with / between folders): by file_name
  * joined to `base` (the folder the file names start from, as a path in the folder, which a ..
  * climbs out of), else by the file's name alone when exactly one image in the folder and one
- * in the COCO file have it.
+ * in the COCO file have it. `key` gives a path as the file system compares it (nameKey in
+ * src/main/names.ts): a path or a name it finds only in another case or Unicode form is
+ * matched when exactly one image on each side has its key.
  * Never a guess: the rest are missing or ambiguous, each with an Issue.
  */
-export function matchCocoImages(images: CocoImage[], folder: string[], base = ''): CocoMatch {
-  const names = new Map<number, string>(), missing: CocoImage[] = [], ambiguous: CocoMatch['ambiguous'] = [], issues: Issue[] = []
-  const inFolder = new Map<string, string>()
-  const byName = new Map<string, string[]>()
+export function matchCocoImages(images: CocoImage[], folder: string[], base = '', key: (path: string) => string = (p) => p): CocoMatch {
+  const names = new Map<number, string>(), byName = new Set<number>(), missing: CocoImage[] = [], ambiguous: CocoMatch['ambiguous'] = [], issues: Issue[] = []
+  // The folder's images by path, by the path's key and by the key of the file's name
+  const inFolder = new Map<string, string>(), byKey = new Map<string, string[]>(), byOwn = new Map<string, string[]>()
   for (const f of folder) {
     const n = normal(f)
     if (n === null) continue
     inFolder.set(n, f)
-    byName.set(baseName(n), [...(byName.get(baseName(n)) ?? []), f])
+    addTo(byKey, key(n), f)
+    addTo(byOwn, key(baseName(n)), f)
   }
-  // Every image of the COCO file counts, whatever its path, or a name two of them share could be matched by a guess
-  const cocoNames = new Map<string, number>()
-  for (const im of images) cocoNames.set(baseName(im.file_name), (cocoNames.get(baseName(im.file_name)) ?? 0) + 1)
   const prefix = normal(base) ?? ''
+  // Joined before .. is resolved, so ../images/a.jpg from the annotations folder is images/a.jpg
+  const paths = images.map((im) => normal(prefix ? `${prefix}/${im.file_name}` : im.file_name))
+  // Every image of the COCO file counts, whatever its path, or a name two of them share could be matched by a guess
+  const cocoKeys = new Map<string, number>(), cocoNames = new Map<string, number>()
+  const count = (counts: Map<string, number>, k: string) => counts.set(k, (counts.get(k) ?? 0) + 1)
+  images.forEach((im, i) => {
+    const p = paths[i]
+    if (p !== null) count(cocoKeys, key(p))
+    count(cocoNames, key(baseName(im.file_name)))
+  })
   const taken = new Map<string, CocoImage>()
-  for (const im of images) {
-    // Joined before .. is resolved, so ../images/a.jpg from the annotations folder is images/a.jpg
-    const path = normal(prefix ? `${prefix}/${im.file_name}` : im.file_name)
+  for (const [i, im] of images.entries()) {
+    const path = paths[i]
     let found = path === null ? undefined : inFolder.get(path)
+    if (found === undefined && path !== null) {
+      // In another case or Unicode form, which the file system takes for the same path
+      const same = byKey.get(key(path)) ?? []
+      if (same.length === 1 && cocoKeys.get(key(path)) === 1) found = same[0]
+    }
     if (found === undefined) {
       const own = baseName(im.file_name)
-      const candidates = byName.get(own) ?? []
-      if (candidates.length === 1 && cocoNames.get(own) === 1) found = candidates[0]
-      else if (candidates.length) {
+      const candidates = byOwn.get(key(own)) ?? []
+      if (candidates.length === 1 && cocoNames.get(key(own)) === 1) {
+        found = candidates[0]
+        byName.add(im.id)
+      } else if (candidates.length) {
         ambiguous.push({ image: im, candidates })
         // A video's frames are often named alike in each of its folders: a few are named, not every one
         const why = candidates.length === 1 ? `other images in the COCO file are named ${pathOf(own)} too`
@@ -914,5 +972,5 @@ export function matchCocoImages(images: CocoImage[], folder: string[], base = ''
     else taken.set(found, im)
     names.set(im.id, found)
   }
-  return { names, missing, ambiguous, issues }
+  return { names, byName, missing, ambiguous, issues }
 }

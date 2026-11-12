@@ -14,6 +14,7 @@ import { type CocoImage, type CocoImageResult, matchCocoImages, readCoco } from 
 import type { Issue, MaskBits } from '../shared/dataset'
 import type { Shape } from '../shared/labelfile'
 import { shapesFromPose, short } from '../shared/pose'
+import { nameKey } from './names'
 
 /** A COCO image matched to an image in the folder, and what its annotations give */
 export type CocoMatched = {
@@ -99,14 +100,17 @@ function tidy(p: string): string | null {
  * The folder a COCO file's names start from: the open folder, the COCO file's own folder or one
  * above it, or a folder its first images turn up in by name (val2017 for COCO's own layout). The
  * one under which most images are found by their paths, tried on a sample; none when two tie.
+ * Paths are compared as the file system compares them (nameKey).
  */
 export function startFolder(images: CocoImage[], folder: string[], at: string | null): string {
-  const names = new Set(folder)
-  const candidates = new Set<string>([''])
-  if (at !== null) for (let p = at; p; p = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '') candidates.add(p)
+  const names = new Set(folder.map(nameKey))
+  // Each folder by its key, as the open folder spells it: one folder spelt two ways is tried once
+  const candidates = new Map<string, string>([['', '']])
+  const add = (base: string) => { if (!candidates.has(nameKey(base))) candidates.set(nameKey(base), base) }
+  if (at !== null) for (let p = at; p; p = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '') add(p)
   const byName = new Map<string, string[]>()
   for (const f of folder) {
-    const own = f.slice(f.lastIndexOf('/') + 1)
+    const own = nameKey(f.slice(f.lastIndexOf('/') + 1))
     const list = byName.get(own)
     if (list) list.push(f)
     else byName.set(own, [f])
@@ -114,19 +118,21 @@ export function startFolder(images: CocoImage[], folder: string[], at: string | 
   for (const im of images.slice(0, 50)) {
     const name = tidy(im.file_name)
     if (!name) continue
-    for (const f of byName.get(name.slice(name.lastIndexOf('/') + 1)) ?? []) {
-      if (f.length > name.length && f.endsWith(`/${name}`)) candidates.add(f.slice(0, f.length - name.length - 1))
+    const key = nameKey(name), depth = name.split('/').length
+    for (const f of byName.get(nameKey(name.slice(name.lastIndexOf('/') + 1))) ?? []) {
+      // The folders above it; a key has the slashes of the path it's made from
+      if (nameKey(f).endsWith(`/${key}`)) add(f.split('/').slice(0, -depth).join('/'))
     }
   }
   if (candidates.size === 1) return ''
   const step = Math.max(1, Math.floor(images.length / SAMPLE))
   const sample = images.filter((_, i) => i % step === 0)
   let best = '', most = 0, tied = false
-  for (const base of candidates) {
+  for (const base of candidates.values()) {
     let found = 0
     for (const im of sample) {
       const p = tidy(base ? `${base}/${im.file_name}` : im.file_name)
-      if (p !== null && names.has(p)) found++
+      if (p !== null && names.has(nameKey(p))) found++
     }
     if (found > most) [best, most, tied] = [base, found, false]
     else if (found === most && found > 0) tied = true
@@ -135,11 +141,12 @@ export function startFolder(images: CocoImage[], folder: string[], at: string | 
 }
 
 // readCoco sums these up once per file: read a chunk at a time, they're summed again here
-const TALLIES = new Set(['coco-box-only', 'coco-unlabelled-keypoints', 'coco-no-keypoints', 'coco-crowd'])
+const TALLIES = new Set(['coco-box-only', 'coco-rotated-box', 'coco-unlabelled-keypoints', 'coco-no-keypoints', 'coco-crowd'])
 // readCoco's own words for each sum (src/shared/coco.ts), so a file read in chunks says what it says read whole
 function tallyMessage(code: string, file: string, n: number) {
   const one = n === 1
   if (code === 'coco-box-only') return `${file}: ${n} ${plural(n, 'annotation holds', 'annotations hold')} only a box, so ${plural(n, 'it becomes a rectangle', 'they become rectangles')}`
+  if (code === 'coco-rotated-box') return `${file}: ${n} ${plural(n, 'annotation is a box', 'annotations are boxes')} CVAT rotated (attributes.rotation), so ${plural(n, 'it becomes a rotated box, as CVAT shows it', 'they become rotated boxes, as CVAT shows them')}`
   if (code === 'coco-unlabelled-keypoints') return `${file}: ${n} ${plural(n, 'keypoint is', 'keypoints are')} marked not labelled (visibility 0), so ${plural(n, "it's", "they're")} left out`
   if (code === 'coco-no-keypoints') return `${file}: ${n} ${one ? 'annotation has' : 'annotations have'} no keypoints labelled, so ${one ? "it's read as a plain object" : "they're read as plain objects"}`
   return `${file}: ${n} ${one ? 'annotation is a crowd region' : 'annotations are crowd regions'} (iscrowd 1): the shapes made from ${one ? 'it' : 'them'} keep iscrowd, so an export writes ${one ? 'it as a crowd' : 'them as crowds'} again`
@@ -377,7 +384,7 @@ export class CocoSession {
     const rel = path.relative(root, path.dirname(file))
     const at = rel.startsWith('..') || path.isAbsolute(rel) ? null : rel.split(path.sep).join('/')
     const base = startFolder(head.images, folder, at)
-    const match = matchCocoImages(head.images, folder, base)
+    const match = matchCocoImages(head.images, folder, base, nameKey)
     issues.push(...match.issues)
     const known = new Set(head.images.map((im) => im.id))
     for (const im of head.images) if (match.names.has(im.id)) this.images.set(im.id, im)
@@ -408,7 +415,7 @@ export class CocoSession {
       for (const s of shapes) labels[s.label] = (labels[s.label] ?? 0) + 1
       const name = match.names.get(id)!
       matched.set(id, {
-        id, name, fileName: im.file_name, width: im.width, height: im.height, byName: tidy(base ? `${base}/${im.file_name}` : im.file_name) !== name,
+        id, name, fileName: im.file_name, width: im.width, height: im.height, byName: match.byName.has(id),
         annotations: this.annotations.get(id)!.length, shapes: shapes.length, labels, pixels: result.pixels
       })
       if (chunk) {

@@ -513,7 +513,9 @@ export function labelRows(image: DatasetImage, task: YoloTask, classes: string[]
   const objects = new Map<string | number, number[]>()
   image.shapes.forEach((s, i) => {
     const key = s.group_id === null ? i : `${s.label}\u0000${s.group_id}`
-    objects.set(key, [...(objects.get(key) ?? []), i])
+    const members = objects.get(key)
+    if (members) members.push(i)
+    else objects.set(key, [i])
   })
   for (const members of objects.values()) {
     const parts = members.map(partOf).filter((p): p is Part => p !== null)

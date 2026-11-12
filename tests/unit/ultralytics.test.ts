@@ -290,6 +290,17 @@ describe('label rows written for each task', () => {
     expect(edge.issues.map((i) => [i.code, i.shape])).toEqual([['pose-no-keypoints', 0], ['pose-no-keypoints', 1], ['yolo-outside', 0], ['yolo-clamped', 1]])
   })
 
+  test('pose: shapes of a class sharing a group are one object in parts, as labelme draws a person hidden in part, its box around them all', () => {
+    const out = labelRows(image([
+      newShape('person', 'polygon', [[10, 5], [30, 5], [20, 20]], { group_id: 1 }), newShape('person', 'polygon', [[40, 15], [60, 15], [50, 25]], { group_id: 1 }),
+      newShape('nose', 'point', [[20, 10]], { group_id: 1 })
+    ]), 'pose', ['person', 'hand'], SCHEMA)
+    expect(lines(out.text)).toEqual(['0 0.350000 0.300000 0.500000 0.400000 0.200000 0.200000 2 0 0 0 0 0 0'])
+    expect(out.issues.map((i) => [i.severity, i.code, i.shape, i.message])).toEqual([
+      ['info', 'pose-parts', 0, 'a.png: person is 2 shapes of group 1, one object, so its box is around them all']
+    ])
+  })
+
   test("pose: an object whose box has no width or height is left out with its keypoints, as Ultralytics drops it in training, and so is one only touching the image", () => {
     const out = labelRows(image([
       rect('person', [[20, 10], [20, 30]], { group_id: 1 }), newShape('nose', 'point', [[20, 20]], { group_id: 1 }),
@@ -674,6 +685,20 @@ describe('datasets on disk, laid out as tools write them (tests/fixtures/ultraly
     expect(items(d)).toEqual([['', [['x.jpg', 'x.txt'], ['y.jpg', 'y.txt']]]])
     expect(d.guess.task).toBe('detect')
   })
+  test("a CVAT YOLO 1.1 export: no data.yaml, the class names in obj.names, which obj.data names as data/obj.names", async () => {
+    const d = await readYoloDataset(path.join(LAYOUTS, 'cvat11'))
+    expect(d.yaml).toBeNull()
+    expect(d.names).toEqual(['car', 'tree'])
+    expect(items(d)).toEqual([['', [['obj_train_data/frame_000000.png', 'obj_train_data/frame_000000.txt'], ['obj_train_data/frame_000001.png', 'obj_train_data/frame_000001.txt']]]])
+    expect(d.issues.map((i) => [i.code, i.message])).toEqual([['yolo-no-yaml', 'cvat11 has no data.yaml, so the class names come from obj.names']])
+    expect(d.guess.task).toBe('detect')
+  })
+  test("a Roboflow YOLO Darknet download: no data.yaml, the class names in each split's _darknet.labels", async () => {
+    const d = await readYoloDataset(path.join(LAYOUTS, 'darknet'))
+    expect(d.names).toEqual(['head', 'helmet'])
+    expect(items(d)).toEqual([['', [['train/e.jpg', 'train/e.txt'], ['valid/f.jpg', 'valid/f.txt']]]])
+    expect(d.issues.map((i) => [i.code, slash(i.message)])).toEqual([['yolo-no-yaml', 'darknet has no data.yaml, so the class names come from train/_darknet.labels']])
+  })
   test("lists of images that aren't there fall back to images/<split>; a path from another computer to the YAML's folder; two datasets' YAMLs and no images are errors", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'seamtag-yolo-'))
     try {
@@ -844,6 +869,35 @@ describe('datasets on disk, wherever they sit', () => {
     await expect(readYoloDataset(path.join(dir, 'ds'), { signal: stop.signal })).rejects.toThrow(/aborted/)
     expect(listed.length).toBe(3)
     await expect(readYoloDataset(path.join(dir, 'ds'), { signal: AbortSignal.abort() })).rejects.toThrow(/aborted/)
+  })
+
+  test("darknet's names: the file obj.data names, inside the dataset, before obj.names or the one .names file; labelmaps that differ name nothing", async () => {
+    put('dn/a.jpg')
+    put('dn/a.txt', '1 0.5 0.5 0.2 0.2\n')
+    put('dn/obj.names', 'car\ntree\n')
+    put('dn/classes.names', 'cat\ndog\n')
+    put('dn/obj.data', 'classes = 2\r\nnames = data\\classes.names\r\n')
+    const names = async () => (await readYoloDataset(path.join(dir, 'dn'))).names
+    expect(await names()).toEqual(['cat', 'dog'])
+    // A file outside the dataset isn't read, as datumaro reads none
+    put('elsewhere.names', 'x\ny\n')
+    put('dn/obj.data', 'names = ../elsewhere.names\n')
+    expect(await names()).toEqual(['car', 'tree'])
+    rmSync(path.join(dir, 'dn', 'obj.names'))
+    expect(await names()).toEqual(['cat', 'dog'])
+    put('dn/more.names', 'x\n')
+    expect(await names()).toEqual(['class_0', 'class_1'])
+    // Roboflow's labelmaps, one in each split's folder, must agree
+    put('rf/train/_darknet.labels', 'head\nhelmet\n')
+    put('rf/valid/_darknet.labels', 'helmet\nhead\n')
+    put('rf/train/a.jpg')
+    put('rf/train/a.txt', '1 0.5 0.5 0.2 0.2\n')
+    const rf = await readYoloDataset(path.join(dir, 'rf'))
+    expect(rf.names).toEqual(['class_0', 'class_1'])
+    expect(rf.issues.map((i) => [i.severity, slash(i.message)])).toEqual([
+      ['warning', 'train/_darknet.labels and 1 more labelmap name the classes differently, so neither is used'],
+      ['info', 'rf has neither data.yaml nor classes.txt, so the classes are named class_0 to class_1']
+    ])
   })
 
   test('without data.yaml, classes are named up to class_99999: a row of a class past it is told and left out', async () => {

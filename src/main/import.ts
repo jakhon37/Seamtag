@@ -5,7 +5,7 @@
 // saveLabels an image at a time, as LabelMe JSON, which holds every shape type, each image in one
 // turn of the label files' queue. COCO and YOLO are converted in, never edited in place: each
 // image's own label file stays the working copy.
-import { existsSync, promises as fs } from 'fs'
+import { constants, existsSync, promises as fs } from 'fs'
 import path from 'path'
 import type { Worker } from 'worker_threads'
 import { MAX_GROUP } from '../shared/coco'
@@ -17,8 +17,9 @@ import { countRows, labelText, newRowStats, readRows, YOLO_TASKS, type YoloTask 
 import { imageSize } from './images'
 import { type CocoAnswer, type CocoAsk, type CocoFound, type CocoProgress, CocoSession, type CocoShapes, tooBig } from './importWorker'
 import { encodeMask } from './masks'
+import { nameKey } from './names'
 import {
-  type Found, findLabels, folderOf, inTurn, labelPath, readLabels, type Saved, saveLabels, type SaveRequest, sendToTrash, serial, summarizeAll
+  type Found, findLabels, folderOf, inTurn, labelPath, readLabels, renameRetrying, type Saved, saveLabels, type SaveRequest, sendToTrash, serial, summarizeAll
 } from './project'
 import { readYoloDataset, type YoloDataset } from './ultralytics'
 
@@ -190,6 +191,7 @@ const TITLES: Record<string, string> = {
   'coco-bad-attributes': "Seamtag's attributes not used",
   'coco-bad-keypoints': "Keypoints that can't be read",
   'coco-box-only': 'Boxes only',
+  'coco-rotated-box': 'Rotated boxes',
   'coco-unlabelled-keypoints': 'Keypoints not labelled',
   'coco-no-keypoints': 'Posed objects without keypoints',
   'coco-crowd': 'Crowd regions',
@@ -256,8 +258,6 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`
 const posix = (p: string) => p.split(path.sep).join('/')
 const stemOf = (name: string) => name.replace(/\.[^./]+$/, '')
-// Windows and macOS find a.json by the name A.json
-const fold = process.platform === 'win32' || process.platform === 'darwin' ? (s: string) => s.toLowerCase() : (s: string) => s
 const say = (severity: Severity, code: string, image: string | null, text: string): Issue => ({ severity, code, image, message: text })
 
 function begin() {
@@ -361,8 +361,9 @@ async function readNew(folder: ReturnType<typeof folderOf>, req: ImportRequest, 
   if (req.kind === 'coco') await readCocoSource(s, images, progress, signal)
   else await readYoloSource(s, images, progress, signal)
   if (signal.aborted) return quit()
-  // Two images whose LabelMe files are one file (a.jpg and a.png both have a.json) can't both have their own
-  const keyOf = (name: string) => (folder.outputFile ? '' : fold(stemOf(name)))
+  // Two images whose LabelMe files are one file (a.jpg and a.png both have a.json, and on Windows
+  // and macOS A.png too) can't both have their own
+  const keyOf = (name: string) => (folder.outputFile ? '' : nameKey(stemOf(name)))
   const keys = new Map<string, string[]>()
   for (const name of folder.images) {
     const list = keys.get(keyOf(name))
@@ -536,26 +537,48 @@ async function readYoloSource(s: Session, folder: string[], progress: (p: Import
   const items = new Map<string, string | null>()
   for (const split of dataset.splits) for (const it of split.items) if (!items.has(it.image)) items.set(it.image, it.label)
   s.images = items.size
-  // By path when the image is in the open folder, else by its file name when one image has it on each side
+  // By path when the image is in the open folder, else by its file name when one image has it on
+  // each side. A path or a name the folder has only in another case or Unicode form, which the file
+  // system takes for the same (nameKey), is matched when exactly one image on each side has its key.
   const names = new Set(folder)
-  const ours = new Map<string, string[]>()
-  for (const f of folder) {
-    const own = f.slice(f.lastIndexOf('/') + 1)
-    ours.set(own, [...(ours.get(own) ?? []), f])
+  // Lists grow in place: a copy at each would take as long as the square of how many share a name
+  const add = (lists: Map<string, string[]>, key: string, f: string) => {
+    const list = lists.get(key)
+    if (list) list.push(f)
+    else lists.set(key, [f])
   }
-  const theirs = new Map<string, number>()
-  for (const image of items.keys()) theirs.set(path.basename(image), (theirs.get(path.basename(image)) ?? 0) + 1)
-  const shown = (file: string) => posix(path.relative(dataset.root, file))
-  for (const [image, label] of items) {
+  const ours = new Map<string, string[]>(), ourPaths = new Map<string, string[]>()
+  for (const f of folder) {
+    add(ours, nameKey(f.slice(f.lastIndexOf('/') + 1)), f)
+    add(ourPaths, nameKey(f), f)
+  }
+  const placed = [...items].map(([image, label]) => {
     const rel = path.relative(s.root, image)
-    const at = rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? posix(rel) : null
-    if (at !== null && names.has(at)) {
-      s.entries.push(entry(at, label, false))
+    return { image, label, at: rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? posix(rel) : null }
+  })
+  const theirs = new Map<string, number>(), theirPaths = new Map<string, number>()
+  const count = (counts: Map<string, number>, key: string) => counts.set(key, (counts.get(key) ?? 0) + 1)
+  for (const { image, at } of placed) {
+    count(theirs, nameKey(path.basename(image)))
+    if (at !== null) count(theirPaths, nameKey(at))
+  }
+  // The folder's image at a path: as it is, else the one image with its key, when no other image of
+  // the dataset has that key
+  const atPath = (at: string) => {
+    if (names.has(at)) return at
+    const same = ourPaths.get(nameKey(at))
+    return same?.length === 1 && theirPaths.get(nameKey(at)) === 1 ? same[0] : null
+  }
+  const shown = (file: string) => posix(path.relative(dataset.root, file))
+  for (const { image, label, at } of placed) {
+    const found = at === null ? null : atPath(at)
+    if (found !== null) {
+      s.entries.push(entry(found, label, false))
       continue
     }
     const own = path.basename(image)
-    const candidates = ours.get(own) ?? []
-    if (candidates.length === 1 && theirs.get(own) === 1) {
+    const candidates = ours.get(nameKey(own)) ?? []
+    if (candidates.length === 1 && theirs.get(nameKey(own)) === 1) {
       s.entries.push(entry(candidates[0], label, true))
       continue
     }
@@ -941,9 +964,17 @@ function writeOne(s: Session, e: Entry, shapes: Shape[], policy: ImportPolicy): 
       return { skip: { why: 'failed', message: `${old} couldn't go to the trash, so it's left unchanged: ${message(err)}` } }
     }
     try {
-      await fs.rename(tmp, found.file)
+      await renameRetrying(tmp, found.file)
     } catch (err) {
-      return { trashed: 1, changed: true, skip: { why: 'failed', message: `${old} went to the trash, but ${e.name}'s new labels couldn't take its name: they're in ${path.basename(tmp)} (${message(err)})` } }
+      // A file something still holds, as a sync client such as OneDrive can for longer than the
+      // retries wait, can most likely still be read: a copy of it takes the old one's name, so the
+      // image isn't left without labels
+      try {
+        await fs.copyFile(tmp, found.file, constants.COPYFILE_EXCL)
+      } catch {
+        return { trashed: 1, changed: true, skip: { why: 'failed', message: `${old} went to the trash, but ${e.name}'s new labels couldn't take its name: they're in ${path.basename(tmp)} (${message(err)})` } }
+      }
+      await fs.rm(tmp, { force: true, maxRetries: 3 }).catch(() => {})
     }
     return { written: shapes, trashed: 1 }
   })

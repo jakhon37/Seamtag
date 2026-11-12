@@ -327,11 +327,12 @@ export function shapeBox(s: Shape, mask?: MaskBits | null): [number, number, num
 const pointVisibility = (s: Shape): 1 | 2 => (s.flags.difficult === true || s.flags.occluded === true ? 1 : 2)
 
 /**
- * The posed objects in an image: each group_id holding a box (any closed shape labelled with a
- * class of the schema) and points labelled with its keypoints' names, and boxes of those classes
- * that have no group, with no keypoints. A point marked difficult or occluded is labelled but
- * hidden (COCO's visibility 1), others are seen (2). Problems come back as issues: errors for
- * groups that can't be read one way only, which a pose export stops on.
+ * The posed objects in an image: each group_id holding an object of a class of the schema (its
+ * closed shapes labelled with the class, one or several, its box around them all) and points
+ * labelled with its keypoints' names, and shapes of those classes that have no group, with no
+ * keypoints. A point marked difficult or occluded is labelled but hidden (COCO's visibility 1),
+ * others are seen (2). Problems come back as issues: errors for groups that can't be read one
+ * way only, which a pose export stops on.
  */
 export function poseInstances(image: DatasetImage, schema: KeypointSchema): { instances: PoseInstance[]; issues: Issue[] } {
   const issues: Issue[] = []
@@ -362,22 +363,28 @@ export function poseInstances(image: DatasetImage, schema: KeypointSchema): { in
   })
   for (const [g, group] of groups) {
     const named = group.points.filter((i) => keypointNames.has(image.shapes[i].label))
-    // Groups with neither a box of a pose class nor a known keypoint are labelme's groups of other shapes
+    // Groups with neither a shape of a pose class nor a known keypoint are labelme's groups of other shapes
     if (!group.regions.length && !named.length) continue
-    if (group.regions.length > 1) {
-      say('error', 'pose-two-boxes', `group ${g} has ${group.regions.length} boxes (${group.regions.map((i) => image.shapes[i].label).join(', ')}), so it's left out: give each object its own group`, group.regions[1])
-      continue
-    }
     let label: string
     let box: [number, number, number, number] | null
     if (group.regions.length) {
-      const r = group.regions[0]
-      label = image.shapes[r].label
-      box = shapeBox(image.shapes[r], image.masks[r])
-      if (!box) {
-        say('error', 'pose-empty-box', `group ${g}'s ${label} has no pixels, so the group is left out`, r)
+      label = image.shapes[group.regions[0]].label
+      const other = group.regions.find((i) => image.shapes[i].label !== label)
+      if (other !== undefined) {
+        const labels = [...new Set(group.regions.map((i) => image.shapes[i].label))]
+        say('error', 'pose-two-classes', `group ${g} has shapes of ${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}, so it's left out: give each object its own group`, other)
         continue
       }
+      // Shapes sharing a label and a group_id are one object, as labelme2coco and the other
+      // exports take them, such as a person drawn in two parts: its box is around them all, as
+      // COCO's bbox is
+      const boxes = group.regions.map((i) => shapeBox(image.shapes[i], image.masks[i])).filter((b) => b !== null)
+      if (!boxes.length) {
+        say('error', 'pose-empty-box', `group ${g}'s ${label} has no pixels, so the group is left out`, group.regions[0])
+        continue
+      }
+      box = boxes.reduce((a, b) => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])])
+      if (group.regions.length > 1) say('info', 'pose-parts', `${label} is ${group.regions.length} shapes of group ${g}, one object, so its box is around them all`, group.regions[0])
     } else {
       const names = named.map((i) => image.shapes[i].label)
       const fits = Object.keys(schema.classes).filter((c) => names.every((n) => schema.classes[c].includes(n)))

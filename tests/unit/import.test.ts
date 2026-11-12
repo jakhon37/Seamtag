@@ -7,6 +7,7 @@ import { addShapes, closeImport, type ImportPolicy, type ImportPreview, type Imp
 import { CocoSession, readTop, shapesOf, startFolder } from '../../src/main/importWorker'
 import { setCacheDir } from '../../src/main/images'
 import { decodeMask } from '../../src/main/masks'
+import { setFolding } from '../../src/main/names'
 import { openProject, serial, setTrash } from '../../src/main/project'
 import { type CocoEntry, readCoco, writeCoco } from '../../src/shared/coco'
 import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
@@ -193,6 +194,31 @@ describe('a COCO file', () => {
     expect(group(q, 'coco-image-ambiguous')!.rows[0]).toContain('its name matches train/x.png, val/x.png')
   })
 
+  test("names in another case or Unicode form are matched as the file system matches them: by path, and only where it would", async () => {
+    const nfc = '사과.png'.normalize('NFC'), nfd = '사과.png'.normalize('NFD')
+    const dir = folder()
+    for (const n of [nfd, 'images/photo.png', 'images/plain.png']) await png(path.join(dir, n))
+    const shape = [newShape('cat', 'rectangle', [[1, 1], [9, 9]])]
+    const file = cocoFile(path.join(folder(), 'c.json'), [nfc, 'images/PHOTO.PNG', 'images/plain.png'].map((n) => entry(n, shape)), ['cat'])
+    const root = await open(dir)
+    try {
+      // As Linux compares names: only the one named as it is
+      setFolding('exact')
+      let p = await read(root, { kind: 'coco', path: file })
+      expect([p.matched, p.missing]).toEqual([1, 2])
+      closeImport()
+      // As macOS compares them, case and Unicode form aside
+      setFolding('case-and-form')
+      p = await read(root, { kind: 'coco', path: file })
+      expect([p.matched, p.byName, p.missing]).toEqual([3, 0, 0])
+      const r = await save()
+      expect(r.names.sort()).toEqual(['images/photo.png', 'images/plain.png', nfd].sort())
+      expect(brief(doc(dir, nfd.replace(/\.png$/, '.json')).shapes)).toEqual(brief(shape))
+    } finally {
+      setFolding()
+    }
+  })
+
   test('the folder names start from is one that finds images by path; none when two find as many', () => {
     const im = (file_name: string, id = 1) => ({ id, width: 1, height: 1, file_name })
     expect(startFolder([im('a.jpg'), im('b.jpg', 2)], ['val2017/a.jpg', 'val2017/b.jpg', 'train2017/c.jpg'], null)).toBe('val2017')
@@ -247,7 +273,9 @@ describe('a COCO file', () => {
       ann(1, {}), ann(1, { segmentation: [] }), ann(2, { segmentation: [] }), ann(2, { segmentation: [[1, 2, 3]] }),
       ann(3, { iscrowd: 1, segmentation: { size: [H, W], counts: [31, 5, 25, 5, 1134] } }), ann(4, { category_id: 9 }),
       ann(5, { category_id: 2, keypoints: [3, 3, 2, 0, 0, 0], num_keypoints: 1 }), ann(5, { category_id: 2, keypoints: [0, 0, 0, 0, 0, 0] }),
-      ann(6, { category_id: 2, keypoints: [4, 4, 1, 5, 5, 2] }), ann(77, {}), 'not an annotation'
+      ann(6, { category_id: 2, keypoints: [4, 4, 1, 5, 5, 2] }), ann(77, {}), 'not an annotation',
+      // CVAT's rotated boxes, in two chunks
+      ann(2, { segmentation: [], attributes: { occluded: false, rotation: 45 } }), ann(6, { segmentation: [], attributes: { occluded: false, rotation: 30 } })
     ]
     const file = path.join(dir, 'c.json')
     writeFileSync(file, JSON.stringify({ images, annotations, categories: [cat, person] }))
@@ -262,7 +290,8 @@ describe('a COCO file', () => {
     const direct = readCoco(readFileSync(file, 'utf8'), 'c.json')
     expect(a.issues.map((i) => i.message).sort()).toEqual(direct.issues.map((i) => i.message).sort())
     expect(whole.shapes(ids)).toEqual(ids.map((n) => ({ id: n, ...shapesOf(direct.results.get(n)!) })))
-    expect(a.issues.map((i) => i.code)).toEqual(expect.arrayContaining(['coco-box-only', 'coco-crowd', 'coco-no-keypoints', 'coco-unlabelled-keypoints', 'coco-unknown-image', 'coco-bad-annotation']))
+    expect(a.issues.map((i) => i.code)).toEqual(expect.arrayContaining(['coco-box-only', 'coco-rotated-box', 'coco-crowd', 'coco-no-keypoints', 'coco-unlabelled-keypoints', 'coco-unknown-image', 'coco-bad-annotation']))
+    expect(b.issues.find((i) => i.code === 'coco-rotated-box')!.message).toBe('c.json: 2 annotations are boxes CVAT rotated (attributes.rotation), so they become rotated boxes, as CVAT shows them')
   })
 
   test("its lists are parsed a slice at a time, giving what JSON.parse gives for the keys read", () => {
@@ -542,6 +571,21 @@ describe('images that have labels', () => {
     expect(counted()).toEqual(['a.png', 'n.png'])
   })
 
+  test("when Replace's new file is still held after the retries, as OneDrive can hold one, a copy of it takes the old one's name", async () => {
+    const { dir, file, root } = await setUp()
+    await read(root, { kind: 'coco', path: file })
+    // Windows refuses to rename a file something holds; it can still be read
+    const rename = fsp.rename.bind(fsp)
+    vi.spyOn(fsp, 'rename').mockImplementation((async (from: string, to: string) => {
+      if (/a\.json\.\d+\.\d+\.tmp$/.test(String(from)) && path.basename(String(to)) === 'a.json') throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' })
+      return rename(from, to)
+    }) as typeof rename)
+    const r = await save('replace')
+    expect([r.written, r.trashed, group(r, 'failed')]).toEqual([2, 1, undefined])
+    expect(brief(doc(dir, 'a.json').shapes)).toEqual(brief(imported()))
+    expect(readdirSync(dir).filter((n) => n.endsWith('.tmp'))).toEqual([])
+  })
+
   test("each image is looked at and written in one turn of the label files' queue, so labels written meanwhile aren't lost", async () => {
     for (const policy of ['skip', 'add'] as const) {
       const dir = folder()
@@ -595,7 +639,10 @@ describe('images that have labels', () => {
       newShape('person', 'polygon', [[5, 5], [22, 6], [20, 25], [6, 24]], { group_id: 1 }),
       newShape('nose', 'point', [[10, 10]], { group_id: 1 }),
       newShape('eye', 'point', [[12, 9]], { group_id: 1, flags: { difficult: true } }),
-      newShape('dog', 'rectangle', [[25, 3], [35, 13]])
+      newShape('dog', 'rectangle', [[25, 3], [35, 13]]),
+      // A polygon lying on its own box, which isn't taken for one
+      newShape('person', 'polygon', [[24, 16], [36, 16], [36, 28], [24, 28]], { group_id: 2 }),
+      newShape('nose', 'point', [[30, 20]], { group_id: 2 })
     ]
     const im = image('p.png', shapes)
     const poses = poseInstances(im, schema).instances
@@ -607,13 +654,19 @@ describe('images that have labels', () => {
     const root = await open(dir)
     await read(root, { kind: 'coco', path: objects })
     await save('skip')
-    expect(brief(doc(dir, 'p.json').shapes)).toEqual(brief([shapes[0], shapes[3]]))
+    expect(brief(doc(dir, 'p.json').shapes)).toEqual(brief([shapes[0], shapes[3], shapes[4]]))
     await read(root, { kind: 'coco', path: keypoints })
     const r = await save('add')
-    expect([r.shapes, r.repeated]).toEqual([2, 1])
+    expect([r.shapes, r.repeated]).toEqual([3, 2])
     const out = doc(dir, 'p.json').shapes
-    expect(brief(out)).toEqual(brief([shapes[0], shapes[3], shapes[1], shapes[2]]))
-    expect(out[3].flags).toEqual({ difficult: true })
+    expect(brief(out)).toEqual(brief([shapes[0], shapes[3], shapes[4], shapes[1], shapes[2], shapes[5]]))
+    expect(out[4].flags).toEqual({ difficult: true })
+    // The keypoints file alone gives back the outlines as they were
+    const alone = folder()
+    await png(path.join(alone, 'p.png'))
+    await read(await open(alone), { kind: 'coco', path: keypoints })
+    await save('skip')
+    expect(brief(doc(alone, 'p.json').shapes)).toEqual(brief([shapes[0], shapes[4], shapes[1], shapes[2], shapes[5]]))
   })
 
   test("Pascal VOC, YOLO and CreateML labels become LabelMe JSON, their boxes kept by Add and their old files sent to the trash", async () => {
@@ -814,6 +867,15 @@ describe('a YOLO dataset', () => {
       const r = await save()
       expect(r.names.sort()).toEqual([...expected])
     }
+    // Their darknet downloads, without data.yaml, name the classes in their own files
+    for (const [layout, labels] of [['cvat11', { 'obj_train_data/frame_000000': 'tree', 'obj_train_data/frame_000001': 'car' }], ['darknet', { 'train/e': 'helmet', 'valid/f': 'head' }]] as const) {
+      const dir = folder()
+      cpSync(path.join(__dirname, `../fixtures/ultralytics/layouts/${layout}`), dir, { recursive: true })
+      const p = await read(await open(dir), { kind: 'yolo', path: dir })
+      expect(p.labels.map((l) => l.label).sort()).toEqual(Object.values(labels).sort())
+      await save()
+      for (const [image, label] of Object.entries(labels)) expect(doc(dir, `${image}.json`).shapes.map((sh) => sh.label)).toEqual([label])
+    }
   })
 
   test('a dataset written by labelRows and writeDataYaml comes back as it was, for segment', async () => {
@@ -946,6 +1008,44 @@ describe('a YOLO dataset', () => {
     expect([p.matched, p.missing, p.ambiguous]).toEqual([0, 1, 1])
     expect(group(p, 'import-image-ambiguous')!.rows).toEqual(["images/train/a.png isn't at that path in the folder and its name matches x/a.png, y/a.png, so its labels are left out rather than guessed"])
     expect(group(p, 'import-image-missing')!.rows).toEqual(["images/train/q.png isn't in the folder, so its labels are left out"])
+  })
+
+  test("an image named in another case or Unicode form is matched by its name as the file system matches it", async () => {
+    const nfc = '사과.png'.normalize('NFC'), nfd = '사과.png'.normalize('NFD')
+    const ds = await dataset({ [nfc]: '0 0.5 0.5 0.5 0.5\n', 'PHOTO.PNG': '0 0.5 0.5 0.5 0.5\n' }, { 0: 'cat' })
+    const dir = folder()
+    for (const n of [nfd, 'sub/photo.png']) await png(path.join(dir, n))
+    const root = await open(dir)
+    try {
+      setFolding('exact')
+      expect((await read(root, { kind: 'yolo', path: ds })).missing).toBe(2)
+      closeImport()
+      setFolding('case-and-form')
+      const p = await read(root, { kind: 'yolo', path: ds })
+      expect([p.matched, p.byName, p.missing]).toEqual([2, 2, 0])
+      expect((await save()).names.sort()).toEqual(['sub/photo.png', nfd].sort())
+    } finally {
+      setFolding()
+    }
+  })
+
+  test('a folder of 40,000 images of one name, one to a folder, is matched in a time their number gives, not its square', async () => {
+    const ds = await dataset({ 'rgb.png': '0 0.5 0.5 0.5 0.5\n' }, { 0: 'cat' })
+    const dir = folder()
+    // The folders are listed, not made: making them would take longer than the test
+    const readdir = fsp.readdir.bind(fsp)
+    const listed = (name: string, isDir: boolean) => ({ name, isDirectory: () => isDir, isFile: () => !isDir, isSymbolicLink: () => false })
+    vi.spyOn(fsp, 'readdir').mockImplementation((async (p: string, o: unknown) => {
+      if (p === dir) return Array.from({ length: 40_000 }, (_, i) => listed(`s${i}`, true))
+      if (path.dirname(p) === dir) return [listed('rgb.png', false)]
+      return readdir(p, o as never)
+    }) as never)
+    const root = await open(dir)
+    const started = performance.now()
+    const p = await read(root, { kind: 'yolo', path: ds })
+    expect(performance.now() - started).toBeLessThan(3000)
+    expect([p.matched, p.ambiguous]).toEqual([0, 1])
+    expect(group(p, 'import-image-ambiguous')!.rows[0]).toContain('its name matches s0/rgb.png, s1/rgb.png, s2/rgb.png and 39997 more')
   })
 
   test('a thousand label files are read 16 at a time, and messages come a page at a time', async () => {

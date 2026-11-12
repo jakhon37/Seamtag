@@ -2,7 +2,8 @@
 // images and labels without one. Splits are found as Ultralytics 8.4.211 finds them
 // (check_det_dataset and BaseDataset.get_img_files in ultralytics/data/), each image's label file
 // by img2label_paths, and every label file's rows are counted for guessing the task. Roboflow's
-// ../train/images and CVAT's data/images/... lists are read as those tools mean them.
+// ../train/images and CVAT's data/images/... lists are read as those tools mean them, and so are
+// darknet's files of class names, in CVAT's YOLO 1.1 and Roboflow's YOLO Darknet downloads.
 import { promises as fs } from 'fs'
 import path from 'path'
 import type { Issue, Severity } from '../shared/dataset'
@@ -183,13 +184,62 @@ const splitRank = (name: string) => (SPLIT_ORDER.includes(name) ? SPLIT_ORDER.in
 // "a.txt", or "a.txt and 2 more label files", for messages about many files
 const some = (first: string, n: number, kind: string) => (n > 1 ? `${first} and ${n - 1} more ${kind}${n > 2 ? 's' : ''}` : first)
 
+// A darknet .data file is a few lines of key = value: a bigger one is something else
+const DATA_FILE_BYTES = 64 * 2 ** 10
+// Roboflow's YOLO Darknet labelmap, one in each split's folder: _darknet.labels, as its downloads
+// name it, or darknet.labels, as its page on the format does
+const DARKNET_LABELS = new Set(['_darknet.labels', 'darknet.labels'])
+
+/**
+ * The class names of a darknet dataset, one a line, for a folder with neither data.yaml nor
+ * classes.txt, found as datumaro, which CVAT reads and writes them with, finds them: the file the
+ * .data file's names line gives, inside the dataset (CVAT's YOLO 1.1 writes obj.data with
+ * names = data/obj.names, a path from darknet's own folder, which datumaro takes from the .data
+ * file's folder without its data/); else obj.names, or the one .names file, at the top; else
+ * Roboflow's labelmap, _darknet.labels in each split's folder, when they're all the same.
+ * `files` is every file under `root`.
+ */
+async function darknetNames(root: string, files: string[], say: (s: Severity, code: string, m: string) => void): Promise<{ names: string[]; file: string } | null> {
+  const listed = new Set(files)
+  const top = files.filter((f) => path.dirname(f) === root)
+  const named = (ext: string, name: string) => {
+    const all = top.filter((f) => path.extname(f).toLowerCase() === ext)
+    return all.find((f) => path.basename(f).toLowerCase() === name) ?? (all.length === 1 ? all[0] : null)
+  }
+  const read = async (file: string) => {
+    const text = await fs.readFile(file, 'utf8').catch(() => null)
+    return text === null ? null : { names: readClasses(text), file }
+  }
+  const data = named('.data', 'obj.data')
+  if (data && ((await stat(data))?.size ?? Infinity) <= DATA_FILE_BYTES) {
+    let given = ''
+    for (const line of (await fs.readFile(data, 'utf8').catch(() => '')).split(/\r\n|\r|\n/)) {
+      const m = /^\s*(\w+)\s*=\s*(.+)$/.exec(line)
+      if (m?.[1] === 'names') given = m[2].trim().replace(/\\/g, '/')
+    }
+    for (const p of given.startsWith('data/') ? [given, given.slice(5)] : given ? [given] : []) {
+      const file = path.resolve(path.dirname(data), p)
+      if (listed.has(file)) return read(file)
+    }
+  }
+  const names = named('.names', 'obj.names')
+  if (names) return read(names)
+  const maps = sortPaths(files.filter((f) => DARKNET_LABELS.has(path.basename(f))))
+  if (!maps.length) return null
+  const lists = (await Promise.all(maps.map(read))).filter((l) => l !== null)
+  if (lists.every((l) => l.names.join('\n') === lists[0].names.join('\n'))) return lists[0] ?? null
+  say('warning', 'yolo-no-yaml', `${some(path.relative(root, maps[0]), maps.length, 'labelmap')} name the classes differently, so ${maps.length > 2 ? 'none' : 'neither'} is used`)
+  return null
+}
+
 /**
  * A dataset from a data.yaml file, or a folder: its own data.yaml (found as Ultralytics finds it),
  * or, without one, the images under it, split by their folders, with names from a classes.txt at
- * the top or in labels/, or class_0, class_1 and so on. A data.yaml's images have their labels
- * where Ultralytics looks for them, and nowhere else; a folder without one is read in place: the
- * images folder rule counts from the folder (so folders above it named images don't count), then
- * a label beside its image is taken, then one where Ultralytics' rule finds it. Nothing is written.
+ * the top or in labels/, else from darknet's files (darknetNames), or class_0, class_1 and so on.
+ * A data.yaml's images have their labels where Ultralytics looks for them, and nowhere else; a
+ * folder without one is read in place: the images folder rule counts from the folder (so folders
+ * above it named images don't count), then a label beside its image is taken, then one where
+ * Ultralytics' rule finds it. Nothing is written.
  * `signal` stops it, which throws its reason; `most` is how many files its folders may hold.
  */
 export async function readYoloDataset(target: string, { signal, most = MOST_FILES }: { signal?: AbortSignal; most?: number } = {}): Promise<YoloDataset> {
@@ -275,6 +325,11 @@ export async function readYoloDataset(target: string, { signal, most = MOST_FILE
         say('info', 'yolo-no-yaml', `${path.basename(target)} has no data.yaml, so the class names come from ${path.relative(target, classes)}`)
         break
       }
+    }
+    const darknet = data.names.length ? null : await darknetNames(root, files ?? [], say)
+    if (darknet) {
+      data.names = darknet.names
+      say('info', 'yolo-no-yaml', `${path.basename(target)} has no data.yaml, so the class names come from ${path.relative(target, darknet.file)}`)
     }
   }
 

@@ -12,6 +12,11 @@ Each folder under layouts/ is made up here, with 16 x 16 grey images:
   with no path), keypoints with kpt_shape and kpt_names as coco8-pose.yaml has them
 - bare: images/ and labels/ with a classes.txt and no data.yaml, rotated boxes
 - flat: X-AnyLabeling's export, each .txt beside its image and a classes.txt, boxes
+- cvat11: a CVAT "YOLO 1.1" export, darknet's layout as datumaro writes it (obj.data naming
+  data/obj.names, a path from darknet's own folder; train.txt; each .txt beside its image in
+  obj_train_data/), boxes
+- darknet: a Roboflow "YOLO Darknet" download (train/ and valid/, each .txt beside its image and the
+  class names in each folder's _darknet.labels), boxes
 """
 import shutil
 from pathlib import Path
@@ -111,5 +116,19 @@ write("flat/classes.txt", "cat\ndog\n")
 for name, rows in [("x", "0 0.500000 0.500000 0.500000 0.500000\n"), ("y", "1 0.250000 0.250000 0.250000 0.250000\n")]:
     image(f"flat/{name}.jpg")
     write(f"flat/{name}.txt", rows)
+
+# CVAT's YOLO 1.1: no data.yaml or classes.txt, the class names in obj.names
+write("cvat11/obj.data", "classes = 2\ntrain = data/train.txt\nnames = data/obj.names\nbackup = backup/\n")
+write("cvat11/obj.names", "car\ntree\n")
+write("cvat11/train.txt", "data/obj_train_data/frame_000000.png\ndata/obj_train_data/frame_000001.png\n")
+for name, rows in [("frame_000000", "1 0.500000 0.500000 0.250000 0.250000\n"), ("frame_000001", "0 0.250000 0.250000 0.125000 0.250000\n")]:
+    image(f"cvat11/obj_train_data/{name}.png")
+    write(f"cvat11/obj_train_data/{name}.txt", rows)
+
+# Roboflow's YOLO Darknet: no data.yaml or classes.txt, the class names in each split's _darknet.labels
+for split, name, rows in [("train", "e", "1 0.5 0.5 0.25 0.25\n"), ("valid", "f", "0 0.25 0.25 0.125 0.25\n")]:
+    write(f"darknet/{split}/_darknet.labels", "head\nhelmet\n")
+    image(f"darknet/{split}/{name}.jpg")
+    write(f"darknet/{split}/{name}.txt", rows)
 
 print("\n".join(sorted(str(p.relative_to(here)) for p in here.rglob("*") if p.is_file())))
