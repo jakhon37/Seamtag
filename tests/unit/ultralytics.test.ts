@@ -424,6 +424,33 @@ describe('label rows read back into shapes', () => {
     expect(repeated.shapes.length).toBe(1)
     expect(codes(repeated.issues)).toEqual(['yolo-repeated'])
   })
+  test('a row whose numbers, in pixels, come to Infinity, which no label file can hold, is left out', () => {
+    const rows = (task: YoloTask, text: string, extra: object = {}) => {
+      const got = read(text, task, extra)
+      return [got.shapes.map((s) => s.label), got.issues.filter((i) => i.code === 'yolo-row').map((i) => i.message)]
+    }
+    const tooLarge = (line: number) => `The label file: line ${line} has a value too large to place on the image, so it's left out`
+    expect(rows('detect', '0 1e308 0.5 0.2 0.2\n1 0.5 0.5 1e308 0.2\n2 0.5 0.5 0.2 0.2\n')).toEqual([['bird'], [tooLarge(1), tooLarge(2)]])
+    expect(rows('segment', '0 0.1 0.1 1e308 0.1 0.5 0.5\n1 0.1 0.1 0.9 0.1 0.5 0.5\n')).toEqual([['dog'], [tooLarge(1)]])
+    expect(rows('detect', '0 0.1 0.1 0.9 0.1 0.5 1e308\n')).toEqual([[], [tooLarge(1)]])
+    // A keypoint not labelled is left out whatever it holds
+    const pose = { kptShape: [2, 3], kptNames: { 0: ['nose', 'tail'] } }
+    expect(rows('pose', '0 0.5 0.5 0.2 0.2 1e308 0.5 2 0.4 0.4 2\n0 0.5 0.5 0.2 0.2 1e308 0.5 0 0.4 0.4 2\n', pose)).toEqual([['cat', 'tail'], [tooLarge(1)]])
+    // Large, but a number in pixels too, is read as it is
+    const far = read('0 1e290 0.5 0.2 0.2\n', 'detect').shapes[0].points[1][0]
+    expect(far / 1e292).toBeCloseTo(1, 9)
+  })
+  test('a value from the file is quoted cut short, however long', () => {
+    const got = read(`0 ${'9'.repeat(100000)}x 0.5 0.2 0.2\n`, 'detect')
+    expect(got.issues.map((i) => i.message)).toEqual([
+      `The label file: Ultralytics would leave this image out of training, as line 1 has ${'9'.repeat(29)}…${'9'.repeat(29)}x, which isn't a number`,
+      `The label file: line 1 has ${'9'.repeat(29)}…${'9'.repeat(29)}x, which isn't a number, so it's left out`
+    ])
+  })
+  test('an outline of more points than a call takes arguments is read as its box for detect', () => {
+    const points = Array.from({ length: 200001 }, (_, i) => `${(i % 100) / 100} ${(i % 7) / 10}`).join(' ')
+    expect(read(`0 ${points}\n`, 'detect').shapes.map((s) => s.points)).toEqual([[[0, 0], [99, 30]]])
+  })
 })
 
 describe('data.yaml', () => {
@@ -496,6 +523,46 @@ kpt_names:
     expect(errors('train: a\nval: a\nnames: [x]\nkpt_shape: [3, 3]\nflip_idx: [1, 0]')).toEqual(['data.yaml has a flip_idx of 2 keypoints where kpt_shape has 3, which stops Ultralytics when it mirrors images'])
     expect(errors('train: [a\n')[0]).toMatch(/^data.yaml isn't valid YAML/)
     expect(errors('- a\n- b\n')).toEqual(["data.yaml isn't a map of keys and values, so it can't be read"])
+  })
+  test('nc without names is class_0 on, for at least one class and at most 100,000, which a long list of names is not held to', () => {
+    const read = (nc: string, names = '') => {
+      const t = performance.now()
+      const got = readDataYaml(`train: a\nval: a\nnc: ${nc}\n${names}`, 'data.yaml')
+      // Each class's name was made, so nc: 4294967295 took 45 s and nc: 100000000 ran out of memory
+      expect(performance.now() - t).toBeLessThan(500)
+      return { names: got.data.names, errors: got.issues.filter((i) => i.severity === 'error').map((i) => i.message) }
+    }
+    expect(read('3')).toEqual({ names: ['class_0', 'class_1', 'class_2'], errors: [] })
+    expect(read('100000').names).toHaveLength(100000)
+    expect(read('0')).toEqual({ names: [], errors: ['data.yaml has nc: 0, and Ultralytics needs at least one class'] })
+    expect(read('-1')).toEqual({ names: [], errors: ['data.yaml has nc: -1, and Ultralytics needs at least one class'] })
+    for (const [nc, shown] of [['100001', '100001'], ['4294967296', '4294967296'], ['1e10', '10000000000']]) {
+      expect(read(nc)).toEqual({ names: [], errors: [`data.yaml has nc: ${shown} but no names, and Seamtag names at most 100,000 classes itself, so the classes are unknown`] })
+    }
+    // Names written out are as many as the file holds
+    const many = Array.from({ length: 100001 }, (_, i) => `n${i}`)
+    expect(read('100001', `names: [${many.join(', ')}]\n`)).toEqual({ names: many, errors: [] })
+  })
+  test("names that are what every object has, such as constructor, are names; a long value is read in a time its length gives, not its square", () => {
+    const { data, issues } = readDataYaml('train: a\nval: a\nnames: [car, constructor, toString, __proto__, valueOf]\nkpt_shape: [2, 3]\nkpt_names: {0: [constructor, hasOwnProperty]}\n')
+    expect([data.names, data.kptNames, issues]).toEqual([['car', 'constructor', 'toString', '__proto__', 'valueOf'], { 0: ['constructor', 'hasOwnProperty'] }, []])
+    const map = readDataYaml('train: a\nval: a\nnames: {0: car, 1: constructor, 2: isPrototypeOf}\n')
+    expect(map.data.names).toEqual(['car', 'constructor', 'isPrototypeOf'])
+    // Stripping both ends at once tried every run of spaces inside a value: 20,000 took 2 s
+    for (const name of [`1${' '.repeat(100000)}1`, `${'1'.repeat(100000)}x1`]) {
+      const t = performance.now()
+      const yamlText = `train: a\nval: a\nnames: {0: ${name}}\n`
+      expect(readDataYaml(yamlText).data.names).toEqual([name])
+      expect(isDatasetYaml(yamlText)).toBe(true)
+      expect(performance.now() - t).toBeLessThan(500)
+    }
+  })
+  test('a key or value from the file is quoted cut short, however long', () => {
+    const long = 'k'.repeat(100000)
+    expect(readDataYaml(`train: a\nval: a\nnames: {${long}: x}\nnc: ${long}\n`).issues.map((i) => i.message)).toEqual([
+      `data.yaml has nc: ${'k'.repeat(29)}…${'k'.repeat(30)}, which isn't a whole number`,
+      `data.yaml has ${'k'.repeat(29)}…${'k'.repeat(30)} as a class number in names`
+    ])
   })
 })
 
@@ -745,6 +812,54 @@ describe('datasets on disk, wherever they sit', () => {
       chmodSync(path.join(dir, 'fs', 'labels'), 0o755)
     }
   })
+  test("folders holding more files than a dataset may have are an error and nothing is read, wherever data.yaml's path leads", async () => {
+    for (let i = 0; i < 6; i++) put(`ds/images/train/${i}.jpg`)
+    put('ds/labels/train/0.txt', '0 0.5 0.5 0.2 0.2\n')
+    put('ds/data.yaml', 'train: images/train\nval: images/train\nnames: [x]\n')
+    const ds = path.join(dir, 'ds')
+    // The splits are listed once each, so 12 files in all
+    expect((await readYoloDataset(ds, { most: 12 })).splits.map((s) => s.items.length)).toEqual([6, 6])
+    const yamlRead = await readYoloDataset(path.join(ds, 'data.yaml'), { most: 11 })
+    expect([yamlRead.splits, codes(yamlRead)]).toEqual([[], [['error', 'yolo-too-many-files']]])
+    expect(yamlRead.issues[0].message).toBe("The splits data.yaml names hold more than 11 files, more than Seamtag reads for one dataset, so none are read")
+    // A folder without data.yaml is listed whole: 6 images and a label file
+    rmSync(path.join(ds, 'data.yaml'))
+    expect((await readYoloDataset(ds, { most: 7 })).splits.map((s) => s.items.length)).toEqual([6])
+    const folder = await readYoloDataset(ds, { most: 6 })
+    expect([folder.splits, folder.names, codes(folder)]).toEqual([[], [], [['error', 'yolo-too-many-files']]])
+    expect(folder.issues[0].message).toBe('ds holds more than 6 files, more than Seamtag reads for one dataset, so none are read')
+  })
+
+  test('Stop ends the search for a dataset\'s files at the next folder', async () => {
+    for (let i = 0; i < 30; i++) put(`ds/images/f${i}/a.jpg`)
+    const listed: string[] = []
+    const stop = new AbortController()
+    const readdir = fsp.readdir.bind(fsp)
+    vi.spyOn(fsp, 'readdir').mockImplementation(((p: string, o: object) => {
+      listed.push(p)
+      // Stopped while its third folder is listed
+      if (listed.length === 3) stop.abort()
+      return readdir(p, o as never)
+    }) as never)
+    await expect(readYoloDataset(path.join(dir, 'ds'), { signal: stop.signal })).rejects.toThrow(/aborted/)
+    expect(listed.length).toBe(3)
+    await expect(readYoloDataset(path.join(dir, 'ds'), { signal: AbortSignal.abort() })).rejects.toThrow(/aborted/)
+  })
+
+  test('without data.yaml, classes are named up to class_99999: a row of a class past it is told and left out', async () => {
+    put('ds/images/a.jpg')
+    put('ds/labels/a.txt', '1 0.5 0.5 0.2 0.2\n100000000 0.5 0.5 0.2 0.2\n4294967295 0.5 0.5 0.2 0.2\n')
+    const t = performance.now()
+    const d = await readYoloDataset(path.join(dir, 'ds'))
+    // Each class up to the highest was named: 100,000,000 of them took the app's memory
+    expect(performance.now() - t).toBeLessThan(2000)
+    expect(d.names).toEqual(['class_0', 'class_1'])
+    expect(d.issues.map((i) => [i.code, slash(i.message)])).toEqual([
+      ['yolo-no-yaml', 'ds has neither data.yaml nor classes.txt, so the classes are named class_0 to class_1'],
+      ['yolo-no-yaml', 'labels/a.txt has a row of class 100000000, and without data.yaml Seamtag names at most 100,000 classes, so rows past class_99999 are left out']
+    ])
+  })
+
   test('a split of more images than a call takes arguments is listed whole, from a folder or a list file', async () => {
     // Over 125,000 paths spread into a call overflow the stack. So many files would take half a
     // minute to make, so a folder's listing is made up, and val lists the same images

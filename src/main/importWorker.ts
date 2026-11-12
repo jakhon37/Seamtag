@@ -13,7 +13,7 @@ import { parentPort, resourceLimits, workerData } from 'worker_threads'
 import { type CocoImage, type CocoImageResult, matchCocoImages, readCoco } from '../shared/coco'
 import type { Issue, MaskBits } from '../shared/dataset'
 import type { Shape } from '../shared/labelfile'
-import { shapesFromPose } from '../shared/pose'
+import { shapesFromPose, short } from '../shared/pose'
 
 /** A COCO image matched to an image in the folder, and what its annotations give */
 export type CocoMatched = {
@@ -30,6 +30,8 @@ export type CocoMatched = {
   annotations: number
   shapes: number
   labels: Record<string, number>
+  /** How many pixels its mask shapes have: making them takes a byte each */
+  pixels: number
 }
 
 /** A COCO file as read for importing */
@@ -174,11 +176,14 @@ function parse(text: string): unknown {
   room(text.length)
   return JSON.parse(text)
 }
-/** readCoco on part of a file, when the heap has room for it */
-function readPart(part: unknown, name: string) {
+/**
+ * readCoco on part of a file, when the heap has room for it. Masks' pixels, which take memory the
+ * heap's limit doesn't count, are made only with `pixels`.
+ */
+function readPart(part: unknown, name: string, pixels = false) {
   const json = JSON.stringify(part)
   room(json.length)
-  return readCoco(json, name)
+  return readCoco(json, name, { pixels })
 }
 
 // Where the JSON value starting at i ends: past its closing bracket or quote, or at the character
@@ -264,7 +269,7 @@ export function readTop(text: string, name: string): Record<string, unknown> {
         if (keyEnd < 0) throw new Invalid('it ends inside a key')
         const key = JSON.parse(text.slice(i, keyEnd)) as string
         i = space(text, keyEnd)
-        if (text.charCodeAt(i) !== 58) throw new Invalid(`there's no colon after "${key}"`)
+        if (text.charCodeAt(i) !== 58) throw new Invalid(`there's no colon after "${short(key)}"`)
         i = space(text, i + 1)
         if ((key === 'images' || key === 'annotations') && text.charCodeAt(i) === 91) {
           const list: unknown[] = []
@@ -272,7 +277,7 @@ export function readTop(text: string, name: string): Record<string, unknown> {
           out[key] = list
         } else {
           const end = valueEnd(text, i)
-          if (end < 0 || end === i) throw new Invalid(`"${key}" has no value that ends`)
+          if (end < 0 || end === i) throw new Invalid(`"${short(key)}" has no value that ends`)
           // Only these are read: the rest, such as info and licenses, is passed over
           if (key === 'images' || key === 'annotations' || key === 'categories') out[key] = parse(text.slice(i, end))
           i = end
@@ -335,11 +340,14 @@ export class CocoSession {
     return this.roomy(() => this.readAll(file, folder, root))
   }
 
-  /** The shapes of these images, as read() counted them */
+  /**
+   * The shapes of these images, as read() counted them, their masks' pixels made: ask for a few
+   * images at a time, as many as their pixels (CocoMatched's) allow
+   */
   shapes(ids: number[]): CocoShapes[] {
     const out: CocoShapes[] = []
     return this.roomy(() => {
-      this.each(ids.filter((id) => this.images.has(id)), (id, result) => out.push({ id, ...shapesOf(result) }))
+      this.each(ids.filter((id) => this.images.has(id)), (id, result) => out.push({ id, ...shapesOf(result) }), true)
       return out
     })
   }
@@ -391,15 +399,17 @@ export class CocoSession {
     const sums = new Map<string, number>()
     let done = 0, told = 0
     this.progress(`Reading ${this.name}'s annotations`, 0, ids.length)
+    // Counted without making masks' pixels: the sizes the file gives aren't checked yet
     this.each(ids, (id, result, chunk) => {
       const im = this.images.get(id)!
       const { shapes } = shapesOf(result)
-      const labels: Record<string, number> = {}
+      // With no prototype, so a label called constructor or __proto__ counts like any other
+      const labels: Record<string, number> = Object.create(null)
       for (const s of shapes) labels[s.label] = (labels[s.label] ?? 0) + 1
       const name = match.names.get(id)!
       matched.set(id, {
         id, name, fileName: im.file_name, width: im.width, height: im.height, byName: tidy(base ? `${base}/${im.file_name}` : im.file_name) !== name,
-        annotations: this.annotations.get(id)!.length, shapes: shapes.length, labels
+        annotations: this.annotations.get(id)!.length, shapes: shapes.length, labels, pixels: result.pixels
       })
       if (chunk) {
         for (const i of chunk.issues) {
@@ -421,8 +431,8 @@ export class CocoSession {
 
   // Reads images a chunk of annotations at a time, as readCoco reads a whole file: each image's
   // annotations stay together and in order, so its shapes, groups and order come out the same.
-  // `chunk` is passed with the first image of each chunk read.
-  private each(ids: number[], fn: (id: number, result: CocoImageResult, chunk: { issues: Issue[] } | null) => void) {
+  // `chunk` is passed with the first image of each chunk read; `pixels` makes masks' pixels.
+  private each(ids: number[], fn: (id: number, result: CocoImageResult, chunk: { issues: Issue[] } | null) => void, pixels = false) {
     for (let at = 0; at < ids.length;) {
       const batch: number[] = []
       let count = 0
@@ -432,7 +442,7 @@ export class CocoSession {
       }
       const read = readPart({
         images: batch.map((id) => this.images.get(id)), categories: this.categories, annotations: batch.flatMap((id) => this.annotations.get(id)!)
-      }, this.name)
+      }, this.name, pixels)
       batch.forEach((id, k) => fn(id, read.results.get(id)!, k === 0 ? read : null))
     }
   }
@@ -444,9 +454,13 @@ if (parentPort && workerData?.seamtagCoco) {
   const session = new CocoSession((phase, done, total) => port.postMessage({ type: 'progress', phase, done, total } satisfies CocoAnswer))
   port.on('message', (ask: CocoAsk) => {
     try {
-      port.postMessage(ask.type === 'read'
-        ? { type: 'read', found: session.read(ask.file, ask.folder, ask.root) } satisfies CocoAnswer
-        : { type: 'shapes', images: session.shapes(ask.ids) } satisfies CocoAnswer)
+      if (ask.type === 'read') port.postMessage({ type: 'read', found: session.read(ask.file, ask.folder, ask.root) } satisfies CocoAnswer)
+      else {
+        const images = session.shapes(ask.ids)
+        // Masks' pixels are handed over, not copied: the app holds them once
+        const pixels = new Set(images.flatMap((im) => im.masks.flatMap((m) => (m ? [m.data.buffer as ArrayBuffer] : []))))
+        port.postMessage({ type: 'shapes', images } satisfies CocoAnswer, [...pixels])
+      }
     } catch (e) {
       port.postMessage({ type: 'error', message: (e as Error).message } satisfies CocoAnswer)
     }

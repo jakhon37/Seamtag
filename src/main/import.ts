@@ -8,10 +8,11 @@
 import { existsSync, promises as fs } from 'fs'
 import path from 'path'
 import type { Worker } from 'worker_threads'
+import { MAX_GROUP } from '../shared/coco'
 import type { Issue, MaskBits, Severity } from '../shared/dataset'
 import { LABEL_FORMATS, type LabelFormat } from '../shared/formats'
 import type { Shape } from '../shared/labelfile'
-import { readPoseYaml } from '../shared/pose'
+import { readPoseYaml, short } from '../shared/pose'
 import { countRows, labelText, newRowStats, readRows, YOLO_TASKS, type YoloTask } from '../shared/ultralytics'
 import { imageSize } from './images'
 import { type CocoAnswer, type CocoAsk, type CocoFound, type CocoProgress, CocoSession, type CocoShapes, tooBig } from './importWorker'
@@ -119,6 +120,8 @@ type Entry = {
   annotations: number
   shapes: number
   labels: Record<string, number>
+  /** COCO: how many pixels its mask shapes have, which writing makes, a byte each */
+  pixels: number
   /** Why it can't take labels from this dataset */
   blocked: Issue | null
   /** Its label file now, in whichever format; null when it has none */
@@ -161,8 +164,14 @@ type Session = {
 const HEAP_MB = Number(process.env.SEAMTAG_IMPORT_HEAP_MB) || 2048
 // A file this small is read in place when the worker can't start
 const IN_PLACE_MB = 32
-// Images written between asking the worker for their shapes
+// Images written between asking the worker for their shapes, whose masks have at most
+// BATCH_PIXELS pixels unless one image alone has more; no image's masks may have more than
+// IMAGE_PIXELS. Masks' pixels take a byte each, in memory the worker's heap limit doesn't count.
 const BATCH = 64
+const BATCH_PIXELS = 2 ** 28
+const IMAGE_PIXELS = 2 ** 30
+// The most a keypoint file may hold, read whole here: a few kilobytes name a hundred keypoints
+const KEYPOINT_FILE_BYTES = 4 * 2 ** 20
 // Messages kept with each group in what the window is sent; the rest come a page at a time
 const SHOWN = 20
 
@@ -176,6 +185,7 @@ const TITLES: Record<string, string> = {
   'coco-bad-polygon': 'Polygons left out',
   'coco-bad-mask': "Masks that can't be read",
   'coco-mask-size': 'Masks of another size',
+  'coco-mask-too-big': 'Masks too big to hold',
   'coco-no-pixels': 'Annotations with no pixels',
   'coco-bad-attributes': "Seamtag's attributes not used",
   'coco-bad-keypoints': "Keypoints that can't be read",
@@ -187,6 +197,7 @@ const TITLES: Record<string, string> = {
   'coco-image-ambiguous': 'Names that match several images',
   'coco-image-twice': 'Images listed twice',
   'yolo-missing': 'Dataset not found',
+  'yolo-too-many-files': 'Too many files',
   'yolo-not-yaml': 'Not a data.yaml',
   'yolo-many-yaml': 'Several datasets',
   'yolo-yaml': 'In data.yaml',
@@ -216,6 +227,7 @@ const TITLES: Record<string, string> = {
   'import-image-missing': 'Images not in this folder',
   'import-image-ambiguous': 'Names that match several images',
   'import-size': 'Sizes that differ',
+  'import-mask-pixels': 'Masks too big to write at once',
   'import-image-unreadable': "Images that can't be read",
   'import-shared-label': 'Images sharing a label file',
   'import-other-images': 'Label files of other images',
@@ -454,7 +466,9 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
   s.issues = found.issues.map((i) => {
     const name = i.image === null ? undefined : named.get(i.image)
     if (!name) return i
-    const told = name !== i.image && i.message.startsWith(`${i.image}:`) ? `${i.image} (${name} in this folder)${i.message.slice(i.image!.length)}` : i.message
+    // Messages quote a long file name cut short, as readCoco does
+    const quoted = short(i.image!, 120)
+    const told = name !== i.image && i.message.startsWith(`${quoted}:`) ? `${quoted} (${short(name, 120)} in this folder)${i.message.slice(quoted.length)}` : i.message
     return { ...i, image: name, message: told }
   })
   s.missing = found.issues.filter((i) => i.code === 'coco-image-missing').length
@@ -477,7 +491,7 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
         const m = s.cocoImages.get(id)!
         if (m.width === w && m.height === h) return true
         const swapped = m.width === h && m.height === w
-        wrong.push(say('error', 'import-size', e.name, `${e.name} is ${w} x ${h} pixels upright, but ${m.fileName} in the COCO file is ${m.width} x ${m.height}${swapped ? ': the sides are swapped, so the image\'s EXIF orientation probably differs from the one its annotations were made on' : ''}, so none of its annotations are imported`))
+        wrong.push(say('error', 'import-size', e.name, `${e.name} is ${w} x ${h} pixels upright, but ${short(m.fileName, 120)} in the COCO file is ${m.width} x ${m.height}${swapped ? ': the sides are swapped, so the image\'s EXIF orientation probably differs from the one its annotations were made on' : ''}, so none of its annotations are imported`))
         return false
       })
       s.issues.push(...wrong)
@@ -487,7 +501,13 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
       const m = s.cocoImages.get(id)!
       e.annotations += m.annotations
       e.shapes += m.shapes
+      e.pixels += m.pixels
       for (const [label, n] of Object.entries(m.labels)) e.labels[label] = (e.labels[label] ?? 0) + n
+    }
+    // Writing makes an image's masks' pixels all at once, which its size, now known to be the
+    // file's, doesn't bound: a file can give it any number of masks
+    if (!e.blocked && e.pixels > IMAGE_PIXELS) {
+      e.blocked = say('error', 'import-mask-pixels', e.name, `${e.name}: its masks in ${path.basename(s.source)} have ${plural(e.pixels, 'pixel')} in all, more than the ${IMAGE_PIXELS.toLocaleString('en-GB')} Seamtag makes for one image at a time, so nothing is imported into it`)
     }
     if (e.blocked) continue
     // A COCO file lists its images whatever they hold (a keypoints file lists those without people
@@ -497,15 +517,19 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
   }
 }
 
+// Shapes by label, with no prototype, so a label called constructor or __proto__ counts like any other
+const tally = (): Record<string, number> => Object.create(null)
+
 const entry = (name: string, label: string | null, byName: boolean): Entry =>
-  ({ name, size: null, ids: [], label, byName, annotations: 0, shapes: 0, labels: {}, blocked: null, has: null, broken: null })
+  ({ name, size: null, ids: [], label, byName, annotations: 0, shapes: 0, labels: tally(), pixels: 0, blocked: null, has: null, broken: null })
 
 // YOLO
 
 async function readYoloSource(s: Session, folder: string[], progress: (p: ImportProgress) => void, signal: AbortSignal) {
   progress({ phase: `Reading ${path.basename(s.source)}`, done: 0, total: 0 })
-  // Finding the dataset's files can't be stopped, so Stop doesn't wait for it: what it finds is dropped
-  const dataset = await unlessStopped(readYoloDataset(s.source), signal)
+  // Stop doesn't wait for the dataset's files to be found: what's found is dropped, and the search
+  // stops at its next folder
+  const dataset = await unlessStopped(readYoloDataset(s.source, { signal }), signal)
   if (!dataset) return
   s.issues = [...dataset.issues]
   // Each image once, however many splits list it
@@ -561,18 +585,21 @@ async function readLabelRows(s: Session, task: YoloTask, keypoints: string | nul
     from = 'generated'
     if (keypoints) {
       try {
+        // Read whole, here in the app: a file far larger than any keypoint file isn't
+        const { size } = await fs.stat(keypoints)
+        if (size > KEYPOINT_FILE_BYTES) throw new Error(`it's ${(size / 2 ** 20).toFixed(1)} MB, more than the ${KEYPOINT_FILE_BYTES / 2 ** 20} MB a keypoint file may be`)
         const schema = readPoseYaml(await fs.readFile(keypoints, 'utf8')).schema
         const mapped: Record<number, string[]> = {}
         ds.names.forEach((n, c) => {
           const list = Object.hasOwn(schema.classes, n) ? schema.classes[n] : null
           if (!list) return
           mapped[c] = list
-          if (kptShape && list.length !== kptShape[0]) issues.push(say('warning', 'import-keypoint-names', null, `${path.basename(keypoints)} names ${list.length} keypoints for ${n}, where each row has ${kptShape[0]}: ${list.length < kptShape[0] ? `the rest are called kp${list.length} and on` : 'the last are left unused'}`))
+          if (kptShape && list.length !== kptShape[0]) issues.push(say('warning', 'import-keypoint-names', null, `${path.basename(keypoints)} names ${list.length} keypoints for ${short(n)}, where each row has ${kptShape[0]}: ${list.length < kptShape[0] ? `the rest are called kp${list.length} and on` : 'the last are left unused'}`))
         })
         if (Object.keys(mapped).length) {
           names = mapped
           from = 'file'
-        } else issues.push(say('error', 'import-keypoint-file', null, `${path.basename(keypoints)} names none of the dataset's classes (${ds.names.slice(0, 5).join(', ')}${ds.names.length > 5 ? ' …' : ''}), so its names aren't used`))
+        } else issues.push(say('error', 'import-keypoint-file', null, `${path.basename(keypoints)} names none of the dataset's classes (${ds.names.slice(0, 5).map((n) => short(n)).join(', ')}${ds.names.length > 5 ? ' …' : ''}), so its names aren't used`))
       } catch (e) {
         issues.push(say('error', 'import-keypoint-file', null, `${path.basename(keypoints)} can't be used: ${message(e)}`))
       }
@@ -587,7 +614,7 @@ async function readLabelRows(s: Session, task: YoloTask, keypoints: string | nul
   await pool(live, 16, async (e) => {
     e.annotations = 0
     e.shapes = 0
-    e.labels = {}
+    e.labels = tally()
     if (!e.label) {
       issues.push(say('info', 'import-no-label-file', e.name, `${e.name} has no label file in the dataset (Ultralytics trains it as a background), so it's left as it is`))
       return
@@ -744,7 +771,8 @@ export function addShapes(own: Shape[], imported: Shape[]): { added: Shape[]; re
     const list = pool.get(k)
     if (list) list.push(s.group_id)
     else pool.set(k, [s.group_id])
-    if (s.group_id !== null && s.group_id > top) top = s.group_id
+    // New groups count on from the highest below MAX_GROUP, as readCoco's do
+    if (s.group_id !== null && s.group_id > top && s.group_id < MAX_GROUP) top = s.group_id
   }
   const kept: Shape[] = []
   const joins = new Map<number, Set<number | null>>()
@@ -774,6 +802,26 @@ export function addShapes(own: Shape[], imported: Shape[]): { added: Shape[]; re
     return { ...s, group_id: g }
   })
   return { added, repeated }
+}
+
+/**
+ * Images in the batches writing asks the COCO reader for at once: at most BATCH images, whose
+ * masks have at most BATCH_PIXELS pixels in all unless one image alone has more
+ */
+export function writeBatches<T extends { pixels: number }>(images: T[]): T[][] {
+  const out: T[][] = []
+  let batch: T[] = [], pixels = 0
+  for (const im of images) {
+    if (batch.length && (batch.length === BATCH || pixels + im.pixels > BATCH_PIXELS)) {
+      out.push(batch)
+      batch = []
+      pixels = 0
+    }
+    batch.push(im)
+    pixels += im.pixels
+  }
+  if (batch.length) out.push(batch)
+  return out
 }
 
 // Shapes of several COCO images bound for one image of the folder: each one's groups go above the last's
@@ -937,14 +985,15 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
   let written = 0, shapes = 0, repeated = 0, trashed = 0, done = 0, told = 0
   const total = todo.length
   progress({ phase: 'Writing label files', done: 0, total })
-  for (let i = 0; i < todo.length && !signal.aborted; i += BATCH) {
-    const batch = todo.slice(i, i + BATCH)
+  const batches = writeBatches(todo)
+  for (const [k, batch] of batches.entries()) {
+    if (signal.aborted) break
     let made: Map<string, Shape[]>
     try {
       made = await shapesFor(s, batch)
     } catch (err) {
       // The COCO reader is gone, so the rest can't be read either
-      for (const e of todo.slice(i)) skip('failed', `${e.name}: ${message(err)}`)
+      for (const e of batches.slice(k).flat()) skip('failed', `${e.name}: ${message(err)}`)
       break
     }
     for (const e of batch) {

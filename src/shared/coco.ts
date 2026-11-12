@@ -13,7 +13,8 @@
 import type { DatasetImage, Issue, KeypointSchema, MaskBits, PoseInstance, Severity } from './dataset'
 import { newShape, pointCount, readShape, type Shape, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
-import { type Rle, rleArea, rleFrMaskBits, rleFrPoly, rleFrString, rleLength, rleMerge, rleToBbox, rleToMaskBits, rleToString } from './rle'
+import { short } from './pose'
+import { type Rle, rleArea, rleFrMaskBits, rleFrPoly, rleFrString, rleLength, rleMerge, rleMove, rleToBbox, rleToMaskBits, rleToString } from './rle'
 
 /** COCO's info, given by the caller, the moment too, so the same labels give the same file */
 export type CocoInfo = { description: string; version: string; year: number; date_created: string; contributor?: string; url?: string }
@@ -399,11 +400,14 @@ export type CocoImageResult = {
   image: CocoImage
   /**
    * In their order in the label file where Seamtag's attributes keep it, others after them. Mask
-   * shapes have points but no PNG: their pixels are in masks, for the caller to encode.
+   * shapes have points but no PNG: their pixels are in masks, for the caller to encode, unless
+   * readCoco was asked not to make them.
    */
   shapes: Shape[]
   masks: (MaskBits | null)[]
   poses: CocoPose[]
+  /** How many pixels its mask shapes have, made or not: making them takes a byte each */
+  pixels: number
 }
 
 /** A COCO file as read: its images and categories, and what each image holds */
@@ -416,9 +420,35 @@ export type CocoRead = {
   issues: Issue[]
 }
 
+/**
+ * The most pixels a mask shape may have: 16383 x 16383, the most sharp, which writes and reads
+ * their PNGs, takes. A COCO file can give a mask any size.
+ */
+export const MASK_PIXELS = 0x3fff * 0x3fff
+// The most points rleFrPoly may trace along an outline it fills to compare with a mask, at 5
+// times the size: about 25 times round the largest mask's edge. An outline in a file's
+// attributes can zigzag across the image far more often than any shape does.
+const OUTLINE_POINTS = 2 ** 23
+
+/**
+ * New group ids count on from the highest below this. Past 2^53 a number plus 1 is the same
+ * number, so counting on from one near it would put every new object in one group.
+ */
+export const MAX_GROUP = 2 ** 31
+
+// A file name as messages quote it: room for a long path, not for megabytes of one
+const pathOf = (name: string) => short(name, 120)
+// Any other value from the file as messages quote it
+const quote = (v: unknown) => short(String(JSON.stringify(v)))
+
 type Note = (severity: Severity, code: string, why: string) => void
-// A shape read from an annotation, with its place in the label file when Seamtag's attributes keep it
-type Read = { shape: Shape; bits: MaskBits | null; index?: number }
+// A mask shape's pixels before they're made: those of `rle` inside `box`, with the box's top left
+// at x, y in the image. They take a byte each, so they're made only when asked for.
+type Pixels = { rle: Rle; box: { x: number; y: number; width: number; height: number }; x: number; y: number }
+// A shape read from an annotation, with its pixels when it's a mask, and its place in the label
+// file when Seamtag's attributes keep it
+type Read = { shape: Shape; pixels: Pixels | null; index?: number }
+const made = (p: Pixels): MaskBits => ({ ...rleToMaskBits(p.rle, p.box), x: p.x, y: p.y })
 // The shapes an annotation's segmentation gives, and whether Seamtag's attributes gave them back
 type Outline = { shapes: Read[]; restored: boolean }
 // What a file's annotations are summed up by, in one Issue each
@@ -429,9 +459,10 @@ type Tally = { box: number; hidden: number; plain: number; crowd: number }
  * others) as Seamtag's shapes per image. Throws when it isn't COCO at all. Annotations that
  * can't be read are left out, each with an Issue. An annotation with keypoints labelled is a
  * posed object, whose outline comes back among the shapes in its group; one with none
- * labelled is read as a plain object.
+ * labelled is read as a plain object. With `pixels` false, masks' pixels aren't made: the
+ * shapes, their count and the issues are the same.
  */
-export function readCoco(text: string, file: string): CocoRead {
+export function readCoco(text: string, file: string, { pixels = true }: { pixels?: boolean } = {}): CocoRead {
   let raw: unknown
   try {
     raw = JSON.parse(text)
@@ -449,12 +480,12 @@ export function readCoco(text: string, file: string): CocoRead {
     if (!Number.isInteger(id)) return issues.push(issue('warning', 'coco-bad-image', null, `${where} has no whole-number id, so it's left out`))
     if (typeof file_name !== 'string' || !file_name) return issues.push(issue('warning', 'coco-bad-image', null, `${where} has no file_name, so it's left out`))
     if (!(Number.isInteger(width) && Number.isInteger(height) && (width as number) > 0 && (height as number) > 0)) {
-      return issues.push(issue('warning', 'coco-bad-image', file_name, `${where} (${file_name}) has no width and height, so it's left out`))
+      return issues.push(issue('warning', 'coco-bad-image', file_name, `${where} (${pathOf(file_name)}) has no width and height, so it's left out`))
     }
-    if (results.has(id as number)) return issues.push(issue('warning', 'coco-bad-image', file_name, `${where} (${file_name}) has the id ${id}, which an earlier image has, so it's left out`))
+    if (results.has(id as number)) return issues.push(issue('warning', 'coco-bad-image', file_name, `${where} (${pathOf(file_name)}) has the id ${id}, which an earlier image has, so it's left out`))
     const image = { id: id as number, width: width as number, height: height as number, file_name }
     images.push(image)
-    results.set(image.id, { image, shapes: [], masks: [], poses: [] })
+    results.set(image.id, { image, shapes: [], masks: [], poses: [], pixels: 0 })
   })
   const categories: CocoCategory[] = [], byId = new Map<number, CocoCategory>()
   for (const [k, c] of (Array.isArray(raw.categories) ? raw.categories : []).entries()) {
@@ -476,12 +507,12 @@ export function readCoco(text: string, file: string): CocoRead {
   }
   const annotations = Array.isArray(raw.annotations) ? raw.annotations : []
   // New group ids for objects of several parts and posed objects start past those the file's
-  // own attributes use in the image
+  // own attributes use in the image, of those below MAX_GROUP: a larger one is kept as it is
   const nextGroup = new Map<number, number>()
   for (const a of annotations) {
-    if (isObject(a) && isObject(a.attributes) && Number.isInteger(a.attributes.group_id)) {
-      nextGroup.set(a.image_id as number, Math.max(nextGroup.get(a.image_id as number) ?? 1, (a.attributes.group_id as number) + 1))
-    }
+    if (!isObject(a) || !isObject(a.attributes)) continue
+    const g = a.attributes.group_id
+    if (Number.isInteger(g) && (g as number) < MAX_GROUP) nextGroup.set(a.image_id as number, Math.max(nextGroup.get(a.image_id as number) ?? 1, (g as number) + 1))
   }
   const newGroup = (image: number) => {
     const g = nextGroup.get(image) ?? 1
@@ -495,16 +526,18 @@ export function readCoco(text: string, file: string): CocoRead {
     if (!isObject(a)) return issues.push(issue('warning', 'coco-bad-annotation', null, `${file}: annotation ${k + 1} in its annotations list isn't an object, so it's left out`))
     const which = `annotation ${Number.isInteger(a.id) ? a.id : `${k + 1} in the list`}`
     const result = results.get(a.image_id as number)
-    if (!result) return issues.push(issue('warning', 'coco-unknown-image', null, `${file}: ${which} is of image ${JSON.stringify(a.image_id)}, which isn't in its images list, so it's left out`))
+    if (!result) return issues.push(issue('warning', 'coco-unknown-image', null, `${file}: ${which} is of image ${quote(a.image_id)}, which isn't in its images list, so it's left out`))
     const { image } = result, name = image.file_name
     const category = byId.get(a.category_id as number)
-    if (!category) return issues.push(issue('warning', 'coco-unknown-category', name, `${name}: ${which} is of category ${JSON.stringify(a.category_id)}, which isn't in the categories list, so it's left out`))
-    const what = `${which} (“${category.name}”)`
-    const note: Note = (severity, code, why) => issues.push(issue(severity, code, name, `${name}: ${what} ${why}`))
+    if (!category) return issues.push(issue('warning', 'coco-unknown-category', name, `${pathOf(name)}: ${which} is of category ${quote(a.category_id)}, which isn't in the categories list, so it's left out`))
+    const what = `${which} (“${short(category.name)}”)`
+    const note: Note = (severity, code, why) => issues.push(issue(severity, code, name, `${pathOf(name)}: ${what} ${why}`))
     const tally: Tally = { box: 0, hidden: 0, plain: 0, crowd: 0 }
     let read: { shapes: Read[]; pose: CocoPose | null }
+    let masks: (MaskBits | null)[]
     try {
       read = readAnnotation(a, category, image, note, tally, () => newGroup(image.id))
+      masks = read.shapes.map((r) => (r.pixels && pixels ? made(r.pixels) : null))
     } catch (e) {
       // An error nothing here foresaw costs this annotation alone, not the whole file
       return note('warning', 'coco-bad-annotation', `can't be read (${(e as Error).message}), so it's left out`)
@@ -512,11 +545,12 @@ export function readCoco(text: string, file: string): CocoRead {
     for (const key of Object.keys(tally) as (keyof Tally)[]) counted[key] += tally[key]
     if (read.pose) result.poses.push(read.pose)
     if (!places.has(image.id)) places.set(image.id, [])
-    for (const { shape, bits, index } of read.shapes) {
+    read.shapes.forEach(({ shape, pixels: p, index }, i) => {
       result.shapes.push(shape)
-      result.masks.push(bits)
+      result.masks.push(masks[i])
+      if (p) result.pixels += p.box.width * p.box.height
       places.get(image.id)!.push(index)
-    }
+    })
   })
   // Seamtag's own shapes go back to their places in the label file, any others after them
   for (const [id, place] of places) {
@@ -560,10 +594,11 @@ function readAnnotation(a: Record<string, unknown>, category: CocoCategory, imag
   return { shapes: shapes.map((r) => ({ ...r, shape: { ...r.shape, other: { ...r.shape.other, iscrowd: 1 } } })), pose: null }
 }
 
-// A box as COCO keeps it, [x, y, width, height], when it has an area
+// A box as COCO keeps it, [x, y, width, height], when it has an area. Its far corner must be a
+// number too: x plus width can come to Infinity, which no label file can hold.
 function cocoBox(v: unknown): [number, number, number, number] | null {
   if (!Array.isArray(v) || v.length !== 4 || !v.every((n) => typeof n === 'number' && Number.isFinite(n))) return null
-  return v[2] > 0 && v[3] > 0 ? (v as [number, number, number, number]) : null
+  return v[2] > 0 && v[3] > 0 && Number.isFinite(v[0] + v[2]) && Number.isFinite(v[1] + v[3]) ? (v as [number, number, number, number]) : null
 }
 
 // The box around points, x0, y0, x1, y1, when they span one
@@ -588,7 +623,7 @@ function readKeypoints(a: Record<string, unknown>, names: string[], note: Note):
     const [x, y, v] = kp.slice(3 * i, 3 * i + 3) as number[]
     if (v === 0) { unlabelled++; keypoints.push(null); continue }
     if (v !== 1 && v !== 2) {
-      note('warning', 'coco-bad-keypoints', `gives keypoint “${names[i]}” the visibility ${v}, not 0, 1 or 2, so that keypoint is left out`)
+      note('warning', 'coco-bad-keypoints', `gives keypoint “${short(names[i])}” the visibility ${v}, not 0, 1 or 2, so that keypoint is left out`)
       keypoints.push(null)
       continue
     }
@@ -625,7 +660,7 @@ function readPose(a: Record<string, unknown>, category: CocoCategory, image: Coc
   }
   // The box of its keypoints, as pycocotools' loadRes makes one, else of its outline
   box ??= around(keypoints.filter((k) => k !== null)) ??
-    around(shapes.flatMap(({ shape, bits }) => (bits ? [[bits.x, bits.y], [bits.x + bits.width, bits.y + bits.height]] : outlineOf(shape) ?? shape.points)))
+    around(shapes.flatMap(({ shape, pixels: p }) => (p ? [[p.x, p.y], [p.x + p.box.width, p.y + p.box.height]] : outlineOf(shape) ?? shape.points)))
   if (!box) {
     note('warning', 'coco-no-pixels', "has neither a box nor keypoints that span one, so it's left out")
     return { shapes: [], pose: null }
@@ -652,7 +687,7 @@ function readObject(a: Record<string, unknown>, label: string, image: CocoImage,
   if (Array.isArray(seg) && seg.some((p) => !Array.isArray(p) || p.length)) note('warning', 'coco-box-only', 'keeps only its box, so it becomes a rectangle')
   else tally.box++
   const [x, y, bw, bh] = box
-  return { shapes: [{ shape: newShape(label, 'rectangle', [[x, y], [x + bw, y + bh]]), bits: null }], restored: false }
+  return { shapes: [{ shape: newShape(label, 'rectangle', [[x, y], [x + bw, y + bh]]), pixels: null }], restored: false }
 }
 
 // An annotation's segmentation as shapes: Seamtag's own when its attributes give them back,
@@ -705,11 +740,15 @@ function readSegmentation(a: Record<string, unknown>, label: string, image: Coco
   }
   if (mask) {
     const [x, y, bw, bh] = rleToBbox(mask)
-    const bits = rleToMaskBits(mask, { x, y, width: bw, height: bh })
-    return { shapes: [{ shape: newShape(label, 'mask', [[x, y], [x + bw - 1, y + bh - 1]]), bits }], restored: false }
+    if (bw * bh > MASK_PIXELS) {
+      note('warning', 'coco-mask-too-big', `has a mask of ${bw} x ${bh} pixels, more than the ${MASK_PIXELS.toLocaleString('en-GB')} a mask shape can hold, ${lost}`)
+      return null
+    }
+    const box = { x, y, width: bw, height: bh }
+    return { shapes: [{ shape: newShape(label, 'mask', [[x, y], [x + bw - 1, y + bh - 1]]), pixels: { rle: mask, box, x, y } }], restored: false }
   }
   const g = group(polygons!.length)
-  return { shapes: polygons!.map((p) => ({ shape: newShape(label, 'polygon', pairs(p), { group_id: g }), bits: null })), restored: false }
+  return { shapes: polygons!.map((p) => ({ shape: newShape(label, 'polygon', pairs(p), { group_id: g }), pixels: null })), restored: false }
 }
 
 // The keys of attributes that make them Seamtag's record of one shape
@@ -729,7 +768,7 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
   for (const [i, r] of records.entries()) {
     if (!isObject(r)) return `shape ${i + 1} isn't an object`
     const type = r.shape_type ?? 'polygon'
-    if (typeof type !== 'string' || !CLOSED_TYPES.has(type)) return `shape ${i + 1} has the shape_type ${JSON.stringify(type)}`
+    if (typeof type !== 'string' || !CLOSED_TYPES.has(type)) return `shape ${i + 1} has the shape_type ${quote(type)}`
     if (type === 'mask' && !mask) return `shape ${i + 1} is a mask in polygons`
     if (r.index !== undefined && !isCount(r.index)) return `shape ${i + 1} has an index that isn't a whole number`
     let points = r.points
@@ -750,7 +789,7 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
     }
     const need = pointCount(shape.shape_type)
     if ((need && shape.points.length !== need) || (shape.shape_type === 'polygon' && shape.points.length < 3)) return `shape ${i + 1} has ${shape.points.length} points`
-    let bits: MaskBits | null = null
+    let pixels: Pixels | null = null
     if (shape.shape_type === 'mask') {
       const box = maskBox(shape.points)
       let own: Rle | null = null
@@ -767,9 +806,10 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
       // Its pixels take memory: no mask of the image is more than twice as wide or tall as it
       const mw = own ? own.w : box.width, mh = own ? own.h : box.height
       if (mw > 2 * w || mh > 2 * h) return `shape ${i + 1}'s mask is ${mw} x ${mh} pixels, too big for the ${w} x ${h} image`
-      bits = own ? { ...rleToMaskBits(own, { x: 0, y: 0, width: own.w, height: own.h }), x: box.x, y: box.y } : rleToMaskBits(mask!, box)
+      if (mw * mh > MASK_PIXELS) return `shape ${i + 1}'s mask is ${mw} x ${mh} pixels, more than the ${MASK_PIXELS.toLocaleString('en-GB')} a mask shape can hold`
+      pixels = own ? { rle: own, box: { x: 0, y: 0, width: own.w, height: own.h }, x: box.x, y: box.y } : { rle: mask!, box, x: box.x, y: box.y }
     }
-    out.push({ shape, bits, ...(r.index === undefined ? {} : { index: r.index as number }) })
+    out.push({ shape, pixels, ...(r.index === undefined ? {} : { index: r.index as number }) })
   }
   // Another tool may have changed the segmentation and kept the attributes: the segmentation is
   // what counts then. The shapes must give it back as an export would write it.
@@ -781,11 +821,20 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
     }
     return out
   }
+  // Compared as runs, so no pixels are made for shapes that may not be kept
   const runs: Rle[] = []
-  for (const [i, { shape, bits }] of out.entries()) {
-    const outline = bits ? null : outlineInside(shape, w, h)
-    if (!bits && !outline) return `shape ${i + 1} has no outline`
-    runs.push(bits ? rleFrMaskBits(bits, h, w) : rleFrPoly(flat(outline!.points), h, w))
+  for (const [i, { shape, pixels: p }] of out.entries()) {
+    if (p) {
+      runs.push(rleMove(p.rle, p.box, p.x, p.y, h, w))
+      continue
+    }
+    const outline = outlineInside(shape, w, h)
+    if (!outline) return `shape ${i + 1} has no outline`
+    try {
+      runs.push(rleFrPoly(flat(outline.points), h, w, OUTLINE_POINTS))
+    } catch {
+      return `shape ${i + 1}'s outline is too long to compare with its mask`
+    }
   }
   // The same pixels when their union holds no more than either
   const union = rleMerge(runs), both = rleMerge([union, mask!])
@@ -848,14 +897,16 @@ export function matchCocoImages(images: CocoImage[], folder: string[], base = ''
       if (candidates.length === 1 && cocoNames.get(own) === 1) found = candidates[0]
       else if (candidates.length) {
         ambiguous.push({ image: im, candidates })
-        const why = candidates.length === 1 ? `other images in the COCO file are named ${own} too` : `its name matches ${candidates.join(', ')}`
-        issues.push(issue('warning', 'coco-image-ambiguous', im.file_name, `${im.file_name} isn't at that path in the folder and ${why}, so its annotations are left out rather than guessed`))
+        // A video's frames are often named alike in each of its folders: a few are named, not every one
+        const why = candidates.length === 1 ? `other images in the COCO file are named ${pathOf(own)} too`
+          : `its name matches ${candidates.length > 3 ? `${candidates.slice(0, 3).join(', ')} and ${candidates.length - 3} more` : candidates.join(', ')}`
+        issues.push(issue('warning', 'coco-image-ambiguous', im.file_name, `${pathOf(im.file_name)} isn't at that path in the folder and ${why}, so its annotations are left out rather than guessed`))
         continue
       }
     }
     if (found === undefined) {
       missing.push(im)
-      issues.push(issue('warning', 'coco-image-missing', im.file_name, `${im.file_name} isn't in the folder, so its annotations are left out`))
+      issues.push(issue('warning', 'coco-image-missing', im.file_name, `${pathOf(im.file_name)} isn't in the folder, so its annotations are left out`))
       continue
     }
     const before = taken.get(found)

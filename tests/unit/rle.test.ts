@@ -4,7 +4,7 @@ import { describe, expect, test } from 'vitest'
 import type { MaskBits } from '../../src/shared/dataset'
 import {
   pasteMask, type Rle, rleArea, rleDecode, rleEncode, rleFrBbox, rleFrMaskBits, rleFrPoly, rleFrString, rleLength, rleMerge,
-  rleToBbox, rleToMaskBits, rleToString
+  rleMove, rleToBbox, rleToMaskBits, rleToString
 } from '../../src/shared/rle'
 
 // What pycocotools 2.0.11 makes of the same inputs: tests/fixtures/coco/make_rle_cases.py
@@ -113,6 +113,13 @@ test('masks of different sizes, or runs that miss pixels, are not merged', () =>
   expect(() => rleMerge([a, { h: 10, w: 10, counts: [50, 20] }])).toThrow('cover 70 pixels')
 })
 
+test('a polygon whose outline is longer than it may be is refused before it takes the memory', () => {
+  // Corner to corner of a 1000 x 1000 image 10 times: 10 x 5000 points at 5 times the size, and the 10 corners
+  const zigzag = Array.from({ length: 10 }, (_, i) => (i % 2 ? [1000, 1000] : [0, 0])).flat()
+  expect(rleFrPoly(zigzag, 1000, 1000, 50010).counts).toEqual(rleFrPoly(zigzag, 1000, 1000).counts)
+  expect(() => rleFrPoly(zigzag, 1000, 1000, 50009)).toThrow('Its outline is 50010 points long at 5 times the size, more than the 50009 it may be')
+})
+
 describe('mask shapes in an image', () => {
   // A seeded generator, so the cases are the same on every run
   let seed = 7
@@ -153,6 +160,35 @@ describe('mask shapes in an image', () => {
         expect(wider.data[y * 16 + x], `${x}, ${y}`).toBe(inside ? b.data[by * 6 + bx] : 0)
       }
     }
+  })
+
+  test("a box of a mask moved into an image is, as runs, the box's pixels cut out, placed and encoded, without making them", () => {
+    const masks: Rle[] = [rleFrMaskBits(bits(0, 0, 9, 7), 7, 9), rleFrPoly([1, 1, 7, 2, 4, 6], 7, 9), { h: 7, w: 9, counts: [63] }, { h: 7, w: 9, counts: [0, 63] }]
+    for (let i = 0; i < 20; i++) {
+      const h = 1 + Math.floor(random() * 12), w = 1 + Math.floor(random() * 12)
+      masks.push(rleFrMaskBits(bits(0, 0, w, h), h, w))
+    }
+    let cases = 0
+    for (const r of masks) {
+      for (let i = 0; i < 25; i++) {
+        const int = (from: number, to: number) => from + Math.floor(random() * (to - from + 1))
+        // Boxes inside, across and past the mask's edges, placed inside, across and past the image's
+        const box = { x: int(-4, r.w + 2), y: int(-4, r.h + 2), width: int(0, r.w + 4), height: int(0, r.h + 4) }
+        const h = int(1, 14), w = int(1, 14), x = int(-8, w + 2), y = int(-8, h + 2)
+        const want = rleFrMaskBits({ ...rleToMaskBits(r, box), x, y }, h, w)
+        expect(rleMove(r, box, x, y, h, w), JSON.stringify({ r, box, x, y, h, w })).toEqual(want)
+        cases++
+      }
+    }
+    expect(cases).toBe(600)
+    // Runs that stop short of the mask leave the rest clear, as rleToMaskBits does
+    expect(rleMove({ h: 2, w: 2, counts: [1, 1] }, { x: 0, y: 0, width: 2, height: 2 }, 0, 0, 2, 2).counts).toEqual([1, 1, 2])
+  })
+
+  test("a mask moved into an image takes steps for the image's columns and the mask's runs, not a byte a pixel", () => {
+    // 2^40 pixels of mask, all set, with its top left 3 across and 4 down a 10 x 10 image
+    const r = { h: 2 ** 20, w: 2 ** 20, counts: [0, 2 ** 40] }
+    expect(rleMove(r, { x: 0, y: 0, width: 2 ** 20, height: 2 ** 20 }, 3, 4, 10, 10).counts).toEqual([34, 6, ...Array(6).fill([4, 6]).flat()])
   })
 
   test('without a box, the cut-out is the set pixels\' own box', () => {

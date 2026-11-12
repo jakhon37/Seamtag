@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { describe, expect, test, vi } from 'vitest'
 import {
-  type CocoAnnotation, type CocoEntry, type CocoImage, type CocoRle, cocoLabels, matchCocoImages, readCoco, writeCoco
+  type CocoAnnotation, type CocoEntry, type CocoImage, type CocoRle, cocoLabels, MASK_PIXELS, matchCocoImages, readCoco, writeCoco
 } from '../../src/shared/coco'
 import type { DatasetImage, KeypointSchema, MaskBits, PoseInstance } from '../../src/shared/dataset'
 import { newShape, parseLabelFile, type Shape } from '../../src/shared/labelfile'
@@ -485,9 +485,16 @@ test('random images of every closed shape come back from COCO as they went in, i
     const { json, issues } = instancesOf([{ image: im, fileName: im.name }], ['a', 'b'])
     // A thin sliver can cover no whole pixel and is left out; such images prove nothing here
     if (issues.some((i) => i.code === 'coco-no-pixels')) continue
-    const got = readCoco(json, 'random.json').results.get(1)!
+    const read = readCoco(json, 'random.json'), got = read.results.get(1)!
     expect(got.shapes, `seed ${seed}`).toEqual(im.shapes)
     expect(got.masks, `seed ${seed}`).toEqual(im.masks)
+    // Read without making masks' pixels, all is the same but the pixels, which are counted
+    const counted = readCoco(json, 'random.json', { pixels: false })
+    expect(counted.issues, `seed ${seed}`).toEqual(read.issues)
+    expect(counted.results.get(1)!.shapes, `seed ${seed}`).toEqual(im.shapes)
+    expect(counted.results.get(1)!.masks, `seed ${seed}`).toEqual(im.masks.map(() => null))
+    expect(counted.results.get(1)!.pixels, `seed ${seed}`).toBe(im.masks.reduce((n, m) => n + (m ? m.width * m.height : 0), 0))
+    expect(got.pixels).toBe(counted.results.get(1)!.pixels)
     checked++
   }
   expect(checked).toBeGreaterThan(250)
@@ -716,6 +723,109 @@ describe('reading COCO from other tools', () => {
     expect(read.results.get(7)!.shapes).toEqual([newShape('cat', 'rectangle', [[1, 1], [5, 4]]), newShape('cat', 'polygon', [[1, 1], [5, 1], [3, 4]])])
   })
 
+  test("a box whose far corner comes to Infinity, which no label file can hold, is no box", () => {
+    const text = coco([
+      { id: 1, image_id: 7, category_id: 3, bbox: [1e308, 2, 1e308, 10] },
+      { id: 2, image_id: 7, category_id: 3, bbox: [2, -1e308, 10, -1e308] },
+      { id: 3, image_id: 7, category_id: 9, bbox: [1e308, 2, 1e308, 10], keypoints: [5, 5, 2, 0, 0, 0] },
+      { id: 4, image_id: 7, category_id: 9, bbox: [1e308, 2, 1e308, 10], keypoints: [5, 5, 2, 8, 9, 2] },
+      { id: 5, image_id: 7, category_id: 3, bbox: [8.9e307, 2, 8.9e307, 10] }
+    ])
+    const read = readCoco(text, 'instances.json')
+    const got = read.results.get(7)!
+    expect(got.shapes).toEqual([newShape('cat', 'rectangle', [[8.9e307, 2], [1.78e308, 12]])])
+    // A posed object's box then comes from its keypoints, when they span one
+    expect(got.poses.map((p) => p.box)).toEqual([[5, 5, 8, 9]])
+    expect(read.issues.filter((i) => i.code === 'coco-no-pixels').map((i) => i.message)).toEqual([
+      "b.jpg: annotation 1 (“cat”) has neither a shape nor a box with an area, so it's left out",
+      "b.jpg: annotation 2 (“cat”) has neither a shape nor a box with an area, so it's left out",
+      "b.jpg: annotation 3 (“person”) has neither a box nor keypoints that span one, so it's left out"
+    ])
+  })
+
+  test('group ids past 2^31 are kept, and new ones count on from those below, so separate objects stay apart', () => {
+    const two = (x: number) => [[x, 1, x + 2, 1, x + 2, 3], [x + 4, 1, x + 6, 1, x + 6, 3]]
+    const text = coco([
+      { id: 1, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4]], bbox: [1, 1, 4, 3], attributes: { group_id: Number.MAX_SAFE_INTEGER } },
+      { id: 2, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4]], bbox: [1, 1, 4, 3], attributes: { group_id: 2 } },
+      { id: 3, image_id: 7, category_id: 3, segmentation: two(1), bbox: [1, 1, 6, 2] },
+      { id: 4, image_id: 7, category_id: 3, segmentation: two(10), bbox: [10, 1, 6, 2] }
+    ])
+    // 2^53 + 1 is 2^53: counted on from it, every new object was one group
+    expect(readCoco(text, 'a.json').results.get(7)!.shapes.map((s) => s.group_id)).toEqual([Number.MAX_SAFE_INTEGER, 2, 3, 3, 4, 4])
+  })
+
+  test('a mask shape of more pixels than sharp takes for its PNG is left out, its pixels never made', () => {
+    expect(MASK_PIXELS).toBe(16383 * 16383)
+    // 16384 x 16384, every pixel set: a mask whose box is the whole image
+    const text = JSON.stringify({
+      images: [{ id: 1, width: 16384, height: 16384, file_name: 'a.jpg' }], categories: [{ id: 1, name: 'sky' }],
+      annotations: [
+        { id: 1, image_id: 1, category_id: 1, segmentation: { size: [16384, 16384], counts: [0, 16384 * 16384] }, bbox: [0, 0, 16384, 16384] },
+        // Seamtag's own mask of the shape, which may reach past the image, is held to it too
+        {
+          id: 2, image_id: 1, category_id: 1, segmentation: { size: [16384, 16384], counts: [5, 1, 16384 * 16384 - 6] }, bbox: [0, 5, 1, 1],
+          attributes: { shape_type: 'mask', points: [[0, 5], [0, 5]], mask: { size: [16384, 16384], counts: rleToString({ h: 16384, w: 16384, counts: [0, 16384 * 16384] }) } }
+        }
+      ]
+    })
+    const t = performance.now()
+    const read = readCoco(text, 'sky.json')
+    expect(performance.now() - t).toBeLessThan(1000)
+    expect(read.results.get(1)!.shapes).toEqual([newShape('sky', 'mask', [[0, 5], [0, 5]])])
+    expect(read.results.get(1)!.masks).toEqual([{ x: 0, y: 5, width: 1, height: 1, data: Uint8Array.from([1]) }])
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "a.jpg: annotation 1 (“sky”) has a mask of 16384 x 16384 pixels, more than the 268,402,689 a mask shape can hold, so it's left out",
+      "a.jpg: annotation 2 (“sky”) carries Seamtag's attributes, but shape 1's mask is 16384 x 16384 pixels, more than the 268,402,689 a mask shape can hold, so it's imported from its segmentation"
+    ])
+    // 16383 x 16383 is a mask shape, counted without making it
+    const most = JSON.stringify({
+      images: [{ id: 1, width: 16383, height: 16384, file_name: 'b.jpg' }], categories: [{ id: 1, name: 'sky' }],
+      annotations: [{ id: 1, image_id: 1, category_id: 1, segmentation: { size: [16384, 16383], counts: [0, ...Array(16383).fill([16383, 1]).flat()] }, bbox: [0, 0, 16383, 16383] }]
+    })
+    const counted = readCoco(most, 'sky.json', { pixels: false }).results.get(1)!
+    expect([counted.shapes, counted.masks, counted.pixels]).toEqual([[newShape('sky', 'mask', [[0, 0], [16382, 16382]])], [null], MASK_PIXELS])
+  })
+
+  test("an outline that zigzags across the image is too long to fill and compare with the object's mask, so the mask is read", () => {
+    // Corner to corner of a 100,000-pixel square 20 times: 9.5 million points to trace, 76 MB, at 5 times the size
+    const zigzag = Array.from({ length: 20 }, (_, i) => (i % 2 ? [100000, 100000] : [0, 0]))
+    const text = JSON.stringify({
+      images: [{ id: 1, width: 100000, height: 100000, file_name: 'a.jpg' }], categories: [{ id: 1, name: 'cat' }],
+      annotations: [{
+        id: 1, image_id: 1, category_id: 1, segmentation: { size: [100000, 100000], counts: [5, 1, 1e10 - 6] }, bbox: [0, 5, 1, 1],
+        attributes: { group_id: 1, shapes: [{ shape_type: 'mask', points: [[0, 5], [0, 5]] }, { points: zigzag }] }
+      }]
+    })
+    const read = readCoco(text, 'a.json')
+    expect(read.results.get(1)!.shapes).toEqual([newShape('cat', 'mask', [[0, 5], [0, 5]])])
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "a.jpg: annotation 1 (“cat”) carries Seamtag's attributes, but shape 2's outline is too long to compare with its mask, so it's imported from its segmentation"
+    ])
+  })
+
+  test('values, names and file names from the file are quoted cut short, however long', () => {
+    const name = `${'deep/'.repeat(20000)}a.jpg`
+    const text = JSON.stringify({
+      images: [{ id: 1, width: 10, height: 8, file_name: name }, { id: 2, file_name: name }],
+      categories: [{ id: 1, name: 'c'.repeat(100000) }],
+      annotations: [
+        { id: 1, image_id: Array(100000).fill(123456789), category_id: 1, bbox: [1, 1, 2, 2] },
+        { id: 2, image_id: 1, category_id: 'x'.repeat(100000), bbox: [1, 1, 2, 2] },
+        { id: 3, image_id: 1, category_id: 1, segmentation: [[1, 2]], bbox: [1, 1, 2, 2] }
+      ]
+    })
+    const shown = (text: string, most: number) => `${text.slice(0, Math.floor((most - 1) / 2))}…${text.slice(text.length - (most - 1 - Math.floor((most - 1) / 2)))}`
+    const file = shown(name, 120), category = shown('c'.repeat(100000), 60)
+    expect(readCoco(text, 'x.json').issues.map((i) => i.message)).toEqual([
+      `x.json: image 2 in its images list (${file}) has no width and height, so it's left out`,
+      `x.json: annotation 1 is of image ${shown(JSON.stringify(Array(100000).fill(123456789)), 60)}, which isn't in its images list, so it's left out`,
+      `${file}: annotation 2 is of category ${shown(JSON.stringify('x'.repeat(100000)), 60)}, which isn't in the categories list, so it's left out`,
+      `${file}: annotation 3 (“${category}”) has its polygon of 1 point, and a polygon needs 3, so that polygon is left out`,
+      `${file}: annotation 3 (“${category}”) keeps only its box, so it becomes a rectangle`
+    ])
+  })
+
   test('a file that isn\'t COCO is refused whole', () => {
     expect(() => readCoco('{', 'a.json')).toThrow("a.json isn't valid JSON")
     expect(() => readCoco('[]', 'a.json')).toThrow("a.json isn't a COCO file: the top level must be an object")
@@ -772,6 +882,17 @@ describe('matching COCO images to the folder', () => {
     const two = matchCocoImages([im(1, '../x/a.jpg'), im(2, 'y/a.jpg')], ['z/a.jpg'])
     expect([...two.names]).toEqual([])
     expect(two.ambiguous.map((a) => [a.image.id, a.candidates])).toEqual([[1, ['z/a.jpg']], [2, ['z/a.jpg']]])
+  })
+
+  test("an image whose name many of the folder's images have names a few of them, and long names are cut short", () => {
+    // A video's frames, named alike in each of its folders
+    const folder = Array.from({ length: 1000 }, (_, i) => `video${i}/frame_0001.jpg`)
+    const m = matchCocoImages([im(1, 'frame_0001.jpg'), im(2, `${'x'.repeat(100000)}.jpg`)], folder)
+    expect(m.issues.map((i) => i.message)).toEqual([
+      "frame_0001.jpg isn't at that path in the folder and its name matches video0/frame_0001.jpg, video1/frame_0001.jpg, video2/frame_0001.jpg and 997 more, so its annotations are left out rather than guessed",
+      `${'x'.repeat(59)}…${'x'.repeat(56)}.jpg isn't in the folder, so its annotations are left out`
+    ])
+    expect(m.ambiguous[0].candidates).toHaveLength(1000)
   })
 
   test('an image listed twice gets the annotations of both, with a warning', () => {

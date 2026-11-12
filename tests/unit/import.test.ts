@@ -3,7 +3,7 @@ import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
 import { afterAll, afterEach, describe, expect, test, vi } from 'vitest'
-import { addShapes, closeImport, type ImportPolicy, type ImportPreview, type ImportRequest, importRows, readImport, stopImport, writeImport } from '../../src/main/import'
+import { addShapes, closeImport, type ImportPolicy, type ImportPreview, type ImportRequest, importRows, readImport, stopImport, writeBatches, writeImport } from '../../src/main/import'
 import { CocoSession, readTop, shapesOf, startFolder } from '../../src/main/importWorker'
 import { setCacheDir } from '../../src/main/images'
 import { decodeMask } from '../../src/main/masks'
@@ -12,7 +12,14 @@ import { type CocoEntry, readCoco, writeCoco } from '../../src/shared/coco'
 import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, parseLabelFile, type Shape } from '../../src/shared/labelfile'
 import { poseInstances, writePoseYaml } from '../../src/shared/pose'
+import { rleToMaskBits } from '../../src/shared/rle'
 import { labelRows, writeDataYaml } from '../../src/shared/ultralytics'
+
+// Masks' pixels are made by rleToMaskBits: counted, to see which images' are made, and when
+vi.mock('../../src/shared/rle', async (original) => {
+  const rle = await original<typeof import('../../src/shared/rle')>()
+  return { ...rle, rleToMaskBits: vi.fn(rle.rleToMaskBits) }
+})
 
 // A heap as small as a test wants, to see what a file too big for the COCO reader's does
 const heap = vi.hoisted(() => ({ free: 0 }))
@@ -104,6 +111,16 @@ async function read(root: string, req: Partial<ImportRequest> & Pick<ImportReque
 }
 const save = (policy: ImportPolicy = 'skip') => writeImport(policy, () => {}, (b) => batches.push(b as Batch))
 const group = <G extends { code: string }>(p: { groups?: G[]; skipped?: G[] }, code: string) => (p.groups ?? p.skipped)!.find((g) => g.code === code)
+
+/** A BMP file that is only its header, of any size: images are measured by their headers */
+function bmp(file: string, width: number, height: number) {
+  const head = Buffer.alloc(54)
+  head.write('BM', 0, 'ascii')
+  head.writeInt32LE(width, 18)
+  head.writeInt32LE(height, 22)
+  mkdirSync(path.dirname(file), { recursive: true })
+  writeFileSync(file, head)
+}
 
 // Pixels of a mask shape, rows of 0 and 1, its top-left pixel at x, y
 function bits(x: number, y: number, rows: string[]): MaskBits {
@@ -265,6 +282,10 @@ describe('a COCO file', () => {
     for (const bad of ['{"images": [1, 2', '{"images": [1 2]}', '{"images" [1]}', '{"images": [1]} x', '{images: []}', '{"images": [{"a": "b]}]}', '{"images": [1],}', '[1, 2'])
       expect(() => readTop(bad, 'c.json'), bad).toThrow(/^c\.json isn't valid JSON \(/)
     expect(() => readTop('[1, 2]', 'c.json')).toThrow("c.json isn't a COCO file: the top level must be an object, so nothing is imported")
+    // A key of megabytes is quoted cut short
+    const key = 'k'.repeat(5_000_000), cut = `${'k'.repeat(29)}…${'k'.repeat(30)}`
+    expect(() => readTop(`{"${key}" 1}`, 'c.json')).toThrow(`c.json isn't valid JSON (there's no colon after "${cut}"), so nothing is imported`)
+    expect(() => readTop(`{"${key}": [1, 2`, 'c.json')).toThrow(`c.json isn't valid JSON ("${cut}" has no value that ends), so nothing is imported`)
   })
 
   test('a file too big for the memory its reader may use is refused plainly before it gets near the limit', () => {
@@ -377,6 +398,73 @@ describe('a COCO file', () => {
       const at = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && pixels.data[(y - y0) * pixels.width + x - x0] ? '1' : '0'
       expect(Array.from({ length: c.h }, (_, y) => Array.from({ length: c.w }, (_, x) => at(x, y)).join('')), c.name).toEqual(c.rows)
     }
+  })
+
+  test("masks' pixels are made as images are written, so never at a size the file gives wrongly, nor for an image whose masks have too many", async () => {
+    const dir = folder()
+    for (const n of ['a.png', 'b.png']) await png(path.join(dir, n))
+    bmp(path.join(dir, 'big.bmp'), 16000, 16000)
+    const all = (h: number, w: number) => ({ size: [h, w], counts: [0, h * w] })
+    const file = path.join(folder(), 'masks.json')
+    writeFileSync(file, JSON.stringify({
+      // a.png is 40 x 30, not the 4000 x 3000 the file says, and big.bmp has 5 masks of 256 million pixels
+      images: [{ id: 1, file_name: 'a.png', width: 4000, height: 3000 }, { id: 2, file_name: 'b.png', width: W, height: H }, { id: 3, file_name: 'big.bmp', width: 16000, height: 16000 }],
+      categories: [{ id: 1, name: 'blob' }],
+      annotations: [
+        { id: 1, image_id: 1, category_id: 1, segmentation: all(3000, 4000), bbox: [0, 0, 4000, 3000] },
+        { id: 2, image_id: 2, category_id: 1, segmentation: { size: [H, W], counts: [31, 5, 25, 5, 1134] }, bbox: [1, 1, 2, 5] },
+        ...Array.from({ length: 5 }, (_, k) => ({ id: 3 + k, image_id: 3, category_id: 1, segmentation: all(16000, 16000), bbox: [0, 0, 16000, 16000] }))
+      ]
+    }))
+    const root = await open(dir)
+    vi.mocked(rleToMaskBits).mockClear()
+    const p = await read(root, { kind: 'coco', path: file })
+    expect(rleToMaskBits).not.toHaveBeenCalled()
+    expect([p.matched, p.blocked, p.fresh]).toEqual([3, 2, 1])
+    expect(group(p, 'import-mask-pixels')!.rows).toEqual(['big.bmp: its masks in masks.json have 1,280,000,000 pixels in all, more than the 1,073,741,824 Seamtag makes for one image at a time, so nothing is imported into it'])
+    const r = await save()
+    expect([r.names, vi.mocked(rleToMaskBits).mock.calls.length]).toEqual([['b.png'], 1])
+    expect(brief(doc(dir, 'b.json').shapes)).toEqual([['blob', 'mask', null, [[1, 1], [2, 5]]]])
+  })
+
+  test('images are written a batch at a time: at most 64, whose masks have at most 2^28 pixels unless one alone has more', () => {
+    const batches = (pixels: number[]) => writeBatches(pixels.map((n) => ({ pixels: n }))).map((b) => b.map((im) => im.pixels))
+    expect(batches(Array(130).fill(0)).map((b) => b.length)).toEqual([64, 64, 2])
+    expect(batches([2 ** 27, 2 ** 27, 1, 2 ** 29, 5, 2 ** 28])).toEqual([[2 ** 27, 2 ** 27], [1], [2 ** 29], [5], [2 ** 28]])
+    expect(batches([])).toEqual([])
+  })
+
+  test('labels named after what every object has, such as constructor or __proto__, are counted and written as they are', async () => {
+    const dir = folder()
+    await png(path.join(dir, 'a.png'))
+    const names = ['constructor', 'toString', '__proto__', 'dog']
+    const file = path.join(folder(), 'c.json')
+    writeFileSync(file, JSON.stringify({
+      images: [{ id: 1, file_name: 'a.png', width: W, height: H }], categories: names.map((name, i) => ({ id: i + 1, name })),
+      annotations: names.map((_, i) => ({ id: i + 1, image_id: 1, category_id: i + 1, bbox: [1 + i, 1, 5, 5] }))
+    }))
+    const root = await open(dir)
+    const p = await read(root, { kind: 'coco', path: file })
+    expect(p.labels.map((l) => [l.label, l.fresh, l.labelled]).sort()).toEqual(names.map((n) => [n, 1, 0]).sort())
+    const r = await save()
+    expect(r.labels.map((l) => [l.label, l.shapes]).sort()).toEqual(names.map((n) => [n, 1]).sort())
+    expect(doc(dir, 'a.json').shapes.map((s) => s.label)).toEqual(names)
+  })
+
+  test("a box too large to place on the image is left out, so the label file written, old shapes and all, can be read again", async () => {
+    const dir = folder()
+    await png(path.join(dir, 'a.png'))
+    write(dir, { 'a.json': labelme('a.png', [newShape('kept', 'rectangle', [[1, 1], [5, 5]])]) })
+    const file = path.join(folder(), 'c.json')
+    writeFileSync(file, JSON.stringify({
+      images: [{ id: 1, file_name: 'a.png', width: W, height: H }], categories: [{ id: 1, name: 'car' }],
+      annotations: [{ id: 1, image_id: 1, category_id: 1, bbox: [1e308, 2, 1e308, 10] }, { id: 2, image_id: 1, category_id: 1, bbox: [2, 2, 10, 10] }]
+    }))
+    const root = await open(dir)
+    const p = await read(root, { kind: 'coco', path: file })
+    expect(group(p, 'coco-no-pixels')!.rows).toEqual(["a.png: annotation 1 (“car”) has neither a shape nor a box with an area, so it's left out"])
+    await save('add')
+    expect(brief(doc(dir, 'a.json').shapes)).toEqual([['kept', 'rectangle', null, [[1, 1], [5, 5]]], ['car', 'rectangle', null, [[2, 2], [12, 12]]]])
   })
 })
 
@@ -630,6 +718,12 @@ describe('adding shapes to an image', () => {
     // Group 1 repeats own shape a of group 3, so its new shapes join 3; 2 and 9 go above 3
     expect(added.map((s) => [s.label, s.group_id])).toEqual([['kp', 3], ['b', null], ['c', 3], ['d', 4], ['e', 5]])
   })
+  test('new groups count on from the highest below 2^31, so an own group near 2^53 keeps imported objects apart', () => {
+    const own = [rect('a', 0, Number.MAX_SAFE_INTEGER), rect('b', 10, 3)]
+    const { added } = addShapes(own, [rect('c', 20, 1), rect('d', 30, 1), rect('e', 40, 2)])
+    // 2^53 + 1 is 2^53: counted on from it, both objects were one group
+    expect(added.map((s) => [s.label, s.group_id])).toEqual([['c', 4], ['d', 4], ['e', 5]])
+  })
   test("shapes that differ in anything but their group aren't repeats", () => {
     const own = [newShape('a', 'polygon', [[0, 0], [5, 0], [0, 5]], { flags: { difficult: true } })]
     expect(addShapes(own, [newShape('a', 'polygon', [[0, 0], [5, 0], [0, 5]])]).repeated).toBe(0)
@@ -740,6 +834,67 @@ describe('a YOLO dataset', () => {
     const near = (got: number[][], want: number[][]) => want.forEach(([x, y], i) => expect([Math.abs(got[i][0] - x), Math.abs(got[i][1] - y)].every((d) => d < 1e-4)).toBe(true))
     near(out[0].points, shapes[0].points)
     near(out[1].points, [[22, 2], [38, 2], [38, 28], [22, 28]])
+  })
+
+  test("class names such as constructor, which data.yaml holds without quotes, come back as they are", async () => {
+    const names = ['car', 'constructor', 'valueOf']
+    const shapes = names.map((n, i) => newShape(n, 'rectangle', [[2 + 12 * i, 2], [8 + 12 * i, 8]]))
+    const ds = folder()
+    await png(path.join(ds, 'images/train/a.png'))
+    write(ds, { 'labels/train/a.txt': labelRows(image('a.png', shapes), 'detect', names).text, 'data.yaml': writeDataYaml({ names, train: 'images/train', val: 'images/train' }) })
+    expect(text(ds, 'data.yaml')).toContain('\n  1: constructor\n')
+    const dir = folder()
+    await png(path.join(dir, 'a.png'))
+    const root = await open(dir)
+    const p = await read(root, { kind: 'yolo', path: ds })
+    expect([p.labels.map((l) => l.label).sort(), p.groups.map((g) => g.code)]).toEqual([[...names].sort(), ['yolo-two-splits']])
+    await save()
+    expect(doc(dir, 'a.json').shapes.map((s) => s.label)).toEqual(names)
+  })
+
+  test("a row too large to place on the image is left out, so the label file written, old shapes and all, can be read again", async () => {
+    const ds = await dataset({ 'c.png': '0 1e308 0.5 0.2 0.2\n0 0.5 0.5 0.5 0.5\n' }, { 0: 'car' })
+    const dir = folder()
+    await png(path.join(dir, 'c.png'))
+    write(dir, { 'c.json': labelme('c.png', [newShape('kept', 'rectangle', [[1, 1], [5, 5]])]) })
+    const root = await open(dir)
+    const p = await read(root, { kind: 'yolo', path: ds })
+    expect(group(p, 'yolo-row')!.rows).toEqual(["labels/train/c.txt: line 1 has a value too large to place on the image, so it's left out"])
+    await save('add')
+    expect(brief(doc(dir, 'c.json').shapes)).toEqual([['kept', 'rectangle', null, [[1, 1], [5, 5]]], ['car', 'rectangle', null, [[10, 7.5], [30, 22.5]]]])
+  })
+
+  test("Stop ends the search for the dataset's files at its next folder", async () => {
+    const ds = folder()
+    for (let i = 0; i < 30; i++) write(ds, { [`images/f${i}/a.png`]: '' })
+    const dir = folder()
+    await png(path.join(dir, 'a.png'))
+    const root = await open(dir)
+    const listed: string[] = []
+    const readdir = fsp.readdir.bind(fsp)
+    vi.spyOn(fsp, 'readdir').mockImplementation(((p: string, o: object) => {
+      if (String(p).startsWith(ds)) {
+        listed.push(String(p))
+        // Stopped while the third of the dataset's folders is listed
+        if (listed.length === 3) stopImport()
+      }
+      return readdir(p, o as never)
+    }) as never)
+    expect(await readImport(root, { kind: 'yolo', path: ds, prefer: 'labelme', labels: [] }, () => {})).toBeNull()
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(listed.length).toBe(3)
+  })
+
+  test('a keypoint file far larger than any is refused before it is read', async () => {
+    const bare = folder()
+    cpSync(path.join(__dirname, '../fixtures/ultralytics/layouts/ultralytics'), bare, { recursive: true })
+    write(bare, { 'data.yaml': text(bare, 'data.yaml').replace(/kpt_names:[\s\S]*$/, '') })
+    const root = await open(bare)
+    await read(root, { kind: 'yolo', path: path.join(bare, 'data.yaml') })
+    const keypoints = path.join(folder(), 'pose.yaml')
+    writeFileSync(keypoints, `${writePoseYaml({ classes: { person: ['top', 'left', 'right'] } })}# ${'x'.repeat(5 * 2 ** 20)}\n`)
+    const p = await read(root, { kind: 'yolo', path: path.join(bare, 'data.yaml'), keypoints })
+    expect([p.keypoints, group(p, 'import-keypoint-file')!.rows]).toEqual([{ from: 'generated', file: keypoints, count: 3 }, ["pose.yaml can't be used: it's 5.0 MB, more than the 4 MB a keypoint file may be"]])
   })
 
   test('an empty label file gives an image without labels an empty one; an image with labels keeps them, whatever the choice', async () => {

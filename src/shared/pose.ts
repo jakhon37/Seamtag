@@ -14,6 +14,19 @@ const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const issue = (severity: Severity, code: string, image: string | null, message: string, shape?: number): Issue =>
   (shape === undefined ? { severity, code, image, message } : { severity, code, image, shape, message })
 
+/**
+ * Text from a dataset as a message quotes it: at most `most` characters, a longer text cut in
+ * the middle, so a path keeps its file name. A file can hold a name or a value of megabytes, and
+ * a message quoting it may be one of thousands.
+ */
+export function short(text: string, most = 60): string {
+  if (text.length <= most) return text
+  // The end, which holds a path's file name, keeps the odd character
+  const start = Math.floor((most - 1) / 2), end = most - 1 - start
+  // Never between the two halves of a character outside the Basic Multilingual Plane
+  return `${text.slice(0, start).replace(/[\ud800-\udbff]$/, '')}…${text.slice(text.length - end).replace(/^[\udc00-\udfff]/, '')}`
+}
+
 // YAML
 
 // Ultralytics 8.4.211 reads data.yaml with its own YAML class (ultralytics/utils/__init__.py): YAML 1.2's
@@ -29,7 +42,16 @@ const PY_SPECIAL: Record<string, number> = {
 
 /** Python's whitespace, which str.split() and str.strip() split and strip at */
 export const PY_SPACE = '\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000'
-const TRIM = new RegExp(`^[${PY_SPACE}]+|[${PY_SPACE}]+$`, 'g')
+const SPACE = new RegExp(`[${PY_SPACE}]`)
+
+// Python's strip(), one end at a time: one regular expression for both ends would try every
+// run of whitespace inside the value, which takes as long as its length squared
+function pyStrip(s: string) {
+  let from = 0, to = s.length
+  while (from < to && SPACE.test(s[from])) from++
+  while (to > from && SPACE.test(s[to - 1])) to--
+  return s.slice(from, to)
+}
 
 // Python takes any Unicode decimal digit. They come in runs of ten from 0, so a digit's value is
 // how far it is from the start of its run, counted in tens.
@@ -49,15 +71,17 @@ const PRINTABLE = /^[\x21-\x7e]*$/
 const NOT_ASCII = /[^\x00-\x7f]/
 const pyText = (s: string) => {
   if (PRINTABLE.test(s)) return s
-  const t = s.replace(TRIM, '')
+  const t = pyStrip(s)
   return NOT_ASCII.test(t) ? asciiDigits(t) : t
 }
 
 const PY_DIGITS = '\\d(?:_?\\d)*'
 const PY_FLOAT = new RegExp(`^[+-]?(?:(?:${PY_DIGITS}(?:\\.(?:${PY_DIGITS})?)?|\\.${PY_DIGITS})(?:[eE][+-]?${PY_DIGITS})?|inf|infinity|nan)$`, 'i')
 const PY_INT = new RegExp(`^[+-]?${PY_DIGITS}$`)
-// Decimals without underscores, which Number() reads as float() does
-const DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/
+// Decimals without underscores, which Number() reads as float() does. Each digit can be matched
+// one way only: with two, a long run of digits that doesn't end as a number takes as long as its
+// length squared to refuse.
+const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/
 
 /** Python's float() of a string, or null where it raises ValueError */
 export function pyFloat(s: string): number | null {
@@ -76,8 +100,10 @@ export function pyInt(s: string): number | null {
   return PY_INT.test(t) ? Number(t.replace(/_/g, '')) : null
 }
 
+// The tables' own keys only: `in` would also find what every object has, so constructor or
+// toString would read as a function
 const pyNumber = (s: string) => {
-  if (s in PY_SPECIAL) return PY_SPECIAL[s]
+  if (Object.hasOwn(PY_SPECIAL, s)) return PY_SPECIAL[s]
   return /^[0-9+\-.]/.test(s) && /[0-9.]$/.test(s) ? (pyInt(s) ?? pyFloat(s)) : null
 }
 
@@ -85,7 +111,7 @@ const pyNumber = (s: string) => {
 export const ULTRALYTICS_YAML = yaml.FAILSAFE_SCHEMA.extend({
   implicit: [
     new yaml.Type('tag:yaml.org,2002:null', { kind: 'scalar', resolve: (s: string | null) => s === null || PY_NULL.has(s), construct: () => null }),
-    new yaml.Type('tag:yaml.org,2002:bool', { kind: 'scalar', resolve: (s: string | null) => s !== null && s in PY_BOOL, construct: (s: string) => PY_BOOL[s] }),
+    new yaml.Type('tag:yaml.org,2002:bool', { kind: 'scalar', resolve: (s: string | null) => s !== null && Object.hasOwn(PY_BOOL, s), construct: (s: string) => PY_BOOL[s] }),
     new yaml.Type('tag:yaml.org,2002:float', { kind: 'scalar', resolve: (s: string | null) => s !== null && pyNumber(s) !== null, construct: (s: string) => pyNumber(s) })
   ]
 })
@@ -133,31 +159,41 @@ function poseFail(message: string): never {
 const YES = /^(?:y|yes|on|true)$/i, NO = /^(?:n|no|off|false)$/i
 const asName = (v: unknown) => (typeof v === 'string' ? v : typeof v === 'number' ? String(v) : null)
 
+// The most keypoints, and pairs of them, a keypoint file may name in all. A person has 17, COCO's
+// whole body 133, a face mesh 478. YAML's aliases can give every class the same long list at no
+// cost in the file's size, so this, not the size, keeps reading one quick.
+const MOST_KEYPOINTS = 100_000
+
 function readPairs(raw: unknown, key: string, schema: KeypointSchema): Record<string, [string, string][]> | undefined {
   if (raw === undefined || raw === null) return undefined
   if (!isObject(raw)) poseFail(`needs ${key} as a class name and its pairs of keypoints on each line`)
-  const out: Record<string, [string, string][]> = {}
+  // Built from entries, so a class called __proto__ is a class like any other
+  const out: [string, [string, string][]][] = []
+  let total = 0
   for (const [cls, pairs] of Object.entries(raw as Record<string, unknown>)) {
     const names = Object.hasOwn(schema.classes, cls) ? schema.classes[cls] : null
-    if (!names) poseFail(`names ${cls} under ${key}, which isn't one of its classes`)
-    if (pairs === null) { out[cls] = []; continue }
-    if (!Array.isArray(pairs)) poseFail(`needs ${key} of ${cls} as a list of pairs, such as [left_eye, right_eye]`)
-    out[cls] = (pairs as unknown[]).map((pair) => {
+    if (!names) poseFail(`names ${short(cls)} under ${key}, which isn't one of its classes`)
+    if (pairs === null) { out.push([cls, []]); continue }
+    if (!Array.isArray(pairs)) poseFail(`needs ${key} of ${short(cls)} as a list of pairs, such as [left_eye, right_eye]`)
+    if ((total += pairs.length) > MOST_KEYPOINTS) poseFail(`gives more than ${MOST_KEYPOINTS.toLocaleString('en-GB')} pairs under ${key}, the most Seamtag reads`)
+    const known = new Set(names)
+    const list = (pairs as unknown[]).map((pair) => {
       const ends = Array.isArray(pair) ? pair.map(asName) : []
-      if (ends.length !== 2 || ends.some((e) => e === null)) poseFail(`needs each pair under ${key} of ${cls} to name two keypoints`)
-      for (const e of ends) if (!names.includes(e!)) poseFail(`pairs ${e} under ${key} of ${cls}, which isn't one of its keypoints`)
-      if (ends[0] === ends[1]) poseFail(`pairs ${ends[0]} with itself under ${key} of ${cls}`)
+      if (ends.length !== 2 || ends.some((e) => e === null)) poseFail(`needs each pair under ${key} of ${short(cls)} to name two keypoints`)
+      for (const e of ends) if (!known.has(e!)) poseFail(`pairs ${short(e!)} under ${key} of ${short(cls)}, which isn't one of its keypoints`)
+      if (ends[0] === ends[1]) poseFail(`pairs ${short(ends[0]!)} with itself under ${key} of ${short(cls)}`)
       return [ends[0]!, ends[1]!] as [string, string]
     })
     if (key === 'flip') {
       const seen = new Set<string>()
-      for (const name of out[cls].flat()) {
-        if (seen.has(name)) poseFail(`flips ${name} of ${cls} in two pairs`)
+      for (const name of list.flat()) {
+        if (seen.has(name)) poseFail(`flips ${short(name)} of ${short(cls)} in two pairs`)
         seen.add(name)
       }
     }
+    out.push([cls, list])
   }
-  return out
+  return Object.fromEntries(out)
 }
 
 /**
@@ -175,17 +211,22 @@ export function readPoseYaml(text: string): PoseFile {
   if (!isObject(data)) poseFail('needs classes: each class name and its keypoints, as X-AnyLabeling writes them')
   const raw = (data as Record<string, unknown>).classes
   if (!isObject(raw) || !Object.keys(raw).length) poseFail('needs classes: each class name and its keypoints, as X-AnyLabeling writes them')
-  const classes: Record<string, string[]> = {}
+  const classes: [string, string[]][] = []
+  let total = 0
   for (const [cls, list] of Object.entries(raw as Record<string, unknown>)) {
-    if (!Array.isArray(list) || !list.length) poseFail(`needs a list of keypoint names for ${cls}`)
+    if (!Array.isArray(list) || !list.length) poseFail(`needs a list of keypoint names for ${short(cls)}`)
+    // Counted before the list is read, as an alias repeats a whole list
+    if ((total += list.length) > MOST_KEYPOINTS) poseFail(`names more than ${MOST_KEYPOINTS.toLocaleString('en-GB')} keypoints in all, the most Seamtag reads`)
     const names = (list as unknown[]).map(asName)
+    const seen = new Set<string>()
     names.forEach((n, k) => {
-      if (n === null || n === '') poseFail(`has no name for keypoint ${k + 1} of ${cls}`)
-      if (names.indexOf(n) !== k) poseFail(`names ${n} twice in ${cls}`)
+      if (n === null || n === '') poseFail(`has no name for keypoint ${k + 1} of ${short(cls)}`)
+      if (seen.has(n)) poseFail(`names ${short(n)} twice in ${short(cls)}`)
+      seen.add(n)
     })
-    classes[cls] = names as string[]
+    classes.push([cls, names as string[]])
   }
-  const schema: KeypointSchema = { classes }
+  const schema: KeypointSchema = { classes: Object.fromEntries(classes) }
   const skeleton = readPairs((data as Record<string, unknown>).skeleton, 'skeleton', schema)
   const flip = readPairs((data as Record<string, unknown>).flip, 'flip', schema)
   if (skeleton) schema.skeleton = skeleton

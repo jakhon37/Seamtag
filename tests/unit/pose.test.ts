@@ -2,7 +2,7 @@ import yaml from 'js-yaml'
 import { describe, expect, test } from 'vitest'
 import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
-import { flipIndex, keypointCount, poseInstances, pyFloat, pyInt, readPoseYaml, shapesFromPose, writePoseYaml } from '../../src/shared/pose'
+import { flipIndex, keypointCount, poseInstances, pyFloat, pyInt, readPoseYaml, shapesFromPose, short, ULTRALYTICS_YAML, writePoseYaml } from '../../src/shared/pose'
 
 const image = (shapes: Shape[], masks: (MaskBits | null)[] = []): DatasetImage => ({
   name: 'a.jpg', width: 100, height: 80, file: 'a.json', format: 'labelme', shapes, masks: shapes.map((_, i) => masks[i] ?? null), flags: {}, verified: false
@@ -58,6 +58,63 @@ describe("X-AnyLabeling's pose file", () => {
     bad('classes:\n  dog: [a, b, c]\nflip:\n  dog: [[a, b], [b, c]]\n', /flips b of dog in two pairs/)
     bad('classes:\n  dog: [a, b]\nskeleton:\n  dog: [[a, a]]\n', /pairs a with itself/)
     bad('classes: {dog: [a]\n', /isn't valid YAML/)
+  })
+
+  test('a long list of keypoints reads quickly, and aliases repeating one for every class are stopped by a count of them all', () => {
+    const names = Array.from({ length: 20000 }, (_, i) => `k${i}`)
+    const read = (text: string) => {
+      try {
+        return readPoseYaml(text).schema.classes
+      } catch (e) {
+        return (e as Error).message
+      }
+    }
+    const quick = (text: string) => {
+      const t = performance.now()
+      const result = read(text)
+      // Checked name by name against the whole list, 20,000 names took 1.5 s, and 5 classes of them 7 s
+      expect(performance.now() - t).toBeLessThan(500)
+      return result
+    }
+    const one = `classes:\n  person: [${names.join(', ')}]\n`
+    expect(quick(one)).toEqual({ person: names })
+    expect(quick(`classes:\n  person: [${names.join(', ')}, k7]\n`)).toBe('The keypoint file names k7 twice in person')
+    // Each alias is the whole list again at no cost in the file: 10 classes of 20,000 is past the 100,000 it may name
+    const aliased = (n: number) => `classes:\n  c0: &L [${names.join(', ')}]\n${Array.from({ length: n - 1 }, (_, i) => `  c${i + 1}: *L\n`).join('')}`
+    expect(Object.keys(quick(aliased(5)) as object)).toEqual(['c0', 'c1', 'c2', 'c3', 'c4'])
+    expect(quick(aliased(10))).toBe('The keypoint file names more than 100,000 keypoints in all, the most Seamtag reads')
+    // Pairs are counted too, and checked against a class's keypoints at once
+    const pairs = (n: number) => `[${Array.from({ length: n }, (_, i) => `[k${i % 20000}, k${(i + 1) % 20000}]`).join(', ')}]`
+    const skeleton = (n: number) => `${aliased(5)}skeleton:\n  c0: &P ${pairs(n)}\n${[1, 2, 3, 4].map((i) => `  c${i}: *P\n`).join('')}`
+    expect(read(skeleton(20000))).toEqual(expect.objectContaining({ c4: names }))
+    expect(read(skeleton(20001))).toBe('The keypoint file gives more than 100,000 pairs under skeleton, the most Seamtag reads')
+  })
+
+  test('a class named after what every object has is a class like any other', () => {
+    const { schema } = readPoseYaml('classes:\n  __proto__: [nose, tail]\n  constructor: [nose]\nflip:\n  __proto__: [[nose, tail]]\n')
+    expect(Object.keys(schema.classes)).toEqual(['__proto__', 'constructor'])
+    expect(Object.hasOwn(schema.classes, '__proto__') && schema.classes.__proto__).toEqual(['nose', 'tail'])
+    expect(Object.getPrototypeOf(schema.classes)).toBe(Object.prototype)
+    expect(Object.hasOwn(schema.flip!, '__proto__') && schema.flip!.__proto__).toEqual([['nose', 'tail']])
+  })
+
+  test('names from the file are quoted cut short in its messages', () => {
+    const long = 'x'.repeat(100000)
+    expect(() => readPoseYaml(`classes:\n  dog: [${long}, ${long}]\n`)).toThrow(`The keypoint file names ${'x'.repeat(29)}…${'x'.repeat(30)} twice in dog`)
+  })
+})
+
+describe('text from a file in a message', () => {
+  test("is cut in the middle past 60 characters, or as many as asked, never between a character's two halves", () => {
+    expect(short('a.png')).toBe('a.png')
+    expect(short('x'.repeat(60))).toBe('x'.repeat(60))
+    const path = `images/${'deep/'.repeat(30)}IMG_0001.jpg`
+    expect(short(path)).toBe(`${path.slice(0, 29)}…${path.slice(-30)}`)
+    expect(short(path).length).toBe(60)
+    expect(short(path, 120)).toBe(`${path.slice(0, 59)}…${path.slice(-60)}`)
+    // 🐱 is two halves in JavaScript's strings
+    const cats = '🐱'.repeat(40)
+    expect([...short(cats)].every((c) => c === '🐱' || c === '…')).toBe(true)
   })
 })
 
@@ -161,6 +218,25 @@ describe("Python's float() and int(), which Ultralytics reads numbers with", () 
     for (const [s, want] of cases) expect(pyFloat(s), s).toEqual(want)
     expect([pyInt('007'), pyInt('1_000'), pyInt('-3'), pyInt('1.0'), pyInt('0x1f')]).toEqual([7, 1000, -3, null, null])
   })
+  test('a long value that is no number is refused in a time that grows with its length, not its square', () => {
+    // A run of digits that doesn't end as a number could be split two ways, 50,000 digits taking 6 s;
+    // so could a run of spaces inside a value when stripping its ends
+    for (const value of ['1'.repeat(50000) + 'x', '1' + ' '.repeat(50000) + '1', '1' + '\u3000'.repeat(50000) + '1']) {
+      const t = performance.now()
+      expect(pyFloat(value)).toBeNull()
+      expect(pyInt(value)).toBeNull()
+      expect(performance.now() - t).toBeLessThan(200)
+    }
+    expect(pyFloat('\u3000 7.5\u2003')).toBe(7.5)
+    expect(pyFloat('1'.repeat(400))).toBe(Number('1'.repeat(400)))
+  })
+
+  test("YAML's words for true, false, infinity and not a number are its own: a name such as constructor stays a name", () => {
+    const names = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', 'isPrototypeOf', '__proto__', '__defineGetter__']
+    expect(yaml.load(`[${names.join(', ')}]`, { schema: ULTRALYTICS_YAML })).toEqual(names)
+    expect(yaml.load('[True, false, .inf, -.Inf, .nan, 1_0]', { schema: ULTRALYTICS_YAML })).toEqual([true, false, Infinity, -Infinity, NaN, 10])
+  })
+
   test("plain values, which label files are made of, read within a few times what Number() takes", () => {
     // Every token of every label file is read this way, 40 million of them in a COCO-sized dataset
     const values = Array.from({ length: 100000 }, (_, i) => (((i * 7919) % 1000003) / 1000003).toFixed(6))

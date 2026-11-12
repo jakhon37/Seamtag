@@ -107,9 +107,10 @@ export function rleToBbox(r: Rle): [number, number, number, number] {
 
 /**
  * rleFrPoly: a polygon (x0, y0, x1, y1, ...) filled as pycocotools fills it. The outline is
- * traced at 5 times the size with C's rounding, and a pixel is in when its centre is.
+ * traced at 5 times the size with C's rounding, and a pixel is in when its centre is. Tracing
+ * takes 8 bytes a point; past `most` points it throws instead.
  */
-export function rleFrPoly(xy: ArrayLike<number>, h: number, w: number): Rle {
+export function rleFrPoly(xy: ArrayLike<number>, h: number, w: number, most = Infinity): Rle {
   // pycocotools' frPoly passes int(len(p) / 2) points: an odd last number is dropped
   const k = Math.floor(xy.length / 2)
   if (!k) return { h, w, counts: [h * w] }
@@ -122,6 +123,7 @@ export function rleFrPoly(xy: ArrayLike<number>, h: number, w: number): Rle {
   y[k] = y[0]
   let m = 0
   for (let j = 0; j < k; j++) m += Math.max(Math.abs(x[j] - x[j + 1]), Math.abs(y[j] - y[j + 1])) + 1
+  if (m > most) throw new Error(`Its outline is ${m} points long at 5 times the size, more than the ${most} it may be`)
   const u = new Int32Array(m), v = new Int32Array(m)
   m = 0
   for (let j = 0; j < k; j++) {
@@ -317,6 +319,49 @@ export function rleFrMaskBits(bits: MaskBits, h: number, w: number): Rle {
     run(0, top)
     for (let iy = top; iy < bottom; iy++) run(bits.data[(iy - y0) * bits.width + x] ? 1 : 0, 1)
     run(0, h - bottom)
+  }
+  counts.push(c)
+  return { h, w, counts }
+}
+
+/**
+ * The pixels of a mask inside a box (whole pixels of its own), placed with the box's top left at
+ * x, y in an h x w image and cut off at its edges, as runs: what rleFrMaskBits gives for
+ * rleToMaskBits(r, box) placed there, without making the pixels: a step for each of the image's
+ * columns and each of the mask's runs, never a byte a pixel.
+ */
+export function rleMove(r: Rle, box: { x: number; y: number; width: number; height: number }, x: number, y: number, h: number, w: number): Rle {
+  const counts: number[] = []
+  let p = 0, c = 0
+  const run = (value: number, n: number) => {
+    if (!n) return
+    if (value !== p) { counts.push(c); c = 0; p = value }
+    c += n
+  }
+  // The mask's rows that land in the image, and the box's columns that do
+  const top = Math.max(box.y, 0, box.y - y), bottom = Math.max(top, Math.min(box.y + box.height, r.h, box.y - y + h))
+  const left = Math.max(0, -x), right = Math.min(box.width, w - x)
+  if (right <= left) run(0, h * w)
+  else {
+    run(0, h * (x + left))
+    // The run the mask's pixels have reached, j, and where it starts, at: each column starts past the last
+    let j = 0, at = 0
+    for (let k = left; k < right; k++) {
+      const col = box.x + k
+      if (col < 0 || col >= r.w || top === bottom) { run(0, h); continue }
+      const above = y + top - box.y
+      run(0, above)
+      for (let a = col * r.h + top, b = col * r.h + bottom; a < b;) {
+        while (j < r.counts.length && at + r.counts[j] <= a) at += r.counts[j++]
+        // Runs that stop short of the mask leave the rest clear, as rleToMaskBits does
+        if (j === r.counts.length) { run(0, b - a); break }
+        const end = Math.min(b, at + r.counts[j])
+        run(j % 2, end - a)
+        a = end
+      }
+      run(0, h - above - (bottom - top))
+    }
+    run(0, h * (w - x - right))
   }
   counts.push(c)
   return { h, w, counts }

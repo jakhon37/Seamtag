@@ -9,7 +9,7 @@ import type { DatasetImage, Issue, KeypointSchema, MaskBits, PoseInstance, Sever
 import { pyFixed } from './formats'
 import { newShape, type Shape } from './labelfile'
 import { circlePolygon, CLOSED_TYPES } from './outline'
-import { flipIndex, keypointCount, pixelBox, poseInstances, PY_SPACE, pyFloat, pyInt, pyStr, shapeBox, shapesFromPose, ULTRALYTICS_YAML, yamlString } from './pose'
+import { flipIndex, keypointCount, pixelBox, poseInstances, PY_SPACE, pyFloat, pyInt, pyStr, shapeBox, shapesFromPose, short, ULTRALYTICS_YAML, yamlString } from './pose'
 import { convexHull, findContours, minAreaRect } from './polygonize'
 
 /** The tasks Ultralytics trains on labelled boxes, outlines, keypoints and rotated boxes */
@@ -60,8 +60,8 @@ const rowsOf = (text: string): Row[] =>
 
 const BOM = '\ufeff'
 // Characters that don't show, such as a byte order mark, as Python's repr() writes them, so a
-// message never quotes a value whose fault can't be seen
-const shown = (token: string) => token.replace(/\p{C}/gu, (c) => {
+// message never quotes a value whose fault can't be seen; a long value cut short
+const shown = (token: string) => short(token).replace(/\p{C}/gu, (c) => {
   const code = c.codePointAt(0)!
   const [prefix, digits] = code <= 0xff ? ['x', 2] : code <= 0xffff ? ['u', 4] : ['U', 8]
   return `\\${prefix}${code.toString(16).padStart(digits, '0')}`
@@ -647,6 +647,12 @@ export type DataYaml = {
   flipIdx: number[] | null
 }
 
+/**
+ * The most classes Seamtag names itself, class_0 on, when a dataset gives only their number or
+ * none at all: ImageNet-21k has 21,843. Each is a string kept while the dataset is open.
+ */
+export const MOST_CLASSES = 100_000
+
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const typeName = (v: unknown) => (Array.isArray(v) ? 'a list' : isObject(v) ? 'a map' : typeof v === 'number' ? 'a number' : typeof v === 'boolean' ? 'true or false' : 'text')
 const loadYaml = (text: string) => yaml.load(text.startsWith(BOM) ? text.slice(1) : text, { schema: ULTRALYTICS_YAML })
@@ -721,7 +727,7 @@ export function readDataYaml(text: string, file = 'data.yaml'): { data: DataYaml
     // nc may be written 10, 10.0 or '10', but not 1.9
     const v = d.nc
     const n = typeof v === 'number' ? v : typeof v === 'boolean' ? Number(v) : typeof v === 'string' ? pyFloat(v) : null
-    if (n === null || !Number.isInteger(n)) say('error', 'yolo-yaml', `has nc: ${pyStr(v)}, which isn't a whole number`)
+    if (n === null || !Number.isInteger(n)) say('error', 'yolo-yaml', `has nc: ${shown(pyStr(v))}, which isn't a whole number`)
     else nc = n
   }
   if (d.names !== null && d.names !== undefined) {
@@ -731,7 +737,7 @@ export function readDataYaml(text: string, file = 'data.yaml'): { data: DataYaml
     let ok = true
     for (const [k, v] of pairs) {
       const id = typeof k === 'number' ? k : pyInt(String(k))
-      if (id === null) { say('error', 'yolo-yaml', `has ${String(k)} as a class number in names`); ok = false; continue }
+      if (id === null) { say('error', 'yolo-yaml', `has ${shown(String(k))} as a class number in names`); ok = false; continue }
       if (isObject(v) || Array.isArray(v)) { say('error', 'yolo-yaml', `has ${typeName(v)} as the name of class ${id}`); ok = false; continue }
       entries.push([id, pyStr(v)])
     }
@@ -744,9 +750,14 @@ export function readDataYaml(text: string, file = 'data.yaml'): { data: DataYaml
     for (const [k, v] of pairs) {
       if (v !== null && typeof v !== 'boolean') continue
       const how = v === null ? 'a name left empty or written null, None or ~' : 'true or false without quotes'
-      say('warning', 'yolo-yaml-name', `names class ${String(k)} ${pyStr(v)}, as Ultralytics reads ${how}: put the name in quotes to keep it`)
+      say('warning', 'yolo-yaml-name', `names class ${shown(String(k))} ${pyStr(v)}, as Ultralytics reads ${how}: put the name in quotes to keep it`)
     }
-  } else if (nc !== null) data.names = Array.from({ length: nc }, (_, i) => `class_${i}`)
+  } else if (nc !== null) {
+    // A name is made for each class, so nc alone may ask for no more than MOST_CLASSES
+    if (nc < 1) say('error', 'yolo-yaml', `has nc: ${nc}, and Ultralytics needs at least one class`)
+    else if (nc > MOST_CLASSES) say('error', 'yolo-yaml', `has nc: ${nc} but no names, and Seamtag names at most ${MOST_CLASSES.toLocaleString('en-GB')} classes itself, so the classes are unknown`)
+    else data.names = Array.from({ length: nc }, (_, i) => `class_${i}`)
+  }
 
   if (d.kpt_shape !== undefined && d.kpt_shape !== null) {
     const v = d.kpt_shape as unknown[]
@@ -961,6 +972,10 @@ export function readRows(text: string, o: ReadOptions): { shapes: Shape[]; issue
     for (let k = 1; k + 1 < v.length; k += 2) out.push([pixel(v[k], W), pixel(v[k + 1], H)])
     return out
   }
+  // A value can be a number and still too large for the image: in pixels it's Infinity, which no
+  // label file can hold. Ultralytics would refuse the file; the row is left out here.
+  const placed = (points: number[][]) => points.every(([x, y]) => Number.isFinite(x) && Number.isFinite(y))
+  const tooLarge = (at: string) => say('warning', 'yolo-row', `${at} has a value too large to place on the image, so it's left out`)
   for (const { line, tokens } of rowsOf(bom ? text.slice(1) : text)) {
     if (skip.has(line)) continue
     const at = `: line ${line}`
@@ -990,6 +1005,8 @@ export function readRows(text: string, o: ReadOptions): { shapes: Shape[]; issue
         return [pixel(kx, W), pixel(ky, H), vis]
       })
       const [[x0, y0], [x1, y1]] = box(v)
+      // Keypoints not labelled are left out whatever they hold
+      if (!placed([[x0, y0], [x1, y1], ...keypoints.filter((k) => k[2] > 0)])) { tooLarge(at); continue }
       shapes.push(...shapesFromPose(label, [x0, y0, x1, y1], keypoints, o.kptNames?.[c] ?? [], group++))
       continue
     }
@@ -999,14 +1016,19 @@ export function readRows(text: string, o: ReadOptions): { shapes: Shape[]; issue
       n = 5
     }
     if (n === 5) {
+      const points = box(v)
+      if (!placed(points)) { tooLarge(at); continue }
       if (o.task !== 'detect') say('warning', 'yolo-box-row', `${at} is a box, which ${o.task === 'obb' ? 'rotated box' : 'outline'} training can't take; it's read as a box`)
-      shapes.push(newShape(label, 'rectangle', box(v)))
+      shapes.push(newShape(label, 'rectangle', points))
     } else if (n >= 7 && n % 2 === 1) {
       const points = pointsOf(v)
+      if (!placed(points)) { tooLarge(at); continue }
       if (o.task === 'detect') {
         say('info', 'yolo-outline-as-box', `${at} is an outline, which detection training reads as the box around it, as it's read here`)
-        const xs = points.map((p) => p[0]), ys = points.map((p) => p[1])
-        shapes.push(newShape(label, 'rectangle', [[Math.min(...xs), Math.min(...ys)], [Math.max(...xs), Math.max(...ys)]]))
+        // A loop, not Math.min(...xs): a row can hold more points than a call takes arguments
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+        for (const [x, y] of points) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y) }
+        shapes.push(newShape(label, 'rectangle', [[x0, y0], [x1, y1]]))
       } else if (o.task === 'obb' && n === 9 && isRectangle(points)) {
         shapes.push(newShape(label, 'oriented_rectangle', points))
       } else {

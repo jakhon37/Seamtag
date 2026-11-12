@@ -7,9 +7,9 @@ import { promises as fs } from 'fs'
 import path from 'path'
 import type { Issue, Severity } from '../shared/dataset'
 import { readClasses, YOLO_CLASSES } from '../shared/formats'
-import { pyFloat } from '../shared/pose'
+import { pyFloat, short } from '../shared/pose'
 import {
-  countRows, type DataYaml, guessTask, isDatasetYaml, isYoloImage, labelPathFor, labelText, newRowStats, readDataYaml, type TaskGuess
+  countRows, type DataYaml, guessTask, isDatasetYaml, isYoloImage, labelPathFor, labelText, MOST_CLASSES, newRowStats, readDataYaml, type TaskGuess
 } from '../shared/ultralytics'
 
 /** An image of the dataset and its label file (null when it has none, a background to Ultralytics); paths are absolute */
@@ -35,6 +35,15 @@ export type YoloDataset = {
 
 // Files looked at together
 const BATCH = 64
+// The most files the folders of one dataset may hold, all told: COCO's train2017 has 118,000
+// images and Objects365's 1.7 million, each with a label file. A data.yaml can name any folder,
+// the disk's root too, and every file listed is kept while the dataset is read.
+const MOST_FILES = 5_000_000
+
+/** What reading one dataset shares: Stop, and how many files may still be listed */
+type Reading = { signal?: AbortSignal; left: number }
+// Thrown when a dataset's folders hold more files than Reading allows
+class TooMany extends Error {}
 
 const stat = (p: string) => fs.stat(p).catch(() => null)
 const isDir = async (p: string) => (await stat(p))?.isDirectory() ?? false
@@ -46,9 +55,11 @@ const join = (dir: string, rel: string) => (dir.endsWith(path.sep) ? dir + rel :
 /**
  * Every file under a folder, as Python's glob('**') lists them: names starting with a dot are left
  * out. Files are added to `out` one at a time: a folder can hold more of them than a call takes
- * arguments (about 125,000 with Node's stack), so a list of files is never spread into one.
+ * arguments (about 125,000 with Node's stack), so a list of files is never spread into one. Stop
+ * ends it at the next folder, and a dataset's files past what `reading` allows end it with TooMany.
  */
-async function walk(dir: string, out: string[] = [], seen = new Set<string>()): Promise<string[]> {
+async function walk(dir: string, reading: Reading, out: string[] = [], seen = new Set<string>()): Promise<string[]> {
+  reading.signal?.throwIfAborted()
   const real = await fs.realpath(dir).catch(() => dir)
   // A link back up the tree would go round for ever
   if (seen.has(real)) return out
@@ -57,8 +68,11 @@ async function walk(dir: string, out: string[] = [], seen = new Set<string>()): 
   for (const e of entries) {
     if (e.name.startsWith('.')) continue
     const full = join(dir, e.name)
-    if (e.isDirectory() || (e.isSymbolicLink() && (await isDir(full)))) await walk(full, out, seen)
-    else out.push(full)
+    if (e.isDirectory() || (e.isSymbolicLink() && (await isDir(full)))) await walk(full, reading, out, seen)
+    else {
+      if (--reading.left < 0) throw new TooMany()
+      out.push(full)
+    }
   }
   return out
 }
@@ -113,11 +127,12 @@ const stem = (file: string) => path.basename(file, path.extname(file))
  * images are passed over, so a folder without a dataset's YAML is read as images and labels.
  * `files` is every file under the folder when it had to be listed.
  */
-async function findDatasetYaml(dir: string): Promise<{ found: string[]; passed: string[]; files: string[] | null }> {
+async function findDatasetYaml(dir: string, reading: Reading): Promise<{ found: string[]; passed: string[]; files: string[] | null }> {
   const passed: string[] = []
   const pick = async (candidates: string[], top: boolean) => {
     const taken: string[] = []
     for (let i = 0; i < candidates.length; i += BATCH) {
+      reading.signal?.throwIfAborted()
       const batch = candidates.slice(i, i + BATCH)
       const texts = await Promise.all(batch.map((f) => fs.readFile(f, 'utf8').catch(() => null)))
       batch.forEach((f, j) => {
@@ -141,7 +156,7 @@ async function findDatasetYaml(dir: string): Promise<{ found: string[]; passed: 
   let found = await pick(sortPaths(top), true)
   let files: string[] | null = null
   if (!found.length) {
-    files = await walk(dir)
+    files = await walk(dir, reading)
     found = await pick(files.filter((f) => YAML_FILE.test(f) && path.dirname(f) !== dir), false)
   }
   return { found, passed, files }
@@ -175,13 +190,22 @@ const some = (first: string, n: number, kind: string) => (n > 1 ? `${first} and 
  * where Ultralytics looks for them, and nowhere else; a folder without one is read in place: the
  * images folder rule counts from the folder (so folders above it named images don't count), then
  * a label beside its image is taken, then one where Ultralytics' rule finds it. Nothing is written.
+ * `signal` stops it, which throws its reason; `most` is how many files its folders may hold.
  */
-export async function readYoloDataset(target: string): Promise<YoloDataset> {
+export async function readYoloDataset(target: string, { signal, most = MOST_FILES }: { signal?: AbortSignal; most?: number } = {}): Promise<YoloDataset> {
   const issues: Issue[] = []
   const say = (severity: Severity, code: string, message: string, image: string | null = null) => issues.push({ severity, code, image, message })
   target = path.resolve(target)
   const empty = (root: string, yaml: string | null): YoloDataset =>
     ({ yaml, root, names: [], kptShape: null, kptNames: null, flipIdx: null, splits: [], guess: guessTask(newRowStats()), issues })
+  const reading: Reading = { signal, left: most }
+  // Folders holding more files than that are told, and nothing is read: a dataset found only in
+  // part would be imported only in part
+  const tooMany = (folder: string) => (e: unknown) => {
+    if (!(e instanceof TooMany)) throw e
+    say('error', 'yolo-too-many-files', `${folder} more than ${most.toLocaleString('en-GB')} files, more than Seamtag reads for one dataset, so none are read`)
+    return null
+  }
   const info = await stat(target)
   if (!info) {
     say('error', 'yolo-missing', `${target} isn't there`)
@@ -196,7 +220,8 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
     }
     yamlFile = target
   } else {
-    const search = await findDatasetYaml(target)
+    const search = await findDatasetYaml(target, reading).catch(tooMany(`${path.basename(target)} holds`))
+    if (!search) return empty(target, null)
     if (search.found.length > 1) {
       say('error', 'yolo-many-yaml', `${target} holds ${search.found.length} datasets' YAML files (${search.found.map((f) => path.relative(target, f)).join(', ')}): pick the dataset's own`)
       return empty(target, null)
@@ -227,7 +252,8 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
     for (const name of ['train', 'val', 'test'] as const) {
       const spec = data[name]
       if (!spec) continue
-      const images = await splitImages(root, name, spec, say, exists)
+      const images = await splitImages(root, name, spec, say, exists, reading).catch(tooMany(`The splits ${path.basename(yamlFile)} names hold`))
+      if (!images) return empty(root, yamlFile)
       splits.push({ name, items: images.map((image) => ({ image, label: null, split: name })) })
     }
   } else {
@@ -284,7 +310,10 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
     }
   }
   const images = [...labelOf.keys()]
-  for (let i = 0; i < images.length; i += BATCH) await Promise.all(images.slice(i, i + BATCH).map(lookUp))
+  for (let i = 0; i < images.length; i += BATCH) {
+    signal?.throwIfAborted()
+    await Promise.all(images.slice(i, i + BATCH).map(lookUp))
+  }
   for (const item of items) item.label = labelOf.get(item.image) ?? null
   const rel = (f: string) => path.relative(root, f)
   if (beside.size) {
@@ -321,12 +350,16 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
       : `${all} label file beside it or in labels/, so ${seen.size === 1 ? 'it' : 'they'}'d read as ${seen.size === 1 ? 'a background' : 'backgrounds'}`)
   }
 
-  // What the rows look like, and the highest class number for a folder with no names
+  // What the rows look like, and the highest class number for a folder with no names: below
+  // MOST_CLASSES, as each gets a name; a row of a class past it is told and left out
   const stats = newRowStats()
   const labels = [...owner.keys()]
   let top = -1
+  // Set in the callbacks below, which TypeScript doesn't follow
+  let past = null as { file: string; c: number } | null
   let unreadable = 0
   for (let i = 0; i < labels.length; i += BATCH) {
+    signal?.throwIfAborted()
     const texts = await Promise.all(labels.slice(i, i + BATCH).map(async (f) => labelText(await fs.readFile(f).catch(() => new Uint8Array([0xff])))))
     texts.forEach((text, j) => {
       if (text === null) {
@@ -337,7 +370,9 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
       countRows(stats, text)
       for (const m of text.matchAll(/^[^\S\r\n]*(\S+)/gm)) {
         const c = pyFloat(m[1])
-        if (c !== null && Number.isInteger(c) && c > top) top = c
+        if (c === null || !Number.isInteger(c)) continue
+        if (c >= MOST_CLASSES) past ??= { file: labels[i + j], c }
+        else if (c > top) top = c
       }
     })
   }
@@ -345,6 +380,7 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
   if (!yamlFile && !data.names.length) {
     data.names = Array.from({ length: top + 1 }, (_, i) => `class_${i}`)
     if (top >= 0) say('info', 'yolo-no-yaml', `${path.basename(target)} has neither data.yaml nor ${YOLO_CLASSES}, so the classes are named class_0 to class_${top}`)
+    if (past) say('warning', 'yolo-no-yaml', `${path.relative(root, past.file)} has a row of class ${past.c}, and without data.yaml Seamtag names at most ${MOST_CLASSES.toLocaleString('en-GB')} classes, so rows past class_${MOST_CLASSES - 1} are left out`)
   }
   if (!seen.size) say('error', 'yolo-no-images', `No images were found${yamlFile ? ` for ${path.basename(yamlFile)}'s splits` : ` in ${target}`}`)
   return {
@@ -374,7 +410,7 @@ async function rootOf(given: string | null, yamlDir: string, file: string, say: 
  * are added a file at a time, never spread into a call, as walk explains.
  */
 async function splitImages(
-  root: string, split: string, spec: string | string[], say: (s: Severity, code: string, m: string) => void, exists: (file: string) => Promise<boolean>
+  root: string, split: string, spec: string | string[], say: (s: Severity, code: string, m: string) => void, exists: (file: string) => Promise<boolean>, reading: Reading
 ): Promise<string[]> {
   const entries: string[] = []
   if (typeof spec === 'string') {
@@ -394,7 +430,7 @@ async function splitImages(
       continue
     }
     if (info.isDirectory()) {
-      add(await walk(p))
+      add(await walk(p, reading))
       continue
     }
     if (isYoloImage(p)) {
@@ -419,16 +455,17 @@ async function splitImages(
       return null
     }
     for (let i = 0; i < listed.length; i += BATCH) {
+      reading.signal?.throwIfAborted()
       const hits = await Promise.all(listed.slice(i, i + BATCH).map(where))
       hits.forEach((hit, j) => (hit ? found.push(hit) : missing.push(listed[i + j])))
     }
     const fallback = path.join(root, 'images', split)
     if (missing.length && missing.length * 2 >= listed.length && (await isDir(fallback))) {
       say('info', 'yolo-list-fallback', `${split}: ${missing.length} of the ${listed.length} images ${path.basename(p)} lists aren't there, so ${path.relative(root, fallback)} is read instead`)
-      add(await walk(fallback))
+      add(await walk(fallback, reading))
       continue
     }
-    if (missing.length) say('warning', 'yolo-list-missing', `${split}: ${missing.length} of the ${listed.length} images ${path.basename(p)} lists aren't there, such as ${missing[0]}`)
+    if (missing.length) say('warning', 'yolo-list-missing', `${split}: ${missing.length} of the ${listed.length} images ${path.basename(p)} lists aren't there, such as ${short(missing[0], 120)}`)
     add(found)
   }
   return sortPaths(images)
