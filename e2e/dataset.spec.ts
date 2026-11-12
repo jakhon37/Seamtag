@@ -1,8 +1,8 @@
-import { type ElectronApplication, expect, type Page, test } from '@playwright/test'
+import { type ElectronApplication, expect, type Locator, type Page, test } from '@playwright/test'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import path from 'path'
 import sharp from 'sharp'
-import { BASE, doc, finish, H, launch, open, project, saved, shapesIn, square, W } from './helpers'
+import { BASE, doc, finish, H, launch, open, project, read, saved, shapesIn, square, W } from './helpers'
 
 // Dataset > Check labels, the Problems dock, its fixes and renames, and Dataset > Statistics,
 // on a folder with one of each planted problem
@@ -27,13 +27,17 @@ async function planted(folder: string, classes?: { name: string; color: string }
     g: doc('g', [square('dog', 100, 100, 200, 200, 0.4)]),
     h: null
   }, classes)
-  // Each image its own: the helper's are all one grey, which is a problem of its own
-  for (const [k, name] of ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].entries()) {
-    await sharp({ create: { width: W, height: H, channels: 3, background: { r: 40 + k * 20, g: 80, b: 100 } } }).png().toFile(path.join(dir, `${name}.png`))
-  }
+  await paint(dir, ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
   // A label file whose image is gone
   writeFileSync(path.join(dir, 'gone.json'), doc('gone', [square('cat', 1, 1, 9, 9)]))
   return dir
+}
+
+/** Each image a colour of its own: the helper's are all one grey, which the check reports as copies of one image */
+async function paint(dir: string, names: string[]) {
+  for (const [k, name] of names.entries()) {
+    await sharp({ create: { width: W, height: H, channels: 3, background: { r: 40 + k * 20, g: 80, b: 100 } } }).png().toFile(path.join(dir, `${name}.png`))
+  }
 }
 
 /** A trash folder of the test's own, as e2e/labelimg.spec.ts makes it */
@@ -78,6 +82,30 @@ const fits = (page: Page, selector: string) => page.evaluate((sel) => {
   return { inside, page: document.documentElement.scrollWidth <= innerWidth, onScreen: box.bottom <= innerHeight + 1 && box.right <= innerWidth + 1 }
 }, selector)
 const shot = (page: Page, name: string) => page.screenshot({ path: path.join(SHOTS, name) })
+/**
+ * The contrast of an element's words with what lies behind them, as WCAG works it out: its colour,
+ * faded by its own and its ancestors' opacity, over the nearest background that isn't transparent
+ */
+const contrast = (target: Locator) => target.evaluate((el) => {
+  const rgba = (c: string) => (c.match(/[\d.]+/g) ?? []).map(Number)
+  const lum = (rgb: number[]) => {
+    const [r, g, b] = rgb.map((v) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  let opacity = 1, back = [255, 255, 255]
+  for (let e: Element | null = el; e; e = e.parentElement) opacity *= Number(getComputedStyle(e).opacity)
+  for (let e: Element | null = el; e; e = e.parentElement) {
+    const [r, g, b, a = 1] = rgba(getComputedStyle(e).backgroundColor)
+    if (a > 0) {
+      back = [r, g, b]
+      break
+    }
+  }
+  const [r, g, b, a = 1] = rgba(getComputedStyle(el).color)
+  const fore = [r, g, b].map((v, k) => v * a * opacity + back[k] * (1 - a * opacity))
+  const [hi, lo] = [lum(fore), lum(back)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+})
 /** Whether the focus is inside the element */
 const holds = (page: Page, selector: string) => page.evaluate((sel) => !!document.querySelector(sel)?.contains(document.activeElement), selector)
 /** Whether the element is inert, or inside an element that is */
@@ -115,7 +143,7 @@ test('Check labels lists the problems; rows open their shape, fixes undo, saves 
   await expect(severity('info')).toHaveAccessibleName('1 note')
   await expect(severity('info')).toHaveAttribute('aria-pressed', 'false')
   await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
-  await expect(group('label-variants').locator('.problem')).toContainText('Label "Cat" looks like "cat" from the label list')
+  await expect(group('label-variants').locator('.problem')).toContainText('Label “Cat” looks like “cat” from the label list')
   await shot(page, 'dock-1500-dark.png')
   expect(await fits(page, '.panel.right')).toEqual({ inside: true, page: true, onScreen: true })
   await darkMode(page)
@@ -383,13 +411,27 @@ test('saving by hand, a fixed problem stays out of date until the image is saved
   // No check of the saved file, which still has the copy, takes that back
   await page.waitForTimeout(2500)
   await expect(copies.locator('.problem.stale')).toHaveCount(1)
-  await expect(page.locator('.loading.notice')).toContainText("Deleted 1 exact copy of a shape. Ctrl+Z undoes it. It's checked again once saved.")
+  // The notice names the undo key as the menus do, ⌘Z on a Mac
+  const undo = process.platform === 'darwin' ? '⌘Z' : 'Ctrl+Z'
+  await expect(page.locator('.loading.notice')).toContainText(`Deleted 1 exact copy of a shape. ${undo} undoes it. It's checked again once saved.`)
   await expect(dock.locator('.problems-status')).toHaveText('Out of date')
   await expect(dock.locator('.problems-status')).toHaveAttribute('title', "a.png has changes that aren't saved: they're checked once they're saved.")
+  // The row keeps its words as readable as any other, with a clock in its margin; Out of date reads in both themes too
+  const late = copies.locator('.problem.stale')
+  await expect(late.locator('.problem-late')).toBeVisible()
   mkdirSync(SHOTS, { recursive: true })
-  await shot(page, 'dock-not-saved-1500-dark.png')
-  await darkMode(page)
-  await shot(page, 'dock-not-saved-1500-light.png')
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [1000, 640], [960, 600]]) {
+      await resize(app, page, width, height)
+      await late.scrollIntoViewIfNeeded()
+      for (const words of [late.locator('.problem-open'), late.locator('.problem-what'), late.locator('.problem-shape'), dock.locator('.problems-status')]) {
+        expect(await contrast(words)).toBeGreaterThanOrEqual(4.5)
+      }
+      await shot(page, `dock-not-saved-${width}-${theme}.png`)
+    }
+    if (theme === 'dark') await darkMode(page)
+  }
+  await resize(app, page, 1500, 940)
   await copies.getByRole('button', { name: 'Fix', exact: true }).click()
   await expect(page.locator('.loading.notice')).toContainText("That problem isn't in the image as it is now. It's checked again once the image is saved.")
   expect(shapesIn(dir, 'a')).toHaveLength(2)
@@ -693,5 +735,198 @@ test('Tab moves through the Problems dock, and skips to an AI shape only from th
   await page.keyboard.press('Tab')
   await expect(page.locator('.file.on')).toContainText('g.png')
   await expect(page.locator('.shape.on')).toContainText('dog')
+  await finish(app, errors)
+})
+
+// labelme's label list for its instance segmentation example (examples/instance_segmentation/labels.txt): it fills the Labels list
+const VOC = '__ignore__,_background_,aeroplane,bicycle,bird,boat,bottle,bus,car,cat,chair,cow,diningtable,dog,horse,motorbike,person,potted plant,sheep,sofa,train,tv/monitor'
+
+/**
+ * The Shapes section over the Problems dock: whether any of it lies past its own bottom or over the
+ * dock, how many of its rows show, whether they and Delete shape take a click where they show, how
+ * tall the Labels list is, and whether the column has to scroll
+ */
+const shapesColumn = (page: Page) => page.evaluate(() => {
+  const section = document.querySelector('section[aria-label="Shapes"]')!, list = section.querySelector('.shapes')!
+  const panel = document.querySelector('.panel.right')!, dock = document.querySelector('section.problems')!.getBoundingClientRect()
+  const box = section.getBoundingClientRect(), view = list.getBoundingClientRect()
+  const takes = (el: Element, top: number, bottom: number) => {
+    const r = el.getBoundingClientRect()
+    return el.contains(document.elementFromPoint(r.left + r.width / 2, (Math.max(r.top, top) + Math.min(r.bottom, bottom)) / 2))
+  }
+  const rows = [...list.querySelectorAll('.shape')].filter((row) => {
+    const r = row.getBoundingClientRect()
+    return r.bottom > view.top + 2 && r.top < view.bottom - 2
+  })
+  const remove = section.querySelector('.row.selection .danger')
+  return {
+    spills: Math.max(...[...section.children].map((el) => el.getBoundingClientRect().bottom)) > box.bottom + 1,
+    overDock: box.bottom > dock.top,
+    rows: rows.length,
+    rowsTake: rows.every((row) => takes(row, view.top, view.bottom)),
+    remove: remove && takes(remove, -Infinity, Infinity),
+    labels: document.querySelector('.panel.right .classes')!.clientHeight,
+    scrolls: panel.scrollHeight > panel.clientHeight + 1
+  }
+})
+
+test('on a short window the Shapes list keeps off the Problems dock, open or folded, with a long label list and a shape picked', async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const files: Record<string, string | null> = {
+    a: doc('a', ['person', 'dog', 'cat', 'car', 'chair', 'sofa', 'bus'].map((l, k) => square(l, 10 + k * 30, 10 + k * 20, 80 + k * 30, 80 + k * 20))),
+    b: doc('b', [square('zebra', 60, 60, 160, 160)]), c: doc('c', [square('Cat', 60, 60, 160, 160)]),
+    d: doc('d', [square('dog', 100, 100, 200, 200, 0.4)]), e: doc('e', [rect('bus', 300, 200, 430, 330)]), f: '{"shapes": [', g: null
+  }
+  const dir = await project('dataset-column', files)
+  await paint(dir, Object.keys(files))
+  const { app, page, errors } = await launch(dir, ['--labels', VOC])
+  // The list's 22, and the files' Cat and zebra
+  await expect(page.locator('section[aria-label="Labels"] .class')).toHaveCount(24)
+  await menu(page, 'Dataset', 'Check labels')
+  const dock = page.getByRole('region', { name: 'Problems' })
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  await expect(page.locator('.file.on')).toContainText('a.png')
+  const states: [string, () => Promise<void>][] = [
+    ['open', async () => {}],
+    // Difficult and Delete shape show under the list
+    ['picked', () => page.locator('.shapes .shape').first().click()],
+    ['folded', async () => {
+      await page.keyboard.press('Escape')
+      await expect(page.locator('.row.selection')).toHaveCount(0)
+      await dock.locator('.problems-fold').click()
+    }]
+  ]
+  for (const theme of ['dark', 'light']) {
+    for (const [state, make] of states) {
+      await resize(app, page, 1500, 940)
+      await make()
+      for (const [width, height] of [[960, 600], [1000, 640], [1500, 940]]) {
+        await resize(app, page, width, height)
+        const { rows, labels, ...column } = await shapesColumn(page)
+        expect(column).toEqual({ spills: false, overDock: false, rowsTake: true, remove: state === 'picked' ? true : null, scrolls: false })
+        // Two rows of shapes at the least, and of labels too
+        expect(rows).toBeGreaterThanOrEqual(2)
+        expect(labels).toBeGreaterThanOrEqual(58)
+        await shot(page, `column-${state}-${width}-${theme}.png`)
+      }
+    }
+    // As it began: the dock open
+    await dock.locator('.problems-fold').click()
+    if (theme === 'dark') await darkMode(page)
+  }
+  await finish(app, errors)
+})
+
+test("problem rows keep their image's name, cut in the middle, and their buttons, whatever the names and labels; Enter and Space press them", async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const one = (label: string) => [square(label, 20, 20, 120, 120)]
+  const files: Record<string, string | null> = {
+    broken: '{"shapes": [',
+    camera_north_gate_2024_06_01_frame_000363: doc('camera_north_gate_2024_06_01_frame_000363', one('surfboard')),
+    camera_north_gate_2024_06_01_frame_000403: doc('camera_north_gate_2024_06_01_frame_000403', one('Vehicle registration plate')),
+    cats_on_sofa: doc('cats_on_sofa', one('Cat')),
+    crossing_000077: doc('crossing_000077', [...one('traffic light for pedestrians'), ...one('traffic light for pedestrians')]),
+    forklift_yard_0001: doc('forklift_yard_0001', one('forklift carrying a pallet of boxes near the north loading gate')),
+    // 206 copies of a shape: with the crossing's, 206 rows, past the dock's first 200
+    many: doc('many', Array.from({ length: 206 }, () => square('dog', 50, 50, 90, 90))),
+    never: null
+  }
+  const dir = await project('dataset-rows', files)
+  await paint(dir, Object.keys(files))
+  const { app, page, errors } = await launch(dir, ['--labels', 'cat,dog,traffic light for pedestrians'])
+  await menu(page, 'Dataset', 'Check labels')
+  const dock = page.getByRole('region', { name: 'Problems' })
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  const row = (image: string) => dock.locator('.problem', { hasText: image }).first()
+  /** A row's name: its width, and whether its end shows; each of its buttons: inside the row, taking a click, and 24 px high */
+  const measure = (target: Locator) => target.evaluate((el) => {
+    const box = el.getBoundingClientRect(), name = el.querySelector('.name')!.getBoundingClientRect(), tail = el.querySelector('.cut-tail')
+    return {
+      name: name.width,
+      end: tail ? tail.getBoundingClientRect().right <= name.right + 0.5 : el.querySelector('.cut-head')!.scrollWidth <= Math.ceil(name.width),
+      buttons: [...el.querySelectorAll('.problem-act')].map((b) => {
+        const r = b.getBoundingClientRect()
+        return r.right <= box.right + 0.5 && b.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) && r.height >= 24
+      })
+    }
+  })
+  const images = ['camera_north_gate_2024_06_01_frame_000363.png', 'camera_north_gate_2024_06_01_frame_000403.png', 'cats_on_sofa.png', 'crossing_000077.png', 'forklift_yard_0001.png']
+  const check = async () => {
+    for (const image of images) {
+      await row(image).scrollIntoViewIfNeeded()
+      await expect(row(image).locator('.problem-open')).toHaveAttribute('title', image)
+      await expect(row(image).locator('.problem-open')).toHaveAccessibleName(image)
+      const { name, end, buttons } = await measure(row(image))
+      expect(name).toBeGreaterThanOrEqual(60)
+      expect([end, buttons]).toEqual([true, [true]])
+    }
+    // Names that differ only at the end still tell apart
+    await expect(row('frame_000363').locator('.cut-tail')).toHaveText('0363.png')
+    await expect(row('frame_000403').locator('.cut-tail')).toHaveText('0403.png')
+    expect(await fits(page, '.panel.right')).toEqual({ inside: true, page: true, onScreen: true })
+  }
+  await check()
+  // The title row's buttons are 24 px or more, as WCAG 2.2 asks of a target
+  for (const name of ['Check again', 'Close Problems']) {
+    const box = (await dock.getByRole('button', { name, exact: true }).boundingBox())!
+    expect([box.width, box.height].every((side) => side >= 24)).toBe(true)
+  }
+
+  // Enter and Space press a row's buttons: Rename… opens the rename, and the image's name opens it, without verifying it
+  const rename = page.getByRole('dialog', { name: 'Rename a label' })
+  const forklift = row('forklift_yard_0001.png').getByRole('button', { name: 'Rename…', exact: true })
+  for (const key of ['Enter', 'Space']) {
+    await forklift.focus()
+    await page.keyboard.press(key)
+    await expect(rename).toContainText('Renames 1 shape in 1 image: forklift_yard_0001.png.')
+    await page.keyboard.press('Escape')
+    await expect(rename).toHaveCount(0)
+    await expect(forklift).toBeFocused()
+  }
+  await row('frame_000403').locator('.problem-open').focus()
+  await page.keyboard.press('Enter')
+  await expect(page.locator('.file.on')).toContainText('camera_north_gate_2024_06_01_frame_000403.png')
+  await row('frame_000363').locator('.problem-open').focus()
+  await page.keyboard.press('Space')
+  await expect(page.locator('.file.on')).toContainText('camera_north_gate_2024_06_01_frame_000363.png')
+  await page.waitForTimeout(300)
+  await expect(page.locator('.status')).not.toContainText('Verified')
+  expect(read(dir, 'camera_north_gate_2024_06_01_frame_000363').verified).toBeUndefined()
+  const only = dock.getByLabel('This image only')
+  await only.focus()
+  await page.keyboard.press('Space')
+  await expect(only).toBeChecked()
+  await expect(dock.locator('.problems-group')).toHaveCount(1)
+  await page.keyboard.press('Space')
+  await expect(only).not.toBeChecked()
+
+  // A long group shows the rest when one page holds it
+  const copies = dock.locator('.problems-group[data-code="duplicate-shape"]')
+  await expect(copies.locator('.problems-title b')).toHaveText('206')
+  await expect(copies.locator('.problems-more')).toHaveText('Show the other 6')
+  await copies.locator('.problems-more').click()
+  await expect(copies.locator('.problem')).toHaveCount(206)
+  await expect(copies.locator('.problems-more')).toHaveCount(0)
+
+  // A picked row's buttons keep their contrast on its colour, at each size, in both themes
+  await row('crossing_000077.png').click()
+  await expect(row('crossing_000077.png')).toHaveClass(/\bpicked\b/)
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [1000, 640], [960, 600]]) {
+      await resize(app, page, width, height)
+      await check()
+      await row('crossing_000077.png').scrollIntoViewIfNeeded()
+      for (const part of ['.problem-open', '.problem-shape', '.problem-act', '.problem-what']) {
+        expect(await contrast(row('crossing_000077.png').locator(part))).toBeGreaterThanOrEqual(4.5)
+      }
+      await shot(page, `rows-${width}-${theme}.png`)
+    }
+    if (theme === 'dark') await darkMode(page)
+  }
+  await resize(app, page, 1500, 940)
+
+  // With every severity hidden, the dock lists what is
+  for (const severity of ['error', 'warning']) await dock.locator(`.problems-severities [data-severity="${severity}"]`).click()
+  await expect(dock.locator('.problems-list')).toHaveText(/^Nothing shown: 1 error, [\d,]+ warnings and [\d,]+ notes are hidden\.$/)
   await finish(app, errors)
 })

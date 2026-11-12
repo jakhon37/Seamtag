@@ -521,12 +521,12 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
         if (by > OUTSIDE) add('outside-image', name, `${shape} reaches ${num(by)} px past the ${edge} edge of the image`, k)
       }
     })
-    for (const [label, at] of unknown) add('unknown-label', name, `Label "${label}" isn't in the label list (${at.length === 1 ? 'shape' : 'shapes'} ${listed(at.map((k) => String(k + 1)))})`, at[0])
+    for (const [label, at] of unknown) add('unknown-label', name, `Label “${label}” isn't in the label list (${at.length === 1 ? 'shape' : 'shapes'} ${listed(at.map((k) => String(k + 1)))})`, at[0])
     for (const [label, k] of odd) {
       const to = preferred.get(label)!
       add('label-variants', name, listedLabels?.has(to)
-        ? `Label "${label}" looks like "${to}" from the label list, written another way`
-        : `Label "${label}" looks like "${to}" written another way (${counted(uses.get(to)!, 'shape uses', 'shapes use')} "${to}")`, k)
+        ? `Label “${label}” looks like “${to}” from the label list, written another way`
+        : `Label “${label}” looks like “${to}” written another way (${counted(uses.get(to)!, 'shape uses', 'shapes use')} “${to}”)`, k)
     }
     if (!geometry) continue
     const copyOf = copiesOf(image.shapes, image.masks)
@@ -553,7 +553,7 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
     add('orphan-label-file', null, `${o.file} has no image in the folder, so its labels are never shown or exported${more.length ? `; ${more.join(', and ')}` : ''}`)
   }
   if (labels) {
-    for (const label of labels) if (!accepted.has(label)) add('unused-label', null, `Label "${label}" is in the label list, but no accepted shape uses it`)
+    for (const label of labels) if (!accepted.has(label)) add('unused-label', null, `Label “${label}” is in the label list, but no accepted shape uses it`)
   }
 
   const order = new Map(images.map((i, k) => [i.name, k]))

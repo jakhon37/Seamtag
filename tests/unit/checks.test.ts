@@ -217,7 +217,7 @@ describe('labels', () => {
   test('labels missing from the label list are a warning, once an image; with no list set, nothing is', () => {
     const images = [image('a.png', [box('car', 1, 1, 9, 9), box('bus', 1, 1, 9, 9), box('bus', 20, 1, 29, 9)])]
     expect(of(check(images, { labels: ['car'] }), 'unknown-label')).toEqual([
-      { severity: 'warning', code: 'unknown-label', image: 'a.png', shape: 1, message: 'Label "bus" isn\'t in the label list (shapes 2 and 3)' }
+      { severity: 'warning', code: 'unknown-label', image: 'a.png', shape: 1, message: 'Label “bus” isn\'t in the label list (shapes 2 and 3)' }
     ])
     expect(of(check(images), 'unknown-label')).toEqual([])
   })
@@ -228,14 +228,14 @@ describe('labels', () => {
       image('b.png', [box('Car ', 1, 1, 9, 9), box('car', 20, 1, 29, 9), box('Traffic-Light', 40, 1, 49, 9), box('cart', 60, 1, 69, 9)])
     ]
     expect(of(check(images), 'label-variants').map((i) => [i.image, i.shape, i.message])).toEqual([
-      ['b.png', 0, 'Label "Car " looks like "car" written another way (3 shapes use "car")'],
-      ['b.png', 2, 'Label "Traffic-Light" looks like "traffic_light" written another way (2 shapes use "traffic_light")']
+      ['b.png', 0, 'Label “Car ” looks like “car” written another way (3 shapes use “car”)'],
+      ['b.png', 2, 'Label “Traffic-Light” looks like “traffic_light” written another way (2 shapes use “traffic_light”)']
     ])
     const listed = check(images, { labels: ['Car ', 'traffic_light', 'cart'] })
     expect(of(listed, 'label-variants').map((i) => [i.image, i.message])).toEqual([
-      ['a.png', 'Label "car" looks like "Car " from the label list, written another way'],
-      ['b.png', 'Label "car" looks like "Car " from the label list, written another way'],
-      ['b.png', 'Label "Traffic-Light" looks like "traffic_light" from the label list, written another way']
+      ['a.png', 'Label “car” looks like “Car ” from the label list, written another way'],
+      ['b.png', 'Label “car” looks like “Car ” from the label list, written another way'],
+      ['b.png', 'Label “Traffic-Light” looks like “traffic_light” from the label list, written another way']
     ])
     // A variant of a listed label is told so, not that it's missing from the list
     expect(of(listed, 'unknown-label')).toEqual([])
@@ -244,8 +244,8 @@ describe('labels', () => {
   test('labels in the list that no accepted shape uses are noted; a proposal alone is no use', () => {
     const images = [image('a.png', [box('car', 1, 1, 9, 9), box('bus', 1, 1, 9, 9, ai)])]
     expect(of(check(images, { labels: ['car', 'bus', 'van'] }), 'unused-label').map((i) => [i.image, i.message])).toEqual([
-      [null, 'Label "bus" is in the label list, but no accepted shape uses it'],
-      [null, 'Label "van" is in the label list, but no accepted shape uses it']
+      [null, 'Label “bus” is in the label list, but no accepted shape uses it'],
+      [null, 'Label “van” is in the label list, but no accepted shape uses it']
     ])
   })
 

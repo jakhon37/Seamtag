@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, CircleAlert, Clock, Info, RefreshCw, TriangleAlert, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { Severity } from '../../shared/dataset'
 import { useModal } from './Modal'
@@ -20,6 +20,11 @@ const ICON = Object.fromEntries(SEVERITIES.map((s) => [s.key, s.icon])) as Recor
 
 export const number = (n: number) => n.toLocaleString('en-GB')
 export const counted = (n: number, one: string, many = `${one}s`) => `${number(n)} ${n === 1 ? one : many}`
+/** a, b and c */
+const listed = (items: string[]) => (items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`)
+/** Show more's words, for `left` rows not shown and pages of `page`: the rest when one page holds them */
+export const showMore = (left: number, page: number) =>
+  left > page ? `Show ${number(page)} more (${number(left)} not shown)` : left === 1 ? 'Show 1 more' : `Show the other ${number(left)}`
 
 /** What a pass in the main process is doing, in words */
 export function progressText(p: Progress) {
@@ -52,9 +57,9 @@ type Props = {
   summary: CheckSummary | null
   /** A check running: a full one shows its progress with Stop, one after saves just says so */
   running: { quick: boolean; progress: Progress | null } | null
-  /** Images saved since the last check: their rows are dimmed until they're checked again */
+  /** Images saved since the last check: their rows are marked out of date until they're checked again */
   stale: { has: (name: string) => boolean; readonly size: number }
-  /** The open image, while it has changes that aren't saved: its rows are dimmed until they're saved and checked */
+  /** The open image, while it has changes that aren't saved: its rows are marked out of date until they're saved and checked */
   unsaved: string | null
   folded: boolean
   onFold: () => void
@@ -106,7 +111,7 @@ export default function Problems({
   ].join('\n')
   const hidden = counts ? SEVERITIES.filter((s) => counts[s.key] && !shown.includes(s.key)) : []
   const hiddenCount = counts ? hidden.reduce((n, s) => n + counts[s.key], 0) : 0
-  const dimOf = (row: ProblemRow) => (!row.image ? null : stale.has(row.image) ? 'saved' : row.image === unsaved ? 'unsaved' : null)
+  const lateOf = (row: ProblemRow) => (!row.image ? null : stale.has(row.image) ? 'saved' : row.image === unsaved ? 'unsaved' : null)
 
   return (
     <section className={`problems${folded ? ' folded' : ''}`} aria-label="Problems">
@@ -170,12 +175,12 @@ export default function Problems({
                       <b>{number(g.count)}</b>
                     </button>
                     {open && g.rows.map((row, k) => (
-                      <Row key={k} row={row} dim={dimOf(row)} picked={picked === keyOf(row)} onPick={() => setPicked(keyOf(row))}
+                      <Row key={k} row={row} late={lateOf(row)} picked={picked === keyOf(row)} onPick={() => setPicked(keyOf(row))}
                         onShow={onShow} onFix={onFix} onRename={onRename} onReveal={onReveal} />
                     ))}
                     {open && g.rows.length < g.count && (
                       <button className="ghost problems-more" onClick={() => setMore((m) => ({ ...m, [g.code]: g.rows.length + PAGE }))}>
-                        Show {number(Math.min(PAGE, g.count - g.rows.length))} more of {number(g.count - g.rows.length)}
+                        {showMore(g.count - g.rows.length, PAGE)}
                       </button>
                     )}
                   </div>
@@ -184,7 +189,7 @@ export default function Problems({
               {page && !page.groups.length && (
                 <p className="muted pad">
                   {!total ? (only ? 'No problems in this image.' : `No problems in ${counted(summary.images, 'image')}.`)
-                    : `Nothing shown: ${hidden.map((s) => counted(counts[s.key], s.one, s.many)).join(' and ')} ${hiddenCount === 1 ? 'is' : 'are'} hidden.`}
+                    : `Nothing shown: ${listed(hidden.map((s) => counted(counts[s.key], s.one, s.many)))} ${hiddenCount === 1 ? 'is' : 'are'} hidden.`}
                 </p>
               )}
             </div>
@@ -198,17 +203,29 @@ export default function Problems({
 /** A label a rename can start from: one written another way, or one not in the label list */
 const RENAMES = new Set(['label-variants', 'unknown-label'])
 const LATE = { saved: 'Saved since the check: this is checked again in a moment.', unsaved: "Changed since the check: this is checked again once it's saved." }
+// Characters a name cut short keeps at its end, so names that differ only there, as frame numbers do, still tell apart
+const TAIL = 8
+
+/**
+ * A name cut short in the middle when the row is too narrow for it, its end always shown. A
+ * screen reader takes its two parts for two words, so a button holding it is named whole.
+ */
+function MiddleCut({ text }: { text: string }) {
+  const chars = [...text]
+  if (chars.length <= TAIL + 2) return <span className="cut-head">{text}</span>
+  return <><span className="cut-head">{chars.slice(0, -TAIL).join('')}</span><span className="cut-tail">{chars.slice(-TAIL).join('')}</span></>
+}
 
 type RowProps = {
   row: ProblemRow
   /** Out of date: saved since the check, or changed in the window and not saved */
-  dim: keyof typeof LATE | null
+  late: keyof typeof LATE | null
   /** Clicked last: its message shows in full */
   picked: boolean
   onPick: () => void
 } & Pick<Props, 'onShow' | 'onFix' | 'onRename' | 'onReveal'>
 
-function Row({ row, dim, picked, onPick, onShow, onFix, onRename, onReveal }: RowProps) {
+function Row({ row, late, picked, onPick, onShow, onFix, onRename, onReveal }: RowProps) {
   const opens = !!row.image
   const act = (fn: () => void) => (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -216,16 +233,21 @@ function Row({ row, dim, picked, onPick, onShow, onFix, onRename, onReveal }: Ro
   }
   // The whole row opens its image to the mouse; its name is the button to the keyboard. A row
   // with no button takes the focus itself, so its message can be read in full from the keyboard.
+  // The message names the shape's label, so the name gets the room beside the shape's number.
   return (
-    <div className={`problem${opens ? ' opens' : ''}${dim ? ' stale' : ''}${picked ? ' picked' : ''}`} tabIndex={opens || row.file ? undefined : 0}
-      title={dim ? `${row.message}\n\n${LATE[dim]}` : row.message} onClick={() => {
+    <div className={`problem${opens ? ' opens' : ''}${late ? ' stale' : ''}${picked ? ' picked' : ''}`} tabIndex={opens || row.file ? undefined : 0}
+      title={late ? `${row.message}\n\n${LATE[late]}` : row.message} onClick={() => {
         onPick()
         if (opens) onShow(row)
       }}>
+      {late && <Clock size={12} className="problem-late" aria-label="Out of date" />}
       <div className="problem-where">
-        {opens ? <button className="name problem-open" onClick={act(() => { onPick(); onShow(row) })}>{row.image}</button>
-          : <span className="name">{row.file ?? 'The folder'}</span>}
-        {row.shape !== undefined && <span className="muted problem-shape">shape {row.shape + 1}{row.label?.trim() ? ` · ${row.label}` : ''}</span>}
+        {opens ? (
+          <button className="name problem-open" title={row.image!} aria-label={row.image!} onClick={act(() => { onPick(); onShow(row) })}>
+            <MiddleCut text={row.image!} />
+          </button>
+        ) : <span className="name" title={row.file}><MiddleCut text={row.file ?? 'The folder'} /></span>}
+        {row.shape !== undefined && <span className="muted problem-shape">shape {row.shape + 1}</span>}
         {row.fix && <button className="problem-act" onClick={act(() => onFix(row))} title="Fix it in the image: an edit that can be undone">Fix</button>}
         {RENAMES.has(row.code) && row.label !== undefined && (
           <button className="problem-act" onClick={act(() => onRename(row))} title={`Rename “${row.label}” in every label file of the folder`}>Rename…</button>

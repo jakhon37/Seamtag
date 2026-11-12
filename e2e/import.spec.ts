@@ -121,7 +121,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   // Skip: the images without labels get them; c and d keep theirs
   await dialog.getByRole('button', { name: 'Import 2 images' }).click()
   await expect(dialog.locator('.import-result')).toHaveText('Wrote 2 label files with 3 shapes.')
-  await expect(dialog).toContainText("dog isn't in the label list, so it shows under Labels as found in the label files.")
+  await expect(dialog).toContainText("“dog” isn't in the label list, so it shows under Labels as found in the label files.")
   await expect(dialog.locator('.import-group[data-code="labelled"] .count')).toHaveText('2')
   await dialog.locator('.import-group[data-code="import-size"] > button').click()
   await page.screenshot({ path: `${SHOTS}/import-report-dark-1500.png` })

@@ -372,7 +372,7 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
 }
 
 /** The spelling a label written another way looks like, as checkDataset words it */
-const LOOKS_LIKE = /looks like "(.*?)" (?:from the label list|written another way)/
+const LOOKS_LIKE = /looks like “(.*?)” (?:from the label list|written another way)/
 
 function rowOf(c: Checked, issue: Issue): ProblemRow {
   const image = issue.image === null ? undefined : imageOf(c, issue.image)

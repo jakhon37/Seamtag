@@ -300,7 +300,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
             {report.trashed > 0 && <p>{some(report.trashed, 'old label file', 'old label files')} went to the trash.</p>}
             {report.repeated > 0 && <p>{some(report.repeated, 'shape was', 'shapes were')} there already, so {report.repeated === 1 ? "it wasn't" : "they weren't"} added again.</p>}
             {unlisted.length > 0 && (
-              <p>{unlisted.length === 1 ? `${unlisted[0]} isn't` : `${unlisted.slice(0, -1).join(', ')} and ${unlisted[unlisted.length - 1]} aren't`} in the label list, so {unlisted.length === 1 ? 'it shows' : 'they show'} under Labels as found in the label files.</p>
+              <p>{unlisted.length === 1 ? `“${unlisted[0]}” isn't` : `${unlisted.slice(0, -1).map((l) => `“${l}”`).join(', ')} and “${unlisted[unlisted.length - 1]}” aren't`} in the label list, so {unlisted.length === 1 ? 'it shows' : 'they show'} under Labels as found in the label files.</p>
             )}
             {report.labels.length > 0 && (
               <section className="import-section">
