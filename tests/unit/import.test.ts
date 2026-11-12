@@ -153,10 +153,16 @@ describe('a COCO file', () => {
     const shape = [newShape('cat', 'rectangle', [[1, 1], [9, 9]])]
     // In the folder, beside val/: x.png is in train/ and val/, so only val/ finds both of its images
     const inside = cocoFile(path.join(dir, 'annotations', 'val.json'), ['x.png', 'y.png', 'q.png', 'deep/z.png'].map((n) => entry(n, shape)), ['cat'])
+    // deep/z.png's second annotation is of a category the file doesn't have
+    const coco = JSON.parse(text(dir, 'annotations/val.json'))
+    coco.annotations.push({ ...coco.annotations[3], id: 99, category_id: 7 })
+    writeFileSync(inside, JSON.stringify(coco))
     const root = await open(dir)
     const p = await read(root, { kind: 'coco', path: inside })
     expect([p.images, p.matched, p.byName, p.base, p.missing, p.ambiguous]).toEqual([4, 3, 1, 'val', 1, 0])
     expect(group(p, 'coco-image-missing')!.rows).toEqual(["q.png isn't in the folder, so its annotations are left out"])
+    // Its messages say which image of the folder it is
+    expect(group(p, 'coco-unknown-category')!.rows).toEqual(["deep/z.png (z.png in this folder): annotation 99 is of category 7, which isn't in the categories list, so it's left out"])
     const r = await save()
     expect(r.names.sort()).toEqual(['val/x.png', 'val/y.png', 'z.png'])
     // Outside the folder, x.png could be either: it's left out

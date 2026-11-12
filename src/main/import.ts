@@ -430,10 +430,15 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
   const { found } = reader
   s.images = found.images
   s.base = found.base
-  // Issues name images by COCO file_name: matched ones by the folder's name instead
+  // Issues name images by COCO file_name: matched ones by the folder's name too, where it differs
   const named = new Map<string, string>()
   for (const m of found.matched) named.set(m.fileName, m.name)
-  s.issues = found.issues.map((i) => (i.image !== null && named.has(i.image) ? { ...i, image: named.get(i.image)! } : i))
+  s.issues = found.issues.map((i) => {
+    const name = i.image === null ? undefined : named.get(i.image)
+    if (!name) return i
+    const told = name !== i.image && i.message.startsWith(`${i.image}:`) ? `${i.image} (${name} in this folder)${i.message.slice(i.image!.length)}` : i.message
+    return { ...i, image: name, message: told }
+  })
   s.missing = found.issues.filter((i) => i.code === 'coco-image-missing').length
   s.ambiguous = found.issues.filter((i) => i.code === 'coco-image-ambiguous').length
   const byName = new Map<string, Entry>()
