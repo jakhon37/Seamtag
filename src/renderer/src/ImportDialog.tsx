@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, CircleAlert, FileJson, FileText, FolderOpen, Info, TriangleAlert, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { YoloTask } from '../../shared/ultralytics'
 import {
   type ImportPolicy, type ImportPreview, type ImportProgress, type ImportReport, type ImportRequest, type IssueGroup, type LabelFormat, plainError
@@ -108,6 +108,12 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
   // When the rows fit more than one task, the window asks: a click on one says which
   const [confirmed, setConfirmed] = useState(false)
   const busy = stage === 'busy'
+  const box = useRef<HTMLDivElement>(null)
+  // Keys stay with the window, Escape among them, when the button that had focus goes and the one
+  // to take it is disabled (Import, while the task is asked): focus would fall to the page behind
+  useEffect(() => {
+    if (box.current && !box.current.contains(document.activeElement)) box.current.focus()
+  })
 
   useEffect(() => window.api.onImportProgress(setProgress), [])
   // What was read is let go of with the window
@@ -182,7 +188,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div className="dialog import" role="dialog" aria-label="Import dataset" onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
+      <div className="dialog import" role="dialog" aria-label="Import dataset" ref={box} tabIndex={-1} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
         <h3>Import dataset</h3>
         {stage === 'start' && (
           <div className="import-body">
