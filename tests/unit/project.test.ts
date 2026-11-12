@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, promises as fsp, readdirSync, readFileSync, renameSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
-import { describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { newShape, type Shape } from '../../src/shared/labelfile'
-import { findLabels, labelPath, loadLabels, openProject, saveLabels, type SaveRequest, setTrash, trashImage } from '../../src/main/project'
+import { findLabels, labelPath, loadLabels, openProject, renameRetrying, saveLabels, type SaveRequest, setTrash, trashImage, writeAtomic } from '../../src/main/project'
 
 // Saving, switching formats and deleting, on folders of their own. The trash is a folder too.
 const bin = mkdtempSync(path.join(tmpdir(), 'seamtag-trash-'))
@@ -111,4 +111,56 @@ test('Delete image: the image goes first, then its label files in every format; 
   expect((await trashImage(dir, 'a.png')).kept).toBeUndefined()
   expect(trashed).toEqual(['a.png', 'a.json', 'a.xml', 'a.txt'].map((f) => path.join(dir, f)))
   expect(existsSync(path.join(dir, 'classes.txt'))).toBe(true)
+})
+
+describe('renames a file someone holds for a moment', () => {
+  const platform = process.platform
+  const as = (name: string) => Object.defineProperty(process, 'platform', { value: name })
+  const busy = (code: string, times: number) => {
+    const rename = fsp.rename.bind(fsp)
+    let left = times
+    return vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      if (left-- > 0) throw Object.assign(new Error(`${code}: held`), { code })
+      return rename(from, to)
+    })
+  }
+  afterEach(() => {
+    as(platform)
+    vi.restoreAllMocks()
+  })
+
+  test('on Windows, EPERM, EACCES and EBUSY are tried again until the file is let go', async () => {
+    as('win32')
+    const dir = folder({})
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+      const spy = busy(code, 3)
+      await writeAtomic(path.join(dir, `${code}.json`), code)
+      expect(spy).toHaveBeenCalledTimes(4)
+      expect(text(dir, `${code}.json`)).toBe(code)
+      spy.mockRestore()
+    }
+  })
+
+  test('it gives up after its patience, and other errors and other systems fail at once', async () => {
+    const dir = folder({ 'a.txt': 'a' })
+    as('win32')
+    let spy = busy('EPERM', Infinity)
+    await expect(renameRetrying(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'), 100)).rejects.toThrow('EPERM')
+    expect(spy.mock.calls.length).toBeGreaterThan(2)
+    spy.mockRestore()
+    spy = busy('ENOENT', 1)
+    await expect(renameRetrying(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'))).rejects.toThrow('ENOENT')
+    expect(spy).toHaveBeenCalledTimes(1)
+    spy.mockRestore()
+    as('linux')
+    spy = busy('EPERM', 1)
+    await expect(renameRetrying(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'))).rejects.toThrow('EPERM')
+    expect(spy).toHaveBeenCalledTimes(1)
+    spy.mockRestore()
+    // A write whose rename fails leaves the old file as it was and no temporary file behind
+    busy('EPERM', 1)
+    await expect(writeAtomic(path.join(dir, 'a.txt'), 'new')).rejects.toThrow('EPERM')
+    expect(text(dir, 'a.txt')).toBe('a')
+    expect(readdirSync(dir).sort()).toEqual(['a.png', 'a.txt'])
+  })
 })

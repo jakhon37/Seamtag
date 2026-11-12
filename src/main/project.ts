@@ -260,12 +260,29 @@ export async function readDoc(file: string): Promise<LabelDoc | null> {
   return text === null ? null : parseLabelFile(text)
 }
 
+// On Windows an antivirus scanner, the search indexer or a sync client such as OneDrive can hold a
+// file that was just written for a moment, and renaming it, or a folder holding it, fails with
+// EPERM, EACCES or EBUSY until they let go. As graceful-fs does for npm, such a rename is tried
+// again, here for a few seconds; anywhere else those errors don't pass, so they're thrown at once.
+const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY'])
+export async function renameRetrying(from: string, to: string, patience = 5000) {
+  const start = Date.now()
+  for (let wait = 10; ; wait = Math.min(wait + 10, 100)) {
+    try {
+      return await fs.rename(from, to)
+    } catch (e) {
+      if (process.platform !== 'win32' || !BUSY.has((e as NodeJS.ErrnoException).code ?? '') || Date.now() - start >= patience) throw e
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+  }
+}
+
 export async function writeAtomic(file: string, text: string) {
   await fs.mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
   await fs.writeFile(tmp, text)
   try {
-    await fs.rename(tmp, file)
+    await renameRetrying(tmp, file)
   } catch (e) {
     await fs.rm(tmp, { force: true })
     throw e
