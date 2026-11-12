@@ -197,9 +197,10 @@ export default function App() {
     if (labeler.current && !(await labeler.current.canLeave())) return
     await window.api.resetSettings()
   }
-  // Importing and exporting read the label files, so the open image's changes are saved first
+  // Importing and exporting read the label files, so the open image's changes are saved first, or
+  // read again as saved when they're let go
   const openDataset = async (which: 'import' | 'export') => {
-    if (labeler.current && !(await labeler.current.canLeave())) return
+    if (labeler.current && !(await labeler.current.canLeave({ stay: true }))) return
     setDataset(which)
   }
   // The label list: the config's labels, then the project's classes. Labels found in the files aren't in it.

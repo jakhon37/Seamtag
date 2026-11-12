@@ -148,3 +148,33 @@ jobs:
         run: |
           dir=${{ runner.temp }}/yolo
           uv run --no-project --python 3.12 --with numpy==2.3.4 --with pyyaml==6.0.3 --with pillow==12.0.0 python -I tests/parity/ultralytics_reads.py $dir/detect $dir/segment $dir/pose $dir/obb
+
+  export-reads:
+    # Datasets the Export dataset window writes must load and score in pycocotools 2.0.11 and pass
+    # Ultralytics 8.4.211's own label checks
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: npm ci
+      - run: npx electron-vite build
+      - name: Allow Chromium's sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Export every format with the app
+        run: xvfb-run -a npx playwright test e2e/export.spec.ts --reporter=line
+        env:
+          E2E_DIR: ${{ runner.temp }}/e2e
+          E2E_SHOTS: ${{ runner.temp }}/shots
+      - name: Read them with pycocotools and Ultralytics' own code
+        shell: bash
+        run: |
+          out=${{ runner.temp }}/e2e/export-out
+          for d in coco coco-keypoints; do
+            uv run --no-project --python 3.12 --with pycocotools==2.0.11 --with numpy==2.5.4 python -I tests/parity/coco_reads.py $out/$d
+          done
+          uv run --no-project --python 3.12 --with numpy==2.3.4 --with pyyaml==6.0.3 --with pillow==12.0.0 python -I tests/parity/ultralytics_reads.py $out/yolo-detect $out/yolo-segment $out/yolo-pose $out/yolo-obb

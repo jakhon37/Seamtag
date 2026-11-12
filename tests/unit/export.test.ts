@@ -6,7 +6,7 @@ import yaml from 'js-yaml'
 import { afterAll, afterEach, describe, expect, test, vi } from 'vitest'
 import { readDataset } from '../../src/main/dataset'
 import {
-  type ExportOptions, type ExportProgress, folderProblem, forgetChecks, keypointSchemaOf, moreIssues, preflight, runExport, shareOut, shuffled, splitFolder
+  type ExportOptions, type ExportProgress, folderProblem, forgetExportChecks, keypointSchemaOf, moreIssues, preflight, runExport, shareOut, shuffled, splitFolder
 } from '../../src/main/export'
 import { setCacheDir } from '../../src/main/images'
 import { encodeMask } from '../../src/main/masks'
@@ -44,7 +44,7 @@ async function picture(file: string, [width, height]: [number, number] = [40, 30
   await (ext === '.jpg' ? pixels.jpeg() : ext === '.gif' ? pixels.gif() : pixels.png()).toFile(file)
 }
 const shape = (label: string, shape_type: string, points: number[][], extra: Record<string, unknown> = {}) =>
-  ({ label, points, group_id: null, description: '', shape_type, flags: {}, mask: null, ...extra })
+  ({ label, points, group_id: null, description: '', shape_type, flags: {}, mask: null as string | null, ...extra })
 const ai = (label: string, points: number[][]) => shape(label, 'polygon', points, { flags: { ai: true }, score: 0.8 })
 const square = (label: string, x: number, y: number, side = 10, extra: Record<string, unknown> = {}) =>
   shape(label, 'polygon', [[x, y], [x + side, y], [x + side, y + side], [x, y + side]], extra)
@@ -618,7 +618,7 @@ describe('the check', () => {
     expect(work()).toEqual(['read 3', 'check 1'])
     expect(fresh.splits.map((s) => s.objects)).toEqual([1, 2])
     // Once the window closes nothing is kept, and the check made afresh is the same
-    forgetChecks()
+    forgetExportChecks()
     expect(await preflight(dir, folders, ctx('two'))).toEqual({ ...fresh, id: expect.any(Number) })
     expect(work()).toEqual(['read 3', 'check 2'])
   })

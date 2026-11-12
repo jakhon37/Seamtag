@@ -39,7 +39,7 @@ function Group({ group, list }: { group: IssueGroup; list: 'issues' | 'skipped' 
   const Icon = ICONS[group.severity]
   const more = async () => setRows([...rows, ...(await window.api.importRows(list, group.code, rows.length))])
   return (
-    <div className={`import-group sev-${group.severity}`} data-code={group.code}>
+    <div className={`import-group is-${group.severity}`} data-code={group.code}>
       <button aria-expanded={open} onClick={() => setOpen(!open)}>
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         <Icon size={14} className="sev" aria-label={group.severity} />

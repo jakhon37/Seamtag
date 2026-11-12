@@ -103,7 +103,7 @@ async function read(root: string, req: Partial<ImportRequest> & Pick<ImportReque
   return p!
 }
 const save = (policy: ImportPolicy = 'skip') => writeImport(policy, () => {}, (b) => batches.push(b as Batch))
-const group = (p: { groups?: { code: string }[]; skipped?: { code: string }[] }, code: string) => (p.groups ?? p.skipped)!.find((g) => g.code === code)
+const group = <G extends { code: string }>(p: { groups?: G[]; skipped?: G[] }, code: string) => (p.groups ?? p.skipped)!.find((g) => g.code === code)
 
 // Pixels of a mask shape, rows of 0 and 1, its top-left pixel at x, y
 function bits(x: number, y: number, rows: string[]): MaskBits {

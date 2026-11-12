@@ -8,7 +8,7 @@ import {
 } from './checking'
 import { forgetDataset } from './dataset'
 import {
-  type ExportOptions, type ExportProgress, folderProblem, forgetChecks, keypointsFromFolder, moreIssues, preflight, readKeypoints, runExport, saveKeypoints
+  type ExportOptions, type ExportProgress, folderProblem, forgetExportChecks, keypointsFromFolder, moreIssues, preflight, readKeypoints, runExport, saveKeypoints
 } from './export'
 import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
@@ -268,7 +268,7 @@ function registerIpc() {
   // The window closed: what its checks kept goes with it
   ipcMain.handle('export:close', () => {
     exporting?.abort()
-    forgetChecks()
+    forgetExportChecks()
   })
   ipcMain.handle('export:reveal', (_e, out: string) => {
     if (out === exported) shell.showItemInFolder(out)

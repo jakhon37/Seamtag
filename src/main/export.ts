@@ -874,7 +874,7 @@ export function moreIssues(id: number, key: string, from: number, count = 200): 
 }
 
 /** Drops what checks keep while the window is open: the folder's read, what the writers made of each image, and the last check's issues */
-export function forgetChecks() {
+export function forgetExportChecks() {
   lastRead = null
   memos.clear()
   lastCheck = null
