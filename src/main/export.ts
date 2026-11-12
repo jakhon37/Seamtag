@@ -4,11 +4,14 @@
 // without writing anything, so the window shows what goes in and what the format can't hold. While
 // the window is open, a check after a change of options uses that read and what the writers made
 // of each image again, so only what the change touches is worked out again. The export reads the
-// folder afresh, builds the dataset in a hidden folder beside the one chosen and moves it into
-// place at the end, so a stopped or failed export leaves nothing half written. Nothing is ever
-// written inside the image folder or the folder its label files are saved in.
-import { constants, createReadStream, promises as fs } from 'fs'
+// folder afresh and builds the dataset in a hidden folder, beside the folder chosen when that's
+// new and inside it when it's an empty one, and moves it into place at the end, so a stopped or
+// failed export leaves nothing half written. Nothing is ever written inside the image folder or
+// the folder its label files are saved in.
+import { randomBytes } from 'crypto'
+import { constants, createReadStream, type Dirent, promises as fs } from 'fs'
 import path from 'path'
+import sharp from 'sharp'
 import { cocoLabels, type CocoDataset, type CocoEntry, type CocoInfo, type CocoTask, writeCoco } from '../shared/coco'
 import { type DatasetImage, type Issue, type KeypointSchema, type PoseInstance, type Severity, SEVERITIES } from '../shared/dataset'
 import type { LabelFormat } from '../shared/formats'
@@ -17,7 +20,8 @@ import { CLOSED_TYPES } from '../shared/outline'
 import { poseInstances, readPoseYaml, writePoseYaml } from '../shared/pose'
 import { isYoloImage, labelPathFor, labelRows, poseYamlKeys, type YoloTask, writeDataYaml } from '../shared/ultralytics'
 import { labelFileClashes, readDataset } from './dataset'
-import { folderOf, imagePath, isEmbedded, readDoc, writeAtomic } from './project'
+import { nameKey } from './names'
+import { folderOf, imagePath, isEmbedded, readDoc, renameRetrying, writeAtomic } from './project'
 
 /** The datasets the window exports */
 export const EXPORT_FORMATS = ['coco', 'coco-keypoints', 'yolo-detect', 'yolo-segment', 'yolo-pose', 'yolo-obb'] as const
@@ -125,6 +129,9 @@ const TITLES: Record<string, string> = {
   'export-background': 'Never-labelled images as backgrounds',
   'export-ai-left-out': 'AI proposals left out',
   'export-ai-only': 'Images with only AI proposals, left out',
+  'export-not-a-class': 'Shapes labelled __ignore__ or _background_, left out',
+  'export-size-mismatch': 'Label files that give another image size',
+  'export-exif-orientation': 'Images turned by their EXIF orientation',
   'coco-broken-labels': "Label files that can't be read",
   'coco-unreadable-image': "Images that can't be read",
   'coco-no-inside': "Lines and points COCO can't hold",
@@ -177,6 +184,21 @@ const byCode = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const posixJoin = (...parts: string[]) => parts.filter(Boolean).join('/')
 // The main process answers the window between chunks of work, so its saves never wait on an export
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve))
+/**
+ * A turn for the window in a long loop over images: awaited once an image, it waits a tick once
+ * the loop has run 20 ms since the last, and a check or export stopped meanwhile stops there
+ */
+type Turn = () => Promise<void> | undefined
+function turns(signal?: AbortSignal): Turn {
+  let since = Date.now()
+  return () => {
+    if (Date.now() - since < 20) return
+    return tick().then(() => {
+      signal?.throwIfAborted()
+      since = Date.now()
+    })
+  }
+}
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const keyOf = (i: Issue) => `${i.code}\0${i.image}\0${i.shape}\0${i.message}`
 // The same problem told twice, as both of COCO's files tell of an image that can't be read, is one
@@ -185,12 +207,11 @@ function unique(issues: Issue[]): Issue[] {
   return issues.filter((i) => !seen.has(keyOf(i)) && !!seen.add(keyOf(i)))
 }
 
-// Windows and macOS find a.PNG by the name a.png
-const FOLDS = process.platform === 'win32' || process.platform === 'darwin'
-const fold = (p: string) => (FOLDS ? p.toLowerCase() : p)
-const same = (a: string, b: string) => fold(a) === fold(b)
+// Paths compared as the file system compares them, as the check compares names: on Windows and
+// macOS a.PNG is a.png
+const same = (a: string, b: string) => nameKey(a) === nameKey(b)
 const inside = (child: string, parent: string) => {
-  const rel = path.relative(fold(parent), fold(child))
+  const rel = path.relative(nameKey(parent), nameKey(child))
   return !!rel && rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel)
 }
 
@@ -209,6 +230,19 @@ async function realPath(p: string): Promise<string> {
     }
   }
 }
+
+// What systems leave in folders of their own accord, so a folder holding only these counts as
+// empty: Finder's .DS_Store, .localized, Icon\r and ._ files, Explorer's Thumbs.db and desktop.ini,
+// and KDE's .directory; at the top of a drive, also the folders its system keeps there. The
+// export puts its files beside them and never touches them.
+const SYSTEM_FILES = new Set(['.ds_store', '.localized', 'icon\r', 'thumbs.db', 'ehthumbs.db', 'desktop.ini', '.directory'])
+const DRIVE_FOLDERS = new Set(['.spotlight-v100', '.fseventsd', '.trashes', '.temporaryitems', 'system volume information', '$recycle.bin', 'lost+found'])
+const systemEntry = (e: Dirent, drive: boolean) => {
+  const name = e.name.toLowerCase()
+  return e.isFile() ? SYSTEM_FILES.has(name) || name.startsWith('._') : drive && e.isDirectory() && DRIVE_FOLDERS.has(name)
+}
+// Whether new files can be made in a folder, as far as the system says before anything is written
+const writable = (dir: string) => fs.access(dir, constants.W_OK | constants.X_OK).then(() => true, () => false)
 
 /**
  * Why a folder can't take an export, or null when it can. It must be new or empty, so nothing
@@ -230,15 +264,20 @@ export async function folderProblem(root: string, out: string): Promise<string |
     return "That's the folder the label file is saved in: choose a new or empty folder"
   }
   const stat = await fs.lstat(out).catch(() => null)
-  // The export is moved into place by its name at the end, which a link can't take
+  // The dataset would go into the folder a link points to, not the one the window names
   if (stat?.isSymbolicLink()) return "That's a link to a folder: choose the folder itself"
   if (stat && !stat.isDirectory()) return "That's a file: choose a new or empty folder"
   if (stat) {
-    const entries = await fs.readdir(out).catch(() => null)
+    const entries = await fs.readdir(out, { withFileTypes: true }).catch(() => null)
     if (!entries) return "That folder can't be read: choose another"
-    if (entries.length) return "That folder isn't empty: choose a new or empty folder, so nothing in it is written over"
+    // The top of a drive: a folder that's its own parent, as E:\ is, or on another device than its parent
+    const drive = path.dirname(out) === out || (await fs.stat(path.dirname(out)).catch(() => stat)).dev !== stat.dev
+    if (!entries.every((e) => systemEntry(e, drive))) return "That folder isn't empty: choose a new or empty folder, so nothing in it is written over"
+    if (!(await writable(out))) return "That folder can't be written to: choose another"
   } else if (!(await fs.stat(path.dirname(out)).catch(() => null))?.isDirectory()) {
     return "The folder it would go in doesn't exist"
+  } else if (!(await writable(path.dirname(out)))) {
+    return "The folder it would go in can't be written to: choose another"
   }
   return null
 }
@@ -270,15 +309,36 @@ function random(seed: number) {
   }
 }
 
-/** Names sorted by path, then shuffled with the seed (Fisher and Yates' shuffle) */
+/** Names sorted by path, then shuffled with the seed */
 export function shuffled(names: string[], seed: number): string[] {
-  const out = [...names].sort(byCode)
+  return shuffle([...names].sort(byCode), seed)
+}
+
+/** A list shuffled in place with the seed (Fisher and Yates' shuffle) */
+function shuffle<T>(out: T[], seed: number): T[] {
   const next = random(seed)
   for (let i = out.length - 1; i > 0; i--) {
     const j = Math.floor(next() * (i + 1))
     ;[out[i], out[j]] = [out[j], out[i]]
   }
   return out
+}
+
+// What's worked out of a read's images as a whole, once: kept while reads give the very same
+// images, as the checks after a change of options do, and the export after them while no label
+// file or image changed (readDataset gives an image read before as it was). Dropped when the
+// window closes.
+let perRead: { images: DatasetImage[]; byPath?: number[]; clashes?: ReturnType<typeof labelFileClashes> } | null = null
+function readOnce(all: DatasetImage[]) {
+  if (perRead?.images.length !== all.length || perRead.images.some((image, k) => image !== all[k])) perRead = { images: all }
+  return perRead
+}
+
+/** The read's images by path, as numbers in the read, for the ratio split to shuffle with its seed */
+function byPath(all: DatasetImage[]): number[] {
+  const memo = readOnce(all)
+  memo.byPath ??= [...all.keys()].sort((a, b) => byCode(all[a].name, all[b].name))
+  return [...memo.byPath]
 }
 
 /** How many of n go to each share: each its whole part, then what's left over one each by the largest remainder, earlier shares first on a tie */
@@ -390,9 +450,9 @@ async function nameIn(root: string, image: DatasetImage): Promise<string> {
 /** An image as the export takes it */
 type Item = {
   image: DatasetImage
-  /** The image as read, before AI proposals were left out of it, which what checks made of it is kept by */
+  /** The image as read, before shapes were left out of it, which what checks made of it is kept by */
   read: DatasetImage
-  /** The number in the label file of each of image's shapes, when AI proposals were left out of them */
+  /** The number in the label file of each of image's shapes, when shapes were left out of them */
   map: number[] | null
   split: string
   /** Its path in its split's folder of images */
@@ -413,9 +473,9 @@ type Gathered = {
   notes: string[]
 }
 
-// The writers number shapes in the list they were given. Where AI proposals were left out of it,
-// issues name shapes by their number in the label file again, in `shape` and in messages ("shape
-// 3"), but never inside a quoted label.
+// The writers number shapes in the list they were given. Where shapes were left out of it, issues
+// name shapes by their number in the label file again, in `shape` and in messages ("shape 3"),
+// but never inside a quoted label.
 function renumbered(i: Issue, map: number[] | null): Issue {
   if (!map) return i
   const message = i.message.split(/(“[^”]*”)/).map((part, k) => (k % 2 ? part : part.replace(/\bshapes? \d+(?:(?:, | and )\d+)*/g,
@@ -448,6 +508,13 @@ async function readFolder(root: string, prefer: LabelFormat, ctx: Context): Prom
   return images
 }
 
+// labelme's own names for what's no object: its converters, labelme2coco and labelme2voc, number
+// the classes after them, and make nothing of shapes labelled __ignore__, the regions to ignore.
+// The export leaves both out of the classes, and their shapes out of the dataset.
+const NOT_CLASSES = new Map([['__ignore__', 'a region to ignore'], ['_background_', 'the background']])
+const shapeList = (k: number[]) => k.length === 1 ? `shape ${k[0] + 1}`
+  : k.length > 4 ? `shapes ${k.slice(0, 3).map((n) => n + 1).join(', ')} and ${k.length - 3} others` : `shapes ${k.slice(0, -1).map((n) => n + 1).join(', ')} and ${k[k.length - 1] + 1}`
+
 async function gather(root: string, options: ExportOptions, ctx: Context): Promise<Gathered> {
   checkOptions(options)
   const all = await readFolder(root, options.prefer, ctx)
@@ -457,6 +524,7 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
   const task = TASKS[options.format]
   const coco = !task
   const leave = options.images === 'leave'
+  const turn = turns(ctx.signal)
 
   let schema: KeypointSchema | null = null, keypoints: KeypointsSummary | null = null
   if (needsKeypoints(options.format)) {
@@ -470,10 +538,23 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     }
   }
 
-  // Which images go in, what of them, and under what name
-  const chosen: (Omit<Item, 'split' | 'rel'> & { as: string })[] = []
+  // Which images go in, what of them, and under what name; `at` is each one's place in the read
+  type Chosen = Omit<Item, 'split' | 'rel'> & { as: string; at: number }
+  const chosen: Chosen[] = []
+  // A label file that gives another size than its image's may hold shapes drawn on the image at
+  // that size, which the export would place on the image as it is: the Check calls it an error,
+  // and labelme 7 won't open such a file
+  const take = (c: Chosen) => {
+    const { image } = c, size = image.labelSize
+    if (image.file && size && !image.unreadable && image.width > 0 && image.height > 0 && (size[0] !== image.width || size[1] !== image.height)) {
+      add('error', 'export-size-mismatch', image.name, `${path.basename(image.file)} gives the image size as ${size[0]} x ${size[1]}, but ${image.name} is ` +
+        `${image.width} x ${image.height}, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size`)
+    }
+    chosen.push(c)
+  }
   let left = 0
-  for (const image of all) {
+  for (const [at, image] of all.entries()) {
+    await turn()
     const { name } = image
     const never = image.file === null && !image.broken
     if (never && !options.backgrounds) {
@@ -490,30 +571,46 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     if (never) add('info', 'export-background', name, `${name} has never been labelled, so it goes in as a background, with no objects`)
     if (leave && embedded) add('error', 'export-in-label-file', name, `${name} is held inside its label file, so it can't be left in place: copy the images instead`)
     const ai: number[] = []
-    image.shapes.forEach((s, i) => { if (isAi(s)) ai.push(i) })
-    if (!ai.length) {
-      chosen.push({ image, read: image, map: null, as })
-      continue
+    let unclassed: Map<string, number[]> | null = null
+    for (let i = 0; i < image.shapes.length; i++) {
+      const s = image.shapes[i]
+      if (isAi(s)) ai.push(i)
+      else if (NOT_CLASSES.has(s.label)) {
+        unclassed ??= new Map()
+        unclassed.set(s.label, [...(unclassed.get(s.label) ?? []), i])
+      }
     }
-    const proposals = plural(ai.length, 'AI proposal')
-    if (!options.leaveAi) {
+    const proposals = ai.length ? plural(ai.length, 'AI proposal') : ''
+    if (ai.length && !options.leaveAi) {
       add('error', 'export-ai-pending', name, `${name} has ${proposals} not yet accepted: accept or reject ${ai.length === 1 ? 'it' : 'them'}, or leave unaccepted proposals out`, ai[0])
-      chosen.push({ image, read: image, map: null, as })
+    }
+    // What's left out of it: shapes labelled __ignore__ or _background_, and AI proposals when chosen
+    if (!unclassed && !(options.leaveAi && ai.length)) {
+      take({ image, read: image, map: null, as, at })
       continue
     }
-    const map = image.shapes.flatMap((s, i) => (isAi(s) ? [] : [i]))
-    if (!map.length) {
-      add('info', 'export-ai-only', name, `${name} holds only ${proposals} not yet accepted, so it's left out, as not yet labelled`, ai[0])
-      continue
+    const dropped = new Set([...(unclassed?.values() ?? [])].flat())
+    if (options.leaveAi) for (const i of ai) dropped.add(i)
+    const map = image.shapes.flatMap((s, i) => (dropped.has(i) ? [] : [i]))
+    if (options.leaveAi && ai.length) {
+      if (!map.length) {
+        add('info', 'export-ai-only', name, `${name} holds only ${proposals} not yet accepted, so it's left out, as not yet labelled`, ai[0])
+        continue
+      }
+      add('info', 'export-ai-left-out', name, `${name}: its ${proposals} not yet accepted ${ai.length === 1 ? 'is' : 'are'} left out`, ai[0])
     }
-    add('info', 'export-ai-left-out', name, `${name}: its ${proposals} not yet accepted ${ai.length === 1 ? 'is' : 'are'} left out`, ai[0])
-    chosen.push({ image: { ...image, shapes: map.map((i) => image.shapes[i]), masks: map.map((i) => image.masks[i]) }, read: image, map, as })
+    for (const [label, shapes] of unclassed ?? []) {
+      add('info', 'export-not-a-class', name, `${name}: ${shapeList(shapes)}, labelled “${label}”, ${shapes.length === 1 ? 'is' : 'are'} left out, ` +
+        `as labelme's converters take ${label} for ${NOT_CLASSES.get(label)}, not an object`, shapes[0])
+    }
+    take({ image: { ...image, shapes: map.map((i) => image.shapes[i]), masks: map.map((i) => image.masks[i]) }, read: image, map, as, at })
   }
 
   // Posed objects, and the order of the categories or classes: the folder's, so that changing the
   // split never numbers them differently
   if (options.format === 'coco-keypoints' && schema) {
     for (const c of chosen) {
+      await turn()
       const found = poseInstances(c.image, schema)
       c.poses = found.instances
       for (const f of found.issues) issues.push(renumbered(f, c.map))
@@ -524,47 +621,73 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     const keys = schema ? poseYamlKeys(schema) : null
     classes = keys?.names ?? []
     if (keys) issues.push(...keys.issues)
-  } else classes = cocoLabels(options.labels, chosen.map((c): CocoEntry => ({ image: c.image, fileName: '', poses: c.poses })))
+  } else {
+    const named = [...new Set(options.labels.filter((l) => NOT_CLASSES.has(l)))]
+    if (named.length) {
+      notes.push(`The label list's ${named.join(' and ')} ${named.length === 1 ? "isn't a class" : "aren't classes"}: labelme's converters number the classes after ${named.length === 1 ? 'it' : 'them'}.`)
+    }
+    // A chunk of images at a time, each adding the labels it finds past those before it, as one
+    // call over them all would
+    classes = cocoLabels(options.labels.filter((l) => !NOT_CLASSES.has(l)), [])
+    for (let k = 0; k < chosen.length; k += 1000) {
+      await turn()
+      classes = cocoLabels(classes, chosen.slice(k, k + 1000).map((c): CocoEntry => ({ image: c.image, fileName: '', poses: c.poses })))
+    }
+  }
 
-  // Splits
+  // Splits: each image's, and its path in its split's folder of images
   const s = options.split
-  const placed = (c: (typeof chosen)[number], split: string, rel: string): Item => ({ image: c.image, read: c.read, map: c.map, poses: c.poses, split, rel })
-  let items: Item[]
   let splits: string[]
+  let place: (c: Chosen) => [string, string]
   if (s.mode === 'none') {
     // CVAT 2.83 calls the one subset of a dataset that isn't split default
     const folder = coco ? 'default' : ''
-    items = chosen.map((c) => placed(c, folder, c.as))
     splits = [folder]
+    place = (c) => [folder, c.as]
     if (!coco) notes.push("With no split, images/ and labels/ hold every image, and data.yaml's train and val both point at images, as Ultralytics needs a val entry.")
   } else if (s.mode === 'ratio') {
-    const rank = new Map(shuffled(all.map((i) => i.name), s.seed).map((n, k) => [n, k]))
-    const order = [...chosen].sort((a, b) => rank.get(a.image.name)! - rank.get(b.image.name)!)
-    const counts = shareOut(order.length, [s.train, s.val, s.test])
-    const at = new Map<string, string>()
-    let k = 0
-    SPLITS.forEach((split, i) => { for (let n = 0; n < counts[i]; n++) at.set(order[k++].image.name, split) })
-    items = chosen.map((c) => placed(c, at.get(c.image.name)!, c.as))
+    // Every image in the folder by path, shuffled with the seed: those going in take the shares in that order
+    const counts = shareOut(chosen.length, [s.train, s.val, s.test])
+    const going = new Uint8Array(all.length)
+    for (const c of chosen) going[c.at] = 1
+    const splitOf = new Array<string>(all.length).fill('')
+    let n = 0
+    for (const k of shuffle(byPath(all), s.seed)) {
+      if (!going[k]) continue
+      splitOf[k] = n < counts[0] ? 'train' : n < counts[0] + counts[1] ? 'val' : 'test'
+      n++
+    }
     splits = SPLITS.filter((_, i) => [s.train, s.val, s.test][i] > 0)
+    place = (c) => [splitOf[c.at], c.as]
   } else {
-    items = chosen.map((c) => {
+    splits = [...SPLITS]
+    place = (c) => {
       const { split, rel } = splitFolder(c.as)
       if (!split) add('warning', 'export-no-split-folder', c.image.name, `${c.image.name} isn't under a train, val or test folder, so it goes to train`)
-      return placed(c, split ?? 'train', rel)
-    })
-    splits = SPLITS.filter((split) => split === 'train' || items.some((i) => i.split === split))
+      return [split ?? 'train', rel]
+    }
   }
-  // Images in the folder's order within each split
-  items.sort((a, b) => splits.indexOf(a.split) - splits.indexOf(b.split))
+  // The images split by split, in the folder's order within each
+  const bySplit = new Map(splits.map((split): [string, Item[]] => [split, []]))
+  for (const c of chosen) {
+    await turn()
+    const [split, rel] = place(c)
+    let list = bySplit.get(split)
+    if (!list) bySplit.set(split, (list = []))
+    list.push({ image: c.image, read: c.read, map: c.map, poses: c.poses, split, rel })
+  }
+  const has = (split: string) => !!bySplit.get(split)?.length
+  if (s.mode === 'folders') splits = splits.filter((split) => split === 'train' || has(split))
+  const items = [...bySplit.values()].flat()
   if (task && s.mode !== 'none' && items.length) {
-    const train = items.some((i) => i.split === 'train')
+    const train = has('train')
     if (!train) add('warning', 'export-no-train', null, `No images go to train, so data.yaml's train points at the ${items[0].split} images`)
-    if (!items.some((i) => i.split === 'val')) add('warning', 'export-no-val', null, `No images go to val, so data.yaml's val points at the ${train ? 'train' : items[0].split} images, as Ultralytics needs a val entry`)
+    if (!has('val')) add('warning', 'export-no-val', null, `No images go to val, so data.yaml's val points at the ${train ? 'train' : items[0].split} images, as Ultralytics needs a val entry`)
   }
   // A split with a share, or train when the folders decide, that no image goes to
   if (s.mode !== 'none' && items.length) {
     for (const split of splits) {
-      if (items.some((i) => i.split === split)) continue
+      if (has(split)) continue
       if (coco) {
         const files = options.format === 'coco-keypoints' ? `instances_${split}.json and person_keypoints_${split}.json hold` : `instances_${split}.json holds`
         add('warning', 'export-empty-split', null, `No images go to ${split}, so ${files} none`)
@@ -573,24 +696,28 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
   }
 
   // Images, and YOLO's label files, that would land on one path
-  const clash = (code: string, paths: (i: Item) => string | null, say: (names: string[], at: string) => string) => {
+  const clash = async (code: string, paths: (i: Item) => string | null, say: (names: string[], at: string) => string) => {
     const by = new Map<string, { at: string; names: string[] }>()
     for (const i of items) {
+      await turn()
       const at = paths(i)
       if (at === null) continue
-      const known = by.get(fold(at))
+      const known = by.get(nameKey(at))
       if (known) known.names.push(i.image.name)
-      else by.set(fold(at), { at, names: [i.image.name] })
+      else by.set(nameKey(at), { at, names: [i.image.name] })
     }
     for (const { at, names } of by.values()) if (names.length > 1) add('error', code, names[0], say(names, at))
   }
   const imageAt = (i: Item) => posixJoin('images', i.split, i.rel)
-  if (!leave) clash('export-same-path', imageAt, (names, at) => `${listed(names)} would ${names.length === 2 ? 'both' : 'all'} be written to ${at}: rename one of them`)
-  if (task) clash('export-same-label', (i) => labelPathFor(imageAt(i)), (names, at) => `${listed(names)} would share one label file, ${at}, as Ultralytics finds label files by name: rename one of them`)
-  const going = new Set(items.map((i) => i.image.name))
-  for (const c of labelFileClashes(all)) {
-    if (!c.images.some((n) => going.has(n))) continue
-    add('error', 'export-shared-label-file', c.images[0], `${listed(c.images)} share one label file, ${path.basename(c.file)}, so whose labels are whose can't be told: give each image its own name`)
+  if (!leave) await clash('export-same-path', imageAt, (names, at) => `${listed(names)} would ${names.length === 2 ? 'both' : 'all'} be written to ${at}: rename one of them`)
+  if (task) await clash('export-same-label', (i) => labelPathFor(imageAt(i)), (names, at) => `${listed(names)} would share one label file, ${at}, as Ultralytics finds label files by name: rename one of them`)
+  const shared = (readOnce(all).clashes ??= labelFileClashes(all))
+  if (shared.length) {
+    const going = new Set(items.map((i) => i.image.name))
+    for (const c of shared) {
+      if (!c.images.some((n) => going.has(n))) continue
+      add('error', 'export-shared-label-file', c.images[0], `${listed(c.images)} share one label file, ${path.basename(c.file)}, so whose labels are whose can't be told: give each image its own name`)
+    }
   }
 
   if (task && task !== 'pose' && !classes.length && items.length) {
@@ -677,12 +804,46 @@ function cocoChunk(g: Gathered, part: Item[], names: string[], info: CocoInfo, g
   return { datasets, tallies }
 }
 
+// EXIF orientations, by image as read, read once an image: of photos, as JPEG and TIFF files
+// hold them, where cameras and phones write them
+const orientations = new WeakMap<DatasetImage, number>()
+const HOW: Record<number, string> = { 2: 'mirrored', 3: 'turned', 4: 'mirrored', 5: 'turned and mirrored', 6: 'turned', 7: 'turned and mirrored', 8: 'turned' }
+
+/**
+ * COCO gives each image's width, height and shapes upright, as labelme, OpenCV and Ultralytics
+ * show it, while its file goes into the dataset as it is: each image an EXIF orientation turns
+ * gets a note in its tally, as a reader that ignores the orientation sees it otherwise
+ */
+async function orientationNotes(root: string, part: Item[], tallies: Tally[]) {
+  // Eight headers read at a time, as readDataset reads them, so main never sets up many at once
+  let next = 0
+  await Promise.all(Array.from({ length: 8 }, async () => {
+    while (next < part.length) {
+      const k = next++
+      const { image, read } = part[k]
+      let o = orientations.get(read)
+      if (o === undefined) {
+        const file = imagePath(root, image.name)
+        o = isEmbedded(root, image.name) || !/\.(jpe?g|jfif|tiff?)$/i.test(file) ? 1
+          : (await sharp(file, { limitInputPixels: false }).metadata().catch(() => null))?.orientation ?? 1
+        orientations.set(read, o)
+      }
+      const how = HOW[o]
+      if (how) {
+        tallies[k].issues.push(issue('info', 'export-exif-orientation', image.name, `${image.name} is stored ${how}, with EXIF orientation ${o}: its width, height and ` +
+          `shapes are for it upright, as labelme, OpenCV and Ultralytics show it, so a reader that ignores the orientation, such as torchvision's CocoDetection, sees it ${how}`))
+      }
+    }
+  }))
+}
+
 /** The images and objects in each split and of each label, and the issues, from each item's tally */
-function summed(g: Gathered, tallies: Tally[], global: Issue[]) {
+async function summed(g: Gathered, tallies: Tally[], global: Issue[], turn: Turn) {
   const splits = new Map(g.splits.map((folder): [string, SplitCount] => [folder, { name: folder || 'all', folder, images: 0, objects: 0, backgrounds: 0, posed: 0 }]))
   const labels = new Map(g.classes.map((label) => [label, g.splits.map(() => 0)]))
   const issues: Issue[] = []
-  g.items.forEach((item, k) => {
+  for (const [k, item] of g.items.entries()) {
+    await turn()
     const t = tallies[k], at = g.splits.indexOf(item.split), split = splits.get(item.split)!
     split.images++
     split.objects += t.objects.length
@@ -694,7 +855,7 @@ function summed(g: Gathered, tallies: Tally[], global: Issue[]) {
       row[at]++
     }
     for (const f of t.issues) issues.push(f)
-  })
+  }
   for (const f of unique(global)) issues.push(f)
   return { splits: [...splits.values()], labels: [...labels].map(([label, objects]): LabelCount => ({ label, objects })), issues }
 }
@@ -723,14 +884,24 @@ const CHUNK = 256
 const CHECKED = 64
 
 /** Each item's tally, from what an earlier check made of it where it can, and the issues of no one image */
-async function tallied(g: Gathered, ctx: Context): Promise<{ tallies: Tally[]; global: Issue[] }> {
+async function tallied(root: string, g: Gathered, ctx: Context): Promise<{ tallies: Tally[]; global: Issue[] }> {
   const memo = memoOf(g)
-  const todo = g.items.filter((i) => !memo.images.has(i.read))
+  const turn = turns(ctx.signal)
+  const todo: Item[] = []
+  for (const i of g.items) {
+    await turn()
+    if (!memo.images.has(i.read)) todo.push(i)
+  }
   let told = 0
   for (let start = 0; start < todo.length; start += CHECKED) {
     ctx.signal?.throwIfAborted()
     const part = todo.slice(start, start + CHECKED)
-    const made = TASKS[g.options.format] ? part.map((i) => yoloRows(g, i).tally) : cocoChunk(g, part, part.map((i) => i.image.name), NO_INFO, memo.global).tallies
+    let made: Tally[]
+    if (TASKS[g.options.format]) made = part.map((i) => yoloRows(g, i).tally)
+    else {
+      made = cocoChunk(g, part, part.map((i) => i.image.name), NO_INFO, memo.global).tallies
+      await orientationNotes(root, part, made)
+    }
     part.forEach((i, k) => memo.images.set(i.read, made[k]))
     const done = start + part.length
     if (Date.now() - told >= 100 || done === todo.length) {
@@ -739,7 +910,12 @@ async function tallied(g: Gathered, ctx: Context): Promise<{ tallies: Tally[]; g
     }
     await tick()
   }
-  return { tallies: g.items.map((i) => memo.images.get(i.read)!), global: [...globalIssues(g), ...memo.global.values()] }
+  const tallies: Tally[] = []
+  for (const i of g.items) {
+    await turn()
+    tallies.push(memo.images.get(i.read)!)
+  }
+  return { tallies, global: [...globalIssues(g), ...memo.global.values()] }
 }
 
 /** What an export writes as it goes: an image, a text file, a chunk of a COCO file */
@@ -754,7 +930,7 @@ type Sink = {
  * writing what they make. Labels that changed since the check, so that a writer finds an
  * error, stop it before that chunk is written.
  */
-async function convert(g: Gathered, ctx: Context, sink: Sink) {
+async function convert(root: string, g: Gathered, ctx: Context, sink: Sink) {
   const { options, items } = g
   const task = TASKS[options.format]
   const tallies: Tally[] = []
@@ -768,7 +944,15 @@ async function convert(g: Gathered, ctx: Context, sink: Sink) {
     const failed = made.flatMap((t) => t.issues).find((f) => f.severity === 'error')
     if (failed) throw new Error(`The labels changed since they were checked, so the export stopped: ${failed.message}`)
   }
+  // Images written, told as each one is, and once before the first, so the window says what's
+  // under way while a big image or a slow drive takes its time
   let done = 0, told = 0
+  const tell = () => {
+    if (Date.now() - told < 100 && done < items.length) return
+    told = Date.now()
+    ctx.onProgress?.({ phase: 'write', done, total: items.length })
+  }
+  tell()
   for (let start = 0; start < items.length;) {
     ctx.signal?.throwIfAborted()
     // A chunk is in one split: the items are in split order, and a chunk ends where its split does
@@ -783,19 +967,26 @@ async function convert(g: Gathered, ctx: Context, sink: Sink) {
         const at = imageAt(i)
         await sink.image(i, at)
         await sink.text(labelPathFor(at), text)
+        done++
+        tell()
       }, ctx.signal)
       for (const m of made) tallies.push(m.tally)
     } else {
       const made = cocoChunk(g, part, part.map(imageAt), info, global)
+      await orientationNotes(root, part, made.tallies)
       stopAt(made.tallies)
       for (const [t, dataset] of made.datasets) await sink.coco(part[0].split, t, dataset)
-      if (options.images !== 'leave') await pool(part, (i) => sink.image(i, imageAt(i)), ctx.signal)
+      if (options.images !== 'leave') {
+        await pool(part, async (i) => {
+          await sink.image(i, imageAt(i))
+          done++
+          tell()
+        }, ctx.signal)
+      } else {
+        done += part.length
+        tell()
+      }
       for (const t of made.tallies) tallies.push(t)
-    }
-    done += part.length
-    if (Date.now() - told >= 100 || done === items.length) {
-      told = Date.now()
-      ctx.onProgress?.({ phase: 'write', done, total: items.length })
     }
     await tick()
   }
@@ -830,9 +1021,10 @@ async function pool<T>(list: readonly T[], fn: (t: T) => Promise<void>, signal?:
   if (failures.length) throw failures[0]
 }
 
-function grouped(issues: Issue[]) {
+async function grouped(issues: Issue[], turn: Turn) {
   const groups = new Map<string, Issue[]>()
   for (const i of issues) {
+    await turn()
     const key = `${i.severity}:${i.code}`
     const list = groups.get(key)
     if (list) list.push(i)
@@ -851,11 +1043,15 @@ let checks = 0
  * of each. Errors stop the export.
  */
 export async function preflight(root: string, options: ExportOptions, ctx: Context = {}): Promise<Preflight> {
+  const turn = turns(ctx.signal)
   const g = await gather(root, options, ctx)
-  const { tallies, global } = await tallied(g, ctx)
-  const sums = summed(g, tallies, global)
+  const { tallies, global } = await tallied(root, g, ctx)
+  const sums = await summed(g, tallies, global, turn)
   const all = [...g.issues, ...sums.issues]
-  const groups = grouped(all)
+  const groups = await grouped(all, turn)
+  // A check that a newer one stopped never takes its place, so the window's Show more pages
+  // through the issues of the check it shows
+  ctx.signal?.throwIfAborted()
   const id = ++checks
   lastCheck = { id, groups }
   const rank = (s: Severity) => SEVERITIES.indexOf(s)
@@ -876,6 +1072,7 @@ export function moreIssues(id: number, key: string, from: number, count = 200): 
 /** Drops what checks keep while the window is open: the folder's read, what the writers made of each image, and the last check's issues */
 export function forgetExportChecks() {
   lastRead = null
+  perRead = null
   memos.clear()
   lastCheck = null
 }
@@ -911,7 +1108,9 @@ class CocoFile {
     for await (const chunk of createReadStream(this.side)) await this.head.write(chunk)
     await this.head.write(`],"categories":${JSON.stringify(this.categories)}}`)
     await this.head.close()
-    await fs.rm(this.side)
+    // Windows can hold a file just closed for a moment, while a scanner reads it: removing it is
+    // tried again (maxRetries needs recursive, which takes a file too)
+    await fs.rm(this.side, { recursive: true, maxRetries: 5 })
   }
   async abandon() {
     await Promise.allSettled([this.head.close(), this.rest.close()])
@@ -919,10 +1118,58 @@ class CocoFile {
 }
 
 /**
- * Writes the dataset into `out`, a new or empty folder outside the image folder: built in a
- * hidden folder beside it and moved into place at the end, or, where `out` is a drive of its
- * own, in it, with what the export made removed again if it stops. Reads the folder afresh, and
- * refuses while the check finds errors. Stopping leaves nothing behind and resolves with `stopped`.
+ * A new hidden folder in dir to build the dataset in, made as any folder is, so a new dataset
+ * folder has the permissions folders there usually have, not mkdtemp's owner-only ones
+ */
+async function workFolder(dir: string, prefix: string): Promise<string> {
+  for (;;) {
+    const work = path.join(dir, `${prefix}${randomBytes(4).toString('hex')}`)
+    try {
+      await fs.mkdir(work)
+      return work
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+    }
+  }
+}
+
+/**
+ * Moves a finished dataset into place: its hidden folder takes a new folder's name, or what it
+ * holds moves into the empty folder chosen, one by one by name, never over anything put there
+ * meanwhile. Windows refuses for a moment while a scanner or a sync client holds a file just
+ * written, which renameRetrying waits out. Should a move still fail, the dataset is kept where it
+ * is and the error says where. Returns the emptied hidden folder if it couldn't be removed.
+ */
+async function intoPlace(work: string, out: string, existing: boolean, names: string[]): Promise<string | null> {
+  const why = (e: unknown) => (e as NodeJS.ErrnoException).code ?? reason(e)
+  if (!existing) {
+    try {
+      await renameRetrying(work, out)
+    } catch (e) {
+      throw new Error(`The dataset is written, but it couldn't be moved to ${out} (${why(e)}), so it's in ${work}: rename that folder ${path.basename(out)} yourself`, { cause: e })
+    }
+    return null
+  }
+  const left = [...names].sort(byCode)
+  while (left.length) {
+    try {
+      if (await fs.lstat(path.join(out, left[0])).then(() => true, () => false)) throw new Error(`${left[0]} is there already`)
+      await renameRetrying(path.join(work, left[0]), path.join(out, left[0]))
+      left.shift()
+    } catch (e) {
+      const one = left.length === 1
+      throw new Error(`The dataset is written, but ${listed(left)} couldn't be moved into ${out} (${why(e)}), so ${one ? "it's" : "they're"} still in ${work}: ` +
+        `move ${one ? 'it' : 'them'} there yourself`, { cause: e })
+    }
+  }
+  return fs.rm(work, { recursive: true, force: true, maxRetries: 5 }).then(() => null, () => work)
+}
+
+/**
+ * Writes the dataset into `out`, a new or empty folder outside the image folder. It's built in a
+ * hidden folder beside `out`, or inside it when it's an empty folder, which so keeps itself and
+ * what systems keep in it, then moved into place. Reads the folder afresh, and refuses while the
+ * check finds errors. Stopping leaves nothing behind and resolves with `stopped`.
  */
 export async function runExport(root: string, options: ExportOptions, out: string, ctx: Context = {}): Promise<ExportResult> {
   const problem = await folderProblem(root, out)
@@ -937,14 +1184,11 @@ export async function runExport(root: string, options: ExportOptions, out: strin
   }
   const blocking = g.issues.find((i) => i.severity === 'error')
   if (blocking) throw new Error(`The dataset can't be exported: ${blocking.message}`)
-  const parent = path.dirname(out)
-  const existing = await fs.stat(out).catch(() => null)
-  // A folder that's a drive of its own can't take a folder moved in from beside it
-  const direct = !!existing && existing.dev !== (await fs.stat(parent)).dev
-  const work = direct ? out : await fs.mkdtemp(path.join(parent, `.${path.basename(out)}.export-`))
+  const existing = !!(await fs.lstat(out).catch(() => null))
+  const work = await workFolder(existing ? out : path.dirname(out), existing ? '.seamtag-export-' : `.${path.basename(out)}.export-`)
   const counts = { copied: 0, linked: 0, fellBack: 0, left: options.images === 'leave' ? g.items.length : 0 }
   let files = 0
-  // What the export put at the top of `out`: in a drive of its own, all that a stop removes
+  // What the export put at the top of the dataset, which moves into an empty folder at the end
   const top = new Set<string>()
   const made = new Set<string>()
   const dir = async (file: string) => {
@@ -983,24 +1227,11 @@ export async function runExport(root: string, options: ExportOptions, out: strin
       await file.add(dataset)
     }
   }
-  // Nothing the export started is still writing by now (pool waits for those under way), so what
-  // it removes stays removed. Says what couldn't be.
-  const cleanup = async () => {
-    await Promise.allSettled([...cocoFiles.values()].map((f) => f.abandon()))
-    const left: string[] = []
-    for (const p of direct ? [...top].map((e) => path.join(work, e)) : [work]) {
-      try {
-        await fs.rm(p, { recursive: true, force: true, maxRetries: 3 })
-      } catch {
-        left.push(p)
-      }
-    }
-    return left
-  }
+  let converted: { tallies: Tally[]; global: Issue[] }
+  const written: string[] = []
   try {
-    const converted = await convert(g, ctx, sink)
+    converted = await convert(root, g, ctx, sink)
     ctx.onProgress?.({ phase: 'finish', done: 0, total: 1 })
-    const written: string[] = []
     for (const [at, file] of cocoFiles) {
       await file.close()
       written.push(at)
@@ -1022,20 +1253,13 @@ export async function runExport(root: string, options: ExportOptions, out: strin
       files++
     }
     ctx.signal?.throwIfAborted()
-    if (!direct) {
-      // Only an empty folder goes: anything put in it since the check stops the export here
-      if (existing) await fs.rmdir(out)
-      await fs.rename(work, out)
-    }
-    ctx.onProgress?.({ phase: 'finish', done: 1, total: 1 })
-    const sums = summed(g, converted.tallies, converted.global)
-    const accepted = [...grouped([...g.issues, ...sums.issues])].map(([, list]) => ({ severity: list[0].severity, title: titleOf(list[0].code, list[0].severity), count: list.length }))
-      .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.count - a.count)
-    return { stopped: false, out, splits: sums.splits, images: counts, files, written: written.sort(byCode), accepted, notes: g.notes }
   } catch (e) {
-    const left = await cleanup()
+    // Nothing the export started is still writing by now (pool waits for those under way), so what
+    // it removes stays removed
+    await Promise.allSettled([...cocoFiles.values()].map((f) => f.abandon()))
+    const removed = await fs.rm(work, { recursive: true, force: true, maxRetries: 3 }).then(() => true, () => false)
     // The export's own failure is what's told, with what of it couldn't be removed
-    const rest = left.length ? ` What it wrote couldn't all be removed: delete ${left.join(' and ')} yourself.` : ''
+    const rest = removed ? '' : ` What it wrote couldn't all be removed: delete ${work} yourself.`
     if (ctx.signal?.aborted) {
       if (!rest) return stopped
       throw new Error(`The export stopped.${rest}`)
@@ -1043,6 +1267,15 @@ export async function runExport(root: string, options: ExportOptions, out: strin
     if (!rest) throw e
     throw new Error(`${reason(e).replace(/\.$/, '')}.${rest}`, { cause: e })
   }
+  // The dataset is whole: from here on it's kept, whatever happens, and Stop no longer stops it
+  const leftover = await intoPlace(work, out, existing, [...top])
+  ctx.onProgress?.({ phase: 'finish', done: 1, total: 1 })
+  const turn = turns()
+  const sums = await summed(g, converted.tallies, converted.global, turn)
+  const accepted = [...(await grouped([...g.issues, ...sums.issues], turn))].map(([, list]) => ({ severity: list[0].severity, title: titleOf(list[0].code, list[0].severity), count: list.length }))
+    .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.count - a.count)
+  const notes = leftover ? [...g.notes, `The empty folder ${leftover} couldn't be removed: delete it yourself.`] : g.notes
+  return { stopped: false, out, splits: sums.splits, images: counts, files, written: written.sort(byCode), accepted, notes }
 }
 
 /**
@@ -1051,7 +1284,9 @@ export async function runExport(root: string, options: ExportOptions, out: strin
  * in git-annex and DVC folders) is followed first, so the dataset never holds the link.
  */
 async function putImage(from: string, to: string, link: boolean): Promise<'copied' | 'linked' | 'fellBack'> {
-  const file = await fs.realpath(from)
+  // Only a link is followed: on Windows, drives that can't tell a file's final path, as some RAM
+  // disks, fail realpath for every file
+  const file = (await fs.lstat(from)).isSymbolicLink() ? await fs.realpath(from) : from
   if (link) {
     try {
       await fs.link(file, to)
