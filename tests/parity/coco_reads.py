@@ -9,8 +9,9 @@ gives; annToRLE works for every annotation, and pycocotools' mask.area of it is 
 (a posed object with only its box has the box's width x height); boxes are the vertices' for
 polygons and toBbox's for masks; keypoints are 3 numbers each, 0, 0, 0 when not labelled, with
 num_keypoints counting the rest and the skeleton within them; and COCOeval of the annotations
-against themselves as detections scoring 1 gives AP 1.0 for bbox and segm, and for keypoints
-in a file of posed objects. Fails at the first problem.
+against themselves as detections scoring 1 gives AP 1 for bbox and segm, and for keypoints in a
+file of posed objects: 1 to within 1e-9, as COCOeval divides by its detections plus
+np.spacing(1), so a category of one object scores 1 - 2e-16. Fails at the first problem.
 """
 import contextlib
 import importlib.metadata
@@ -128,7 +129,7 @@ def check(path: Path) -> str:
                 e.evaluate()
                 e.accumulate()
                 e.summarize()
-            expect(e.stats[0] == 1.0, f"COCOeval {kind}{'' if cat_id is None else f' of category {cat_id}'} gives AP {e.stats[0]}, not 1.0")
+            expect(abs(e.stats[0] - 1) < 1e-9, f"COCOeval {kind}{'' if cat_id is None else f' of category {cat_id}'} gives AP {e.stats[0]}, not 1")
             results.append(f"{kind} AP {e.stats[0]:.1f}")
     return f"{len(d['images'])} images, {len(d['annotations'])} annotations, {len(d['categories'])} categories: {', '.join(results)}"
 

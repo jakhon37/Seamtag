@@ -178,9 +178,11 @@ def check(folder):
         status = "missing" if nm else "empty" if ne else "ok"
         if status != want["status"]:
             fail(f"{rel}: {status}, expected {want['status']}")
+        # The image upright, as its EXIF orientation shows it, which Seamtag's shares are of: orientations 5 to 8 swap its sides
         with Image.open(image) as pil:
-            if shape != (pil.height, pil.width):
-                fail(f"{rel}: check_image gives {shape}")
+            upright = (pil.width, pil.height) if pil.getexif().get(274, 1) in (5, 6, 7, 8) else (pil.height, pil.width)
+        if shape != upright:
+            fail(f"{rel}: check_image gives {shape}, not the upright image's {upright}")
         written = [np.asarray(r, dtype=np.float32) for r in want["rows"]]
         if len(lb) != len(written):
             fail(f"{rel}: {len(lb)} rows, {len(written)} written")
