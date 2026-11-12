@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
@@ -9,8 +9,8 @@ import {
 import { setFolding } from '../../src/main/names'
 import { setCacheDir } from '../../src/main/images'
 import { encodeMask } from '../../src/main/masks'
-import { openProject, setTrash } from '../../src/main/project'
-import { checkDataset, fixIssue, renameLabel, renaming } from '../../src/shared/checks'
+import { closeProject, openProject, setTrash } from '../../src/main/project'
+import { checkDataset, fixIssue, renameLabel, renaming, shapeArea } from '../../src/shared/checks'
 import type { DatasetImage } from '../../src/shared/dataset'
 import { readCreateML, readVoc } from '../../src/shared/formats'
 import { newShape, parseLabelFile } from '../../src/shared/labelfile'
@@ -248,6 +248,33 @@ describe('mask shapes', () => {
     // The statistics count what the image holds of them
     expect(datasetStats([m]).sizes.full).toEqual({ small: 4, medium: 0, large: 0 })
   })
+
+  test('are kept packed, their pixels unpacked as they are read and let go at the next turn', async () => {
+    const root = folder()
+    await png(path.join(root, 'm.png'), 400, 300)
+    // An object's mask, and one as speckled as a chessboard
+    const disc = Uint8Array.from({ length: 200 * 150 }, (_, k) => (((k % 200) - 100) / 90) ** 2 + ((Math.floor(k / 200) - 75) / 60) ** 2 <= 1 ? 1 : 0)
+    const board = Uint8Array.from({ length: 16 * 16 }, (_, k) => (k + Math.floor(k / 16)) % 2)
+    write(root, {
+      'm.json': labelme('m.png', [
+        shape('disc', 'mask', [[10, 20], [209, 169]], { mask: await encodeMask(disc, 200, 150) }),
+        shape('board', 'mask', [[0, 0], [15, 15]], { mask: await encodeMask(board, 16, 16) })
+      ], { imageWidth: 400, imageHeight: 300 })
+    })
+    await openProject(root, null)
+    const [m] = await readDataset(root)
+    const [round, speckled] = m.masks
+    const pixels = round!.data
+    expect(pixels).toEqual(disc)
+    expect(round!.data).toBe(pixels)
+    await new Promise((go) => setImmediate(go))
+    expect(round!.data).not.toBe(pixels)
+    expect(round!.data).toEqual(disc)
+    // A copy made by spreading a mask has its pixels
+    expect({ ...round! }).toEqual({ x: 10, y: 20, width: 200, height: 150, data: disc })
+    expect(speckled!.data).toEqual(board)
+    expect(shapeArea(m.shapes[0], round)).toBe(disc.reduce((n, v) => n + v, 0))
+  })
 })
 
 describe('output folders and files', () => {
@@ -279,6 +306,21 @@ describe('output folders and files', () => {
       { file: 'old/q.json', names: 'gone/q.png' },
       { file: path.join(out, 'w.json'), names: 'w.png' }
     ])
+  })
+
+  test("label files without an image are told in the image list's order, with progress, and a stop ends the search", async () => {
+    const root = folder()
+    await png(path.join(root, 'a.png'))
+    write(root, { 'x10.json': labelme('x10.png', []), 'x9.json': labelme('x9.png', []), 'sub/x1.json': labelme('sub/x1.png', []), 'b.json': labelme('b.png', []) })
+    await openProject(root, null)
+    const images = await readDataset(root)
+    const told: number[][] = []
+    const orphans = await orphanLabels(root, images, { onProgress: (done, total) => told.push([done, total]) })
+    expect(orphans.map((o) => o.file)).toEqual(['b.json', 'sub/x1.json', 'x9.json', 'x10.json'])
+    expect(told[told.length - 1]).toEqual([4, 4])
+    const stop = new AbortController()
+    stop.abort()
+    await expect(orphanLabels(root, images, { signal: stop.signal })).rejects.toThrow(/abort/i)
   })
 
   test("a LabelMe file holding its own image is told when no image of the folder has it, as labelme's default files are", async () => {
@@ -452,6 +494,42 @@ describe('reading again', () => {
     await expect(readDataset(root, { signal: stop.signal })).rejects.toThrow(/abort/i)
     expect(await readDataset(root)).toHaveLength(3)
   })
+
+  test('an image only linked to again, as an export that hard-links images does, is not read again', async () => {
+    const before = await readDataset(root)
+    linkSync(path.join(root, 'm.png'), path.join(folder(), 'm.png'))
+    expect(same(await readDataset(root), before)).toEqual([true, true, true])
+  })
+})
+
+test('a folder closed while it is read keeps nothing of that read: opened again, it reads as it is', async () => {
+  const root = folder()
+  const tiny = await sharp({ create: { width: 8, height: 6, channels: 3, background: '#406080' } }).png().toBuffer()
+  for (let k = 0; k < 200; k++) {
+    writeFileSync(path.join(root, `${k}.png`), tiny)
+    writeFileSync(path.join(root, `${k}.json`), labelme(`${k}.png`, [shape('car', 'rectangle', [[1, 1], [5, 4]])], { imageWidth: 8, imageHeight: 6 }))
+  }
+  await openProject(root, null)
+  // Closed as the window closes a folder, as another opens: the reads still going then fail, the folder gone
+  const stop = new AbortController()
+  let closed = false
+  const reading = readDataset(root, {
+    signal: stop.signal,
+    onProgress: () => {
+      if (closed) return
+      closed = true
+      setImmediate(() => {
+        forgetDataset(root)
+        stop.abort()
+        closeProject(root)
+      })
+    }
+  })
+  await expect(reading).rejects.toThrow(/abort/i)
+  await openProject(root, null)
+  const images = await readDataset(root)
+  expect(images.filter((i) => i.broken || i.unreadable).map((i) => i.broken ?? i.unreadable)).toEqual([])
+  expect(images.every((i) => i.shapes.length === 1)).toBe(true)
 })
 
 describe('one CreateML list for every image', () => {
@@ -526,7 +604,22 @@ test('identical image files are found; files of one size with other bytes are no
   await openProject(root, null)
   const images = await readDataset(root)
   expect(images.map((i) => [i.name, i.width, i.height])).toEqual([['p.bmp', 8, 6], ['q.bmp', 8, 6], ['s.bmp', 9, 6], ['sub/r.bmp', 8, 6], ['t.bmp', 9, 6]])
-  expect(await findDuplicateImages(root, images)).toEqual([['p.bmp', 'q.bmp'], ['s.bmp', 't.bmp']])
+  const told: number[][] = []
+  expect(await findDuplicateImages(root, images, { onProgress: (done, total) => told.push([done, total]) })).toEqual([['p.bmp', 'q.bmp'], ['s.bmp', 't.bmp']])
+  // Each file read is told: all five share their size with another
+  expect([told[0], told[told.length - 1]]).toEqual([[0, 5], [5, 5]])
+})
+
+test("tens of thousands of images of one byte size, as a camera's uncompressed frames are, go into groups at once", async () => {
+  const root = folder()
+  await openProject(root, null)
+  const frames = Array.from({ length: 40000 }, (_, k) => ({ name: `f${k}.bmp`, bytes: 921654 })) as DatasetImage[]
+  // Stopped before any file is read: only putting them in groups is timed
+  const stop = new AbortController()
+  stop.abort()
+  const started = performance.now()
+  await expect(findDuplicateImages(root, frames, { signal: stop.signal })).rejects.toThrow(/abort/i)
+  expect(performance.now() - started).toBeLessThan(1000)
 })
 
 describe('rewriting labels', () => {

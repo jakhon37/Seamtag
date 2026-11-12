@@ -292,6 +292,16 @@ describe('files', () => {
     ])
   })
 
+  test('a group of tens of thousands of identical images names the first few others in each, without going through the group for each', () => {
+    const frames = Array.from({ length: 40000 }, (_, k) => `f${k}.bmp`)
+    const started = performance.now()
+    const issues = check([], { duplicates: [frames, ['a.png', 'b.png', 'c.png', 'd.png', 'e.png', 'f.png', 'g.png']] })
+    expect(performance.now() - started).toBeLessThan(1000)
+    const said = (name: string) => issues.find((i) => i.image === name)!.message
+    expect(said('f2.bmp')).toBe('f2.bmp has the same bytes as f0.bmp, f1.bmp, f3.bmp, f4.bmp, f5.bmp and 39994 more, so a split can put one copy in training and another in validation')
+    expect(said('g.png')).toBe('g.png has the same bytes as a.png, b.png, c.png, d.png, e.png and f.png, so a split can put one copy in training and another in validation')
+  })
+
   test('never labelled and labelled with no shapes are told apart', () => {
     const issues = check([image('a.png', [], { file: null, format: null, labelSize: null }), image('b.png', []), image('c.png', [box('car', 1, 1, 9, 9)])])
     expect(issues.filter((i) => i.severity === 'info').map((i) => [i.code, i.message])).toEqual([

@@ -54,6 +54,36 @@ export type CheckOptions = {
   /** Groups of identical image files (findDuplicateImages) */
   duplicates?: string[][]
   orphans?: OrphanFile[]
+  /** How the whole folder uses its labels (tallyLabels), when the images given are a slice of it */
+  tally?: LabelTally
+}
+
+/** How a folder's labels are used: shapes by label, AI proposals too, and the labels of shapes that aren't proposals */
+export type LabelTally = { uses: Map<string, number>; accepted: Set<string> }
+
+/** The images' labels added to a tally, a new one when none is given: a folder's can be counted a slice at a time */
+export function tallyLabels(images: DatasetImage[], tally: LabelTally = { uses: new Map(), accepted: new Set() }): LabelTally {
+  // AI proposals too: they're in the files
+  for (const image of images) {
+    for (const s of image.shapes) {
+      tally.uses.set(s.label, (tally.uses.get(s.label) ?? 0) + 1)
+      if (!isAi(s)) tally.accepted.add(s.label)
+    }
+  }
+  return tally
+}
+
+// Each image's clash, worked out once for each list of them: a folder checked a slice at a time
+// gives every slice the folder's list, which one -O labels.json fills with every image
+const clashLookups = new WeakMap<Clash[], Map<string, Clash>>()
+function clashesByImage(clashes: Clash[]) {
+  let byImage = clashLookups.get(clashes)
+  if (!byImage) {
+    byImage = new Map()
+    for (const c of clashes) for (const name of c.images) byImage.set(name, c)
+    clashLookups.set(clashes, byImage)
+  }
+  return byImage
 }
 
 // A point further outside the image than this is reported. Ultralytics 8.4.211 drops an image
@@ -92,10 +122,20 @@ const counted = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? 
 const num = (v: number) => String(Math.round(v * 10) / 10)
 const same = (a: number[], b: number[]) => Math.abs(a[0] - b[0]) <= SAME && Math.abs(a[1] - b[1]) <= SAME
 
-/** a, b and c; past six, the first five and how many more */
-function listed(items: string[]) {
-  const shown = items.length > 6 ? [...items.slice(0, 5), `${items.length - 5} more`] : items
+/** a, b and c; past six, the first five and how many more. `count` is how many there are when `items` holds only the first few. */
+function listed(items: string[], count = items.length) {
+  const shown = count > 6 ? [...items.slice(0, 5), `${count - 5} more`] : items
   return shown.length < 2 ? shown.join('') : `${shown.slice(0, -1).join(', ')} and ${shown[shown.length - 1]}`
+}
+
+/** The first of a group's names but one, as many as listed shows, without going through a group of thousands for each of them */
+function othersIn(group: string[], name: string) {
+  const others: string[] = []
+  for (const n of group) {
+    if (others.length === 6) break
+    if (n !== name) others.push(n)
+  }
+  return others
 }
 
 // Geometry. Clipper works in whole numbers: this keeps a hundredth of a pixel, as geometry.ts does.
@@ -124,7 +164,13 @@ function ringArea(ring: number[][]) {
   return Math.abs(sum) / 2
 }
 
-const bitCount = (m: MaskBits) => m.data.reduce((n, v) => n + (v ? 1 : 0), 0)
+function bitCount(m: MaskBits) {
+  // A loop, not reduce: Statistics and the checks count every mask of the folder each time
+  const { data } = m
+  let n = 0
+  for (let i = 0; i < data.length; i++) if (data[i]) n++
+  return n
+}
 
 /**
  * A closed shape's area in square pixels: a mask's set pixels, a polygon filled even-odd.
@@ -229,9 +275,12 @@ function canonical(s: Shape): number[][] {
   return s.points
 }
 
+// The masks' pixels are read once before going through them: the folder's reader unpacks them
+// when they're read (src/main/dataset.ts)
 function sameBits(a: MaskBits, b: MaskBits) {
   if (a.x !== b.x || a.y !== b.y || a.width !== b.width || a.height !== b.height) return false
-  for (let i = 0; i < a.data.length; i++) if (!a.data[i] !== !b.data[i]) return false
+  const [da, db] = [a.data, b.data]
+  for (let i = 0; i < da.length; i++) if (!da[i] !== !db[i]) return false
   return true
 }
 
@@ -294,9 +343,10 @@ function ringBox(ring: number[][]): Box {
 /** The box around a mask's set pixels, right and bottom exclusive; null when none is set */
 function bitsBox(m: MaskBits): Box | null {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  const { data } = m
   for (let y = 0; y < m.height; y++) {
     for (let x = 0; x < m.width; x++) {
-      if (!m.data[y * m.width + x]) continue
+      if (!data[y * m.width + x]) continue
       x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y)
     }
   }
@@ -305,9 +355,10 @@ function bitsBox(m: MaskBits): Box | null {
 
 function bitsOverlap(a: MaskBits, b: MaskBits) {
   let n = 0
+  const [da, db] = [a.data, b.data]
   for (let y = Math.max(a.y, b.y); y < Math.min(a.y + a.height, b.y + b.height); y++) {
     for (let x = Math.max(a.x, b.x); x < Math.min(a.x + a.width, b.x + b.width); x++) {
-      if (a.data[(y - a.y) * a.width + x - a.x] && b.data[(y - b.y) * b.width + x - b.x]) n++
+      if (da[(y - a.y) * a.width + x - a.x] && db[(y - b.y) * b.width + x - b.x]) n++
     }
   }
   return n
@@ -378,25 +429,17 @@ const variantKey = (label: string) => label.toLowerCase().replace(/[\s_-]+/g, ' 
  * Every problem in a folder's labels, the worst first, then in the folder's order. Each names
  * its image (null for the folder as a whole) and, where it's one shape's, the shape's index.
  */
-export function checkDataset(images: DatasetImage[], { labels, clashes = [], duplicates = [], orphans = [] }: CheckOptions): Issue[] {
+export function checkDataset(images: DatasetImage[], { labels, clashes = [], duplicates = [], orphans = [], tally }: CheckOptions): Issue[] {
   const issues: Issue[] = []
   const add = (code: CheckCode, image: string | null, message: string, shape?: number) =>
     issues.push({ severity: CHECKS[code].severity, code, image, ...(shape === undefined ? {} : { shape }), message })
   const listedLabels = labels ? new Set(labels) : null
-  const clashed = new Map<string, Clash>()
-  for (const c of clashes) for (const name of c.images) clashed.set(name, c)
+  const clashed = clashesByImage(clashes)
   // Verification is in use once any image is verified; until then, saying so of every image is noise
   const verifying = images.some((i) => i.verified)
 
-  // Labels across the folder, AI proposals too: they're in the files
-  const uses = new Map<string, number>()
-  const accepted = new Set<string>()
-  for (const image of images) {
-    for (const s of image.shapes) {
-      uses.set(s.label, (uses.get(s.label) ?? 0) + 1)
-      if (!isAi(s)) accepted.add(s.label)
-    }
-  }
+  // Labels across the folder
+  const { uses, accepted } = tally ?? tallyLabels(images)
   // Variants of one label: the one in the label list wins, then the most used
   const variants = new Map<string, string[]>()
   for (const label of uses.keys()) {
@@ -497,7 +540,7 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
 
   for (const group of duplicates) {
     for (const name of group) {
-      add('duplicate-image', name, `${name} has the same bytes as ${listed(group.filter((n) => n !== name))}, ` +
+      add('duplicate-image', name, `${name} has the same bytes as ${listed(othersIn(group, name), group.length - 1)}, ` +
         'so a split can put one copy in training and another in validation')
     }
   }

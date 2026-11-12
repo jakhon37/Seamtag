@@ -16,16 +16,21 @@ import { imageSize } from './images'
 import { decodeMask } from './masks'
 import { nameKey } from './names'
 import {
-  findLabels, folderOf, type Found, type ImageItem, imagePath, labelPath, type Labels, readLabels, readText, sendToTrash, serial, writeAtomic
+  findLabels, folderOf, type Found, type ImageItem, imagePath, isEmbedded, labelPath, type Labels, nameOrder, opening, outputFileOf, readLabels, readText,
+  sendToTrash, serial, sharesStem, writeAtomic
 } from './project'
 
 const posix = (p: string) => p.split(path.sep).join('/')
 const stemOf = (name: string) => name.replace(/\.[^./]+$/, '')
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e))
+const turn = () => new Promise<void>((go) => setImmediate(go))
 // Size and modified time can stay the same over a quick rewrite where file systems keep times to
 // the second (HFS+) or two (FAT); the change time and inode still move, as they do when a new
 // file takes an old one's name
 const stamp = (s: Stats | null) => (s ? `${s.size}:${s.mtimeMs}:${s.ctimeMs}:${s.ino}` : '-')
+// An image's change time moves too when it's only linked to again, as an export that hard-links
+// images does, which changes nothing in it: its birth time and inode tell a new file instead
+const imageStamp = (s: Stats | null) => (s ? `${s.size}:${s.mtimeMs}:${s.birthtimeMs}:${s.ino}` : '-')
 const outside = (rel: string) => !rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)
 const shown = (root: string, file: string) => {
   const rel = path.relative(root, file)
@@ -55,14 +60,17 @@ type Cached = { key: string; image: DatasetImage }
 /** A CreateML list as one read gives it to all its images: each image's entries as text, by the name they give it, or why it can't be read */
 type List = { entries: Map<string, string>; error?: string }
 type Lists = Map<string, { stamp: string; list: Promise<List> }>
-// By folder: images by name, and CreateML lists by file. A re-run reads only label files and
-// images whose size or times changed, and of a list that every image shares, only the images
-// whose own entries changed.
-const caches = new Map<string, { images: Map<string, Cached>; lists: Lists }>()
+// By folder, as this opening of it (project.ts' opening), so a read still going when the folder
+// closes keeps nothing of it once it ends, not even the reads that failed as the folder closed:
+// images by name, and CreateML lists by file. A re-run reads only label files and images whose
+// size or times changed, and of a list that every image shares, only the images whose own
+// entries changed.
+const caches = new WeakMap<object, { images: Map<string, Cached>; lists: Lists }>()
 
-/** Drops what was read of a folder, as when it's closed */
+/** Drops what was read of a folder, to read it afresh; closing it drops it too */
 export function forgetDataset(root: string) {
-  caches.delete(root)
+  const opened = opening(root)
+  if (opened) caches.delete(opened)
 }
 
 /** One readDataset: what every image of it shares */
@@ -88,19 +96,25 @@ type Run = {
 export async function readDataset(root: string, { prefer = 'labelme', onProgress, signal, only }: ReadOptions = {}): Promise<DatasetImage[]> {
   const folder = folderOf(root)
   const names = folder.images
-  const old = caches.get(root)
+  const opened = opening(root)!
+  const old = caches.get(opened)
   const run: Run = {
     root, prefer, outputFile: folder.outputFile, embedded: folder.embedded, lists: new Map(old?.lists), used: new Set(), docs: new Map()
   }
   const fresh = new Map<string, Cached>()
   const out: DatasetImage[] = new Array(names.length)
-  let next = 0, done = 0, told = 0
+  let next = 0, done = 0, told = 0, kept = 0
   await Promise.all(Array.from({ length: 8 }, async () => {
     while (next < names.length && !signal?.aborted) {
       const at = next++
       const name = names[at]
       const cached = old?.images.get(name)
-      const read = only && cached && !only.has(name) ? cached : await readImage(run, name, cached)
+      let read: Cached
+      if (only && cached && !only.has(name)) {
+        read = cached
+        // Taken as they are, the rest of a folder of 100,000 would go by in one stretch: the window gets a turn now and then
+        if (++kept % 2000 === 0) await turn()
+      } else read = await readImage(run, name, cached)
       fresh.set(name, read)
       out[at] = read.image
       done++
@@ -113,11 +127,11 @@ export async function readDataset(root: string, { prefer = 'labelme', onProgress
   // A read of a few images keeps every list: the images it didn't look at still read theirs
   const lists: Lists = only ? run.lists : new Map([...run.lists].filter(([file]) => run.used.has(file)))
   if (signal?.aborted) {
-    caches.set(root, { images: new Map([...(old?.images ?? []), ...fresh]), lists: run.lists })
+    caches.set(opened, { images: new Map([...(old?.images ?? []), ...fresh]), lists: run.lists })
     signal.throwIfAborted()
   }
   // Images gone from the folder drop out of the cache, and lists no image read
-  caches.set(root, { images: fresh, lists })
+  caches.set(opened, { images: fresh, lists })
   return out
 }
 
@@ -192,7 +206,7 @@ async function readImage(run: Run, name: string, cached?: Cached): Promise<Cache
   const entry = entryName(run.outputFile, name)
   const entries = list?.entries.get(entry)
   const version = !found || !labelStat ? '-' : list?.error ? `${stamp(labelStat)}!` : versionOf(found.format, labelStat, classesStat, entries)
-  const key = [found?.format, found?.file, version, stamp(imageStat)].join('\0')
+  const key = [found?.format, found?.file, version, imageStamp(imageStat)].join('\0')
   if (cached?.key === key) return cached
   let width = 0, height = 0, unreadable: string | undefined
   try {
@@ -267,15 +281,91 @@ async function placeMask(s: Shape, width: number, height: number): Promise<MaskB
   const [right, bottom] = width > 0 && height > 0 ? [width, height] : [x + m.width, y + m.height]
   // labelme 7.9.1 pastes rows max(y1, 0) to min(y1 + patch height, height), and columns the same way
   const x0 = Math.max(x, 0), y0 = Math.max(y, 0), x1 = Math.min(x + w, right), y1 = Math.min(y + h, bottom)
-  if (x0 >= x1 || y0 >= y1) return { x: Math.min(x0, right), y: Math.min(y0, bottom), width: 0, height: 0, data: new Uint8Array(0) }
-  const out: MaskBits = { x: x0, y: y0, width: x1 - x0, height: y1 - y0, data: new Uint8Array((x1 - x0) * (y1 - y0)) }
+  if (x0 >= x1 || y0 >= y1) return new PackedMask(Math.min(x0, right), Math.min(y0, bottom), 0, 0, new Uint8Array(0))
+  const data = new Uint8Array((x1 - x0) * (y1 - y0))
   // labelme can't paste a mask smaller than its box at all: past its pixels, the box is left empty here
   const c0 = x0 - x, c1 = Math.min(x1, x + m.width) - x
   for (let row = y0; row < Math.min(y1, y + m.height) && c1 > c0; row++) {
     const from = (row - y) * m.width
-    out.data.set(m.data.subarray(from + c0, from + c1), (row - y0) * out.width)
+    data.set(m.data.subarray(from + c0, from + c1), (row - y0) * (x1 - x0))
   }
-  return out
+  return new PackedMask(x0, y0, x1 - x0, y1 - y0, data)
+}
+
+/**
+ * A mask's pixels, 0s and 1s as decodeMask gives them, as the lengths of their runs along its
+ * rows, in turn, starting with 0s: a few hundred numbers for an object's mask of a hundred
+ * thousand pixels. A mask so speckled that its runs would take more room keeps its pixels.
+ */
+function pack(data: Uint8Array): Uint32Array | Uint8Array {
+  const runs: number[] = []
+  for (let from = 0, value = 0; from < data.length; value ^= 1) {
+    const to = data.indexOf(value ^ 1, from)
+    runs.push((to < 0 ? data.length : to) - from)
+    from = to < 0 ? data.length : to
+  }
+  return runs.length * 4 < data.length ? Uint32Array.from(runs) : data
+}
+
+function unpack(runs: Uint32Array, size: number) {
+  const data = new Uint8Array(size)
+  for (let k = 0, at = 0; k < runs.length; at += runs[k++]) if (k % 2) data.fill(1, at, at + runs[k])
+  return data
+}
+
+// Pixels kept unpacked at once, past the two masks unpacked last
+const UNPACKED = 64 * 1024 * 1024
+
+/**
+ * A mask shape's pixels kept packed (pack), and unpacked when `data` is read: a byte a pixel, the
+ * masks of a folder of segmentation labels would come to gigabytes, held for as long as the
+ * folder is open. The masks unpacked last keep their pixels until the event loop's next turn,
+ * so code that reads a mask pixel by pixel unpacks it once, and none stay unpacked between the
+ * slices of a pass. `data` is each mask's own property, as it is a plain MaskBits', so a copy
+ * made by spreading one has the pixels.
+ */
+class PackedMask implements MaskBits {
+  declare readonly data: Uint8Array
+  /** Its pixels' runs; null for a mask kept as its pixels */
+  #runs: Uint32Array | null = null
+  /** Its pixels, while they're unpacked */
+  #pixels: Uint8Array | null = null
+
+  constructor(readonly x: number, readonly y: number, readonly width: number, readonly height: number, data: Uint8Array) {
+    const packed = pack(data)
+    if (packed instanceof Uint32Array) this.#runs = packed
+    else this.#pixels = packed
+    Object.defineProperty(this, 'data', { enumerable: true, get: PackedMask.#data })
+  }
+
+  // The masks unpacked since the last turn, oldest first, and their pixels in all
+  static #recent: PackedMask[] = []
+  static #bytes = 0
+
+  // Read at each pixel by code that goes through them one by one: pixels unpacked come first
+  static #data = function (this: PackedMask): Uint8Array {
+    return this.#pixels ?? this.#unpack()
+  }
+
+  #unpack() {
+    const recent = PackedMask.#recent
+    if (!recent.length) {
+      setImmediate(() => {
+        for (const m of recent) m.#pixels = null
+        recent.length = 0
+        PackedMask.#bytes = 0
+      })
+    }
+    const pixels = (this.#pixels = unpack(this.#runs!, this.width * this.height))
+    recent.push(this)
+    PackedMask.#bytes += pixels.length
+    while (PackedMask.#bytes > UNPACKED && recent.length > 2) {
+      const old = recent.shift()!
+      PackedMask.#bytes -= old.#pixels!.length
+      old.#pixels = null
+    }
+    return pixels
+  }
 }
 
 const childOf = (e: XmlElement | undefined, name: string) => e?.children.find((c) => c.name === name)
@@ -340,7 +430,7 @@ export function labelFileClashes(images: DatasetImage[]): Clash[] {
 const hashes = new Map<string, { stamp: string; hash: string }>()
 
 async function hashFile(file: string) {
-  const at = stamp(await fs.stat(file))
+  const at = imageStamp(await fs.stat(file))
   const known = hashes.get(file)
   if (known?.stamp === at) return known.hash
   const hash = createHash('sha256')
@@ -350,51 +440,79 @@ async function hashFile(file: string) {
   return hex
 }
 
+/** Adds a name to its group, made when it's the first */
+function grouped<K>(groups: Map<K, string[]>, key: K, name: string) {
+  const group = groups.get(key)
+  if (group) group.push(name)
+  else groups.set(key, [name])
+}
+
 /**
  * Image files with the same bytes, in groups in the folder's order. Only files that share a
- * byte size are read, as Datumaro and fiftyone find repeated images, so most never are.
+ * byte size are read, as Datumaro and fiftyone find repeated images, so most never are. A
+ * camera's uncompressed frames all share one: progress is told as files are read.
  */
-export async function findDuplicateImages(root: string, images: DatasetImage[], { signal }: { signal?: AbortSignal } = {}): Promise<string[][]> {
+export async function findDuplicateImages(root: string, images: DatasetImage[], { signal, onProgress }: {
+  signal?: AbortSignal
+  /** Called as files are read, with how many there are to read */
+  onProgress?: (done: number, total: number) => void
+} = {}): Promise<string[][]> {
   const bySize = new Map<number, string[]>()
   // An empty file can't be read as an image, which is reported on its own
-  for (const i of images) if (i.bytes) bySize.set(i.bytes, [...(bySize.get(i.bytes) ?? []), i.name])
-  const todo = [...bySize.values()].filter((names) => names.length > 1).flat()
-  const bytes = new Map(images.map((i) => [i.name, i.bytes]))
+  for (const i of images) if (i.bytes) grouped(bySize, i.bytes, i.name)
+  const todo = [...bySize].flatMap(([bytes, names]) => (names.length > 1 ? names.map((name) => [name, bytes] as const) : []))
   const byHash = new Map<string, string[]>()
-  let next = 0
+  let next = 0, done = 0
+  onProgress?.(0, todo.length)
   await Promise.all(Array.from({ length: 4 }, async () => {
     while (next < todo.length && !signal?.aborted) {
-      const name = todo[next++]
+      const [name, bytes] = todo[next++]
       const hash = await hashFile(imagePath(root, name)).catch(() => null)
-      const key = `${bytes.get(name)}:${hash}`
-      if (hash) byHash.set(key, [...(byHash.get(key) ?? []), name])
+      if (hash) grouped(byHash, `${bytes}:${hash}`, name)
+      onProgress?.(++done, todo.length)
     }
   }))
   signal?.throwIfAborted()
+  const groups = [...byHash.values()].filter((g) => g.length > 1)
+  if (!groups.length) return []
   const order = new Map(images.map((i, k) => [i.name, k]))
   const at = (name: string) => order.get(name)!
-  return [...byHash.values()].filter((g) => g.length > 1).map((g) => g.sort((a, b) => at(a) - at(b))).sort((a, b) => at(a[0]) - at(b[0]))
+  return groups.map((g) => g.sort((a, b) => at(a) - at(b))).sort((a, b) => at(a[0]) - at(b[0]))
+}
+
+/** Goes through a folder's worth of items a few thousand at a time, with a turn for the window between */
+async function inSlices<T>(items: T[], each: (item: T) => void) {
+  for (let at = 0; at < items.length; at += 5000) {
+    if (at) await turn()
+    for (let k = at; k < Math.min(at + 5000, items.length); k++) each(items[k])
+  }
 }
 
 const LABEL_EXTS = new Set(['.json', '.xml', '.txt'])
 // A COCO file can run to hundreds of megabytes; one image's label file, even with imageData, doesn't
 const MAX_LABEL_FILE = 64 * 1024 * 1024
 
-/** Files that may be labels under a folder, by path in it; hidden folders are skipped, as the image list skips them */
-async function filesUnder(dir: string, skip: string[]): Promise<string[]> {
+/**
+ * Files that may be labels under a folder, by path in it, in the order the disk keeps them;
+ * hidden folders are skipped, as the image list skips them
+ */
+async function filesUnder(dir: string, skip: string[], signal?: AbortSignal): Promise<string[]> {
   const found: string[] = []
   const skipped = new Set(skip.map(fold))
+  let seen = 0
   const walk = async (sub: string) => {
     const full = path.join(dir, sub)
     if (skipped.has(fold(full))) return
+    signal?.throwIfAborted()
     let entries
     try {
       entries = await fs.readdir(full, { withFileTypes: true })
     } catch {
       return
     }
-    // In the image list's order, whatever order the disk keeps them in
-    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }))) {
+    for (const e of entries) {
+      // A folder of 100,000 images lists 200,000 files: the window gets a turn now and then
+      if (++seen % 5000 === 0) await turn()
       if (e.name.startsWith('.')) continue
       const rel = sub ? `${sub}/${e.name}` : e.name
       if (e.isDirectory()) await walk(rel)
@@ -457,23 +575,44 @@ async function isList(file: string) {
  * too: it opens on its own, but never with the folder, nor goes into an export. CreateML lists
  * that do belong to images are looked inside, for entries no image reads. `images` is what
  * readDataset gave, which says which label files are lists. Shown by path in the folder, or
- * in full when outside it.
+ * in full when outside it, and in the image list's order.
  */
-export async function orphanLabels(root: string, images: DatasetImage[]): Promise<OrphanFile[]> {
+export async function orphanLabels(root: string, images: DatasetImage[], { signal, onProgress }: {
+  signal?: AbortSignal
+  /** Called as the label files found are looked at, with how many there are */
+  onProgress?: (done: number, total: number) => void
+} = {}): Promise<OrphanFile[]> {
   const folder = folderOf(root)
-  const stems = new Set(folder.images.map((n) => fold(stemOf(n))))
-  const bases = new Set(folder.images.map((n) => fold(stemOf(path.posix.basename(n)))))
+  const stems = new Set<string>(), bases = new Set<string>()
+  await inSlices(folder.images, (n) => {
+    stems.add(fold(stemOf(n)))
+    bases.add(fold(stemOf(path.posix.basename(n))))
+  })
   const out = folder.outputDir ?? (folder.outputFile ? path.dirname(folder.outputFile) : null)
   const within = (dir: string, parent: string) => fold(dir).startsWith(fold(parent) + path.sep)
   const places = [{ dir: root, flat: !!out && fold(out) === fold(root), skip: out && within(out, root) ? [out] : [] }]
   if (out && fold(out) !== fold(root)) places.push({ dir: out, flat: true, skip: within(root, out) ? [root] : [] })
   const embedded = new Set([...folder.embedded.values()].map(fold))
   const outputFile = folder.outputFile && fold(folder.outputFile)
-  const readAs = new Map(images.flatMap((i) => (i.file && i.format ? [[fold(i.file), i.format] as const] : [])))
+  const readAs = new Map<string, LabelFormat>()
+  await inSlices(images, (i) => {
+    if (i.file && i.format) readAs.set(fold(i.file), i.format)
+  })
+  const listed: { dir: string; flat: boolean; files: string[] }[] = []
+  for (const { dir, flat, skip } of places) listed.push({ dir, flat, files: await filesUnder(dir, skip, signal) })
+  const total = listed.reduce((n, place) => n + place.files.length, 0)
+  let done = 0
   const orphans: OrphanFile[] = []
   const lists = new Map<string, string>()
-  for (const { dir, flat, skip } of places) {
-    for (const rel of await filesUnder(dir, skip)) {
+  for (const { dir, flat, files } of listed) {
+    const found: { rel: string; orphan: OrphanFile }[] = []
+    for (const rel of files) {
+      // Before each file: one that isn't an image's own is read through
+      signal?.throwIfAborted()
+      if (++done % 1000 === 0) {
+        onProgress?.(done, total)
+        await turn()
+      }
       const file = path.join(dir, rel)
       const key = fold(file), stem = fold(stemOf(rel))
       // The image open from inside its own label file
@@ -485,9 +624,12 @@ export async function orphanLabels(root: string, images: DatasetImage[]): Promis
         continue
       }
       const kind = await labelFileKind(root, file)
-      if (kind) orphans.push({ file: shown(root, file), ...kind })
+      if (kind) found.push({ rel, orphan: { file: shown(root, file), ...kind } })
     }
+    // Sorted once found, as the image list is, not as the files were listed: there are few
+    for (const { orphan } of found.sort((a, b) => nameOrder(a.rel, b.rel))) orphans.push(orphan)
   }
+  onProgress?.(total, total)
   if (lists.size) orphans.push(...await strayEntries(root, lists))
   return orphans
 }
@@ -500,7 +642,8 @@ async function strayEntries(root: string, lists: Map<string, string>): Promise<O
     const key = fold(labelPath(root, name, 'createml'))
     if (lists.has(key)) readers.set(key, (readers.get(key) ?? new Set()).add(entryName(outputFile, name)))
   }
-  const cache = caches.get(root)?.lists ?? new Map()
+  const opened = opening(root)
+  const cache = (opened && caches.get(opened)?.lists) || new Map()
   const stray: OrphanFile[] = []
   for (const [key, file] of lists) {
     const at = await fs.stat(file).catch(() => null)
@@ -510,7 +653,7 @@ async function strayEntries(root: string, lists: Map<string, string>): Promise<O
     const entries = [...list.entries.keys()].filter((e) => !read.has(e))
     if (entries.length) stray.push({ file: shown(root, file), names: null, entries })
   }
-  return stray
+  return stray.sort((a, b) => nameOrder(a.file, b.file))
 }
 
 const unreadable = (file: string, e: unknown, as = '') =>
@@ -518,10 +661,13 @@ const unreadable = (file: string, e: unknown, as = '') =>
 
 /** Another image whose labels go to the same file: a.jpg and a.png, or one -O labels.json for all */
 function sharesFile(root: string, name: string, found: Found) {
-  const folder = folderOf(root)
+  const outputFile = outputFileOf(root)
   const stem = fold(stemOf(name)), file = fold(found.file)
-  const all = !!folder.outputFile && fold(folder.outputFile) === file
-  return folder.images.some((other) => other !== name && (all || fold(stemOf(other)) === stem) && fold(labelPath(root, other, found.format)) === file)
+  const all = !!outputFile && fold(outputFile) === file
+  // Most images have a name of their own: renaming a label in all of a big folder's files would
+  // otherwise go through the whole folder once a file
+  if (!all && !sharesStem(root, name)) return false
+  return folderOf(root).images.some((other) => other !== name && (all || fold(stemOf(other)) === stem) && fold(labelPath(root, other, found.format)) === file)
 }
 
 /** New shapes, or a change to the shapes the file holds when it's written */
@@ -738,7 +884,7 @@ async function rewritten(root: string, name: string, found: Found, text: string,
     return { text: serializeLabelFile({ ...doc, flags: flags ?? doc.flags, shapes }), shapes, verified: doc.other.verified === true }
   }
   if (found.format === 'createml') {
-    const entry = entryName(folderOf(root).outputFile, name)
+    const entry = entryName(outputFileOf(root), name)
     let list
     try {
       list = readCreateML(text, entry)
@@ -802,7 +948,7 @@ async function rewritten(root: string, name: string, found: Found, text: string,
 async function versionNow(root: string, name: string, found: Found, text: string) {
   if (found.format === 'createml') {
     const list = indexed(text)
-    return list.error ? null : versionOf('createml', null, null, list.entries.get(entryName(folderOf(root).outputFile, name)))
+    return list.error ? null : versionOf('createml', null, null, list.entries.get(entryName(outputFileOf(root), name)))
   }
   const [file, classes] = await Promise.all([
     fs.stat(found.file).catch(() => null),
@@ -873,7 +1019,7 @@ export async function rewriteLabels(root: string, name: string, change: ShapeCha
     } catch (e) {
       throw new Error(`${base} is in the trash, but its new labels couldn't take its name: they're in ${tmp} (${reason(e)})`)
     }
-    const item: ImageItem = { ...summarize(next.shapes, true), name, embedded: folderOf(root).embedded.has(name) || undefined, verified: next.verified || undefined }
+    const item: ImageItem = { ...summarize(next.shapes, true), name, embedded: isEmbedded(root, name) || undefined, verified: next.verified || undefined }
     return { file: found.file, format: found.format, item }
   })
 }

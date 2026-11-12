@@ -3,7 +3,10 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { newShape, type Shape } from '../../src/shared/labelfile'
-import { findLabels, labelPath, loadLabels, openProject, renameRetrying, saveLabels, type SaveRequest, setTrash, trashImage, writeAtomic } from '../../src/main/project'
+import { setFolding } from '../../src/main/names'
+import {
+  findLabels, labelPath, loadLabels, openProject, renameRetrying, saveLabels, type SaveRequest, setTrash, sharesStem, trashImage, writeAtomic
+} from '../../src/main/project'
 
 // Saving, switching formats and deleting, on folders of their own. The trash is a folder too.
 const bin = mkdtempSync(path.join(tmpdir(), 'seamtag-trash-'))
@@ -111,6 +114,22 @@ test('Delete image: the image goes first, then its label files in every format; 
   expect((await trashImage(dir, 'a.png')).kept).toBeUndefined()
   expect(trashed).toEqual(['a.png', 'a.json', 'a.xml', 'a.txt'].map((f) => path.join(dir, f)))
   expect(existsSync(path.join(dir, 'classes.txt'))).toBe(true)
+})
+
+test('images whose names differ only in their extension are known, as the system compares names, until one is deleted', async () => {
+  const dir = folder({}, ['a.png', 'a.jpg', 'B.png', 'sub/b.jpg', 'c.png'])
+  await openProject(dir, null)
+  expect(['a.png', 'B.png', 'sub/b.jpg', 'c.png'].map((name) => sharesStem(dir, name))).toEqual([true, false, false, false])
+  await trashImage(dir, 'a.jpg')
+  expect(sharesStem(dir, 'a.png')).toBe(false)
+  setFolding('case')
+  try {
+    const other = folder({}, ['a.png', 'A.jpg'])
+    await openProject(other, null)
+    expect(sharesStem(other, 'a.png')).toBe(true)
+  } finally {
+    setFolding()
+  }
 })
 
 describe('renames a file someone holds for a moment', () => {

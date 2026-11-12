@@ -5,7 +5,7 @@
 // window's own requests a turn between slices.
 import path from 'path'
 import {
-  CHECKS, type CheckCode, checkDataset, type CheckOptions, fixIssue, FIXES, type OrphanFile, renameLabel, renaming
+  CHECKS, type CheckCode, checkDataset, type CheckOptions, type Clash, fixIssue, FIXES, type OrphanFile, renameLabel, renaming, tallyLabels
 } from '../shared/checks'
 import type { DatasetImage, Issue, MaskBits, Severity } from '../shared/dataset'
 import { type LabelFormat, pyRound } from '../shared/formats'
@@ -143,23 +143,26 @@ function reporter(send: (p: Progress) => void) {
 /** An image's own problems, with the read they were found in */
 type Own = { image: DatasetImage; issues: Issue[] }
 /**
- * What a check found: every problem, each image's own, those across the folder, what the
- * folder's were found with, and whether any image was verified, which each image's own hang on
+ * What a check found: every problem, each image's own (by name, in the folder's order), those
+ * across the folder, what the folder's were found with, whether any image was verified, which
+ * each image's own hang on, and each image's place in the folder
  */
-export type Found = { issues: Issue[]; own: Map<string, Own>; across: Issue[]; context: string; verifying: boolean }
+export type Found = { issues: Issue[]; own: Map<string, Own>; across: Issue[]; context: string; verifying: boolean; order: Map<string, number> }
 type Checked = {
   at: number
   /** The save format it was read as */
   prefer: LabelFormat
   images: DatasetImage[]
-  byName: Map<string, DatasetImage>
   found: Found
+  clashes: Clash[]
   duplicates: string[][]
   orphans: OrphanFile[]
   issues: Issue[]
   /** The file each problem about a label file without its image is about */
   files: Map<Issue, string>
 }
+/** An image of the check, as it was read */
+const imageOf = (c: Checked, name: string) => c.found.own.get(name)?.image
 // The last check of each open folder, and the last statistics' read
 const checks = new Map<string, Checked>()
 const counted = new Map<string, { images: DatasetImage[]; stats: DatasetStats }>()
@@ -195,18 +198,63 @@ const labelsOf = (i: DatasetImage) =>
   JSON.stringify([i.file, i.format, i.verified, i.labelImage ?? null, i.broken ?? null, i.shapes.map((s) => [s.label, isAi(s)])])
 
 /** As checkDataset sorts problems: the worst first, then the folder's own, then by image and shape; ties in CHECKS' order */
-function sorted(issues: Issue[], images: DatasetImage[]) {
-  const order = new Map(images.map((i, k) => [i.name, k]))
+function sorted(issues: Issue[], order: Map<string, number>) {
   // Each one's place worked out once, not at every comparison: a folder can have 100,000
-  const keyed = issues.map((i) => ({ i, severity: RANK[i.severity], at: i.image === null ? -1 : order.get(i.image) ?? images.length, shape: i.shape ?? -1, code: codeRank(i.code) }))
+  const keyed = issues.map((i) => ({ i, severity: RANK[i.severity], at: i.image === null ? -1 : order.get(i.image) ?? order.size, shape: i.shape ?? -1, code: codeRank(i.code) }))
   keyed.sort((a, b) => a.severity - b.severity || a.at - b.at || a.shape - b.shape || a.code - b.code)
   return keyed.map((k) => k.i)
 }
 
+/** The images named as the last check named them, in the same order */
+function sameOrder(was: Map<string, Own>, images: DatasetImage[]) {
+  if (was.size !== images.length) return false
+  let k = 0
+  for (const name of was.keys()) if (name !== images[k++].name) return false
+  return true
+}
+
+// Counting labels is quicker than checking them: this many slices a turn
+const TALLY_SLICES = 10
+
+// Copies of image files are told of the same way whatever the labels say: once for each finding
+// of them, which a check after a save keeps. In a folder of camera frames every image can be one.
+const copiesTold = new WeakMap<string[][], Issue[]>()
+function copyIssues(duplicates: string[][]) {
+  let issues = copiesTold.get(duplicates)
+  if (!issues) copiesTold.set(duplicates, (issues = checkDataset([], { labels: null, duplicates })))
+  return issues
+}
+
+/**
+ * What checkDataset finds that hangs on other images, as one call over the whole folder finds
+ * it, but a slice at a time: the folder's labels are counted, then each slice is checked
+ * against the count, then copies of image files and the folder's own problems are found once
+ */
+async function acrossOf(images: DatasetImage[], options: CheckOptions, signal?: AbortSignal): Promise<Issue[]> {
+  const tally = tallyLabels([])
+  for (let at = 0; at < images.length; at += SLICE * TALLY_SLICES) {
+    signal?.throwIfAborted()
+    tallyLabels(images.slice(at, at + SLICE * TALLY_SLICES), tally)
+    await turn()
+  }
+  const across: Issue[] = []
+  for (let at = 0; at < images.length; at += SLICE) {
+    signal?.throwIfAborted()
+    for (const issue of checkDataset(images.slice(at, at + SLICE).map(unmeasured), { labels: options.labels, clashes: options.clashes, tally })) {
+      if (issue.image !== null && ACROSS.has(issue.code)) across.push(issue)
+    }
+    await turn()
+  }
+  signal?.throwIfAborted()
+  for (const issue of copyIssues(options.duplicates ?? [])) across.push(issue)
+  for (const issue of checkDataset([], { labels: options.labels, orphans: options.orphans, tally })) across.push(issue)
+  return across
+}
+
 /**
  * checkDataset's problems, found in two passes that come to the same: one over the whole
- * folder, measuring nothing, for what hangs on other images, then one image by image in
- * slices, with a turn for the window between them. An image that's the same read as before
+ * folder, measuring nothing, for what hangs on other images, then one image by image. Both go
+ * in slices, with a turn for the window between them. An image that's the same read as before
  * (readDataset gives the same object while its files are unchanged) keeps the problems found
  * in it then, so a check after a save measures only what was saved; and when no image's
  * labels changed (a shape moved, say), nor what the check is told, neither did the folder's.
@@ -220,7 +268,8 @@ export async function issuesOf(images: DatasetImage[], options: CheckOptions, be
     const read = was.get(i.name)?.image
     return read === i || (!!read && labelsOf(read) === labelsOf(i))
   })
-  const across = same ? before!.across : checkDataset(images.map(unmeasured), options).filter((i) => i.image === null || ACROSS.has(i.code))
+  const order = was && sameOrder(was, images) ? before!.order : new Map(images.map((i, k) => [i.name, k]))
+  const across = same ? before!.across : await acrossOf(images, options, signal)
   const issues = [...across]
   const own = new Map<string, Own>()
   // Once the first image is verified, or the last one isn't, every image says so again
@@ -243,7 +292,7 @@ export async function issuesOf(images: DatasetImage[], options: CheckOptions, be
     progress?.(Math.min(at + SLICE, images.length), images.length)
     await turn()
   }
-  return { issues: sorted(issues, images), own, across, context, verifying }
+  return { issues: sorted(issues, order), own, across, context, verifying, order }
 }
 
 /** The same image files as before, by name and byte size */
@@ -294,20 +343,22 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
     let duplicates = same ? before!.duplicates : null
     if (!duplicates) {
       report({ phase: 'compare', done: 0, total: images.length }, true)
-      duplicates = await findDuplicateImages(root, images, { signal })
+      duplicates = await findDuplicateImages(root, images, { signal, onProgress: (done, total) => report({ phase: 'compare', done, total }) })
     }
     let orphans = same ? before!.orphans : null
     if (!orphans) {
       report({ phase: 'orphans', done: 0, total: images.length }, true)
-      orphans = await orphanLabels(root, images)
-      signal.throwIfAborted()
+      orphans = await orphanLabels(root, images, { signal, onProgress: (done, total) => report({ phase: 'orphans', done, total }) })
     }
-    const found = await issuesOf(images, { labels, clashes: labelFileClashes(images), duplicates, orphans }, before?.found,
+    // Which images share a label file hangs on nothing but where each one's labels are read from
+    const clashes = same && images.every((i, k) => i.file === before!.images[k].file && i.format === before!.images[k].format)
+      ? before!.clashes : labelFileClashes(images)
+    const found = await issuesOf(images, { labels, clashes, duplicates, orphans }, before?.found,
       (done, total) => report({ phase: 'check', done, total }), signal)
+    // A folder closed as the check ended keeps none
+    signal.throwIfAborted()
     const { issues } = found
-    const result: Checked = {
-      at: Date.now(), prefer, images, byName: new Map(images.map((i) => [i.name, i])), found, duplicates, orphans, issues, files: strayFiles(issues, orphans)
-    }
+    const result: Checked = { at: Date.now(), prefer, images, found, clashes, duplicates, orphans, issues, files: strayFiles(issues, orphans) }
     checks.set(root, result)
     return summaryOf(result)
   } catch (e) {
@@ -322,7 +373,7 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
 const LOOKS_LIKE = /looks like "(.*?)" (?:from the label list|written another way)/
 
 function rowOf(c: Checked, issue: Issue): ProblemRow {
-  const image = issue.image === null ? undefined : c.byName.get(issue.image)
+  const image = issue.image === null ? undefined : imageOf(c, issue.image)
   const label = issue.shape === undefined ? undefined : image?.shapes[issue.shape]?.label
   const to = issue.code === 'label-variants' ? LOOKS_LIKE.exec(issue.message)?.[1] : undefined
   const file = c.files.get(issue)
@@ -389,7 +440,8 @@ export async function fixShapes(root: string, issue: Pick<Issue, 'code' | 'image
   if (!FIXES[code] || !issue.image) return null
   // A name from the window: only an image of this folder
   if (!folderOf(root).images.includes(issue.image)) throw new Error(`${issue.image} isn't in the folder`)
-  const read = checks.get(root)?.byName.get(issue.image)
+  const c = checks.get(root)
+  const read = c && imageOf(c, issue.image)
   if (read?.broken) return null
   const [width, height] = read && read.width > 0 ? [read.width, read.height] : await imageSize(root, issue.image).catch(() => [0, 0])
   const image: DatasetImage = {

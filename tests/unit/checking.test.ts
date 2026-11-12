@@ -7,10 +7,10 @@ import {
   checkFolder, type CheckSummary, fixShapes, folderStats, forgetChecks, issuesOf, problemPage, type ProblemQuery, type Progress, renamePlan, renameRun,
   statsText, stopJob, strayFile, together
 } from '../../src/main/checking'
-import { readDataset } from '../../src/main/dataset'
+import { forgetDataset, readDataset } from '../../src/main/dataset'
 import { Stale } from '../../src/renderer/src/stale'
 import { encodeMask } from '../../src/main/masks'
-import { openProject, setTrash } from '../../src/main/project'
+import { closeProject, openProject, setTrash } from '../../src/main/project'
 import { CHECKS, type CheckOptions, checkDataset } from '../../src/shared/checks'
 import type { DatasetImage, Issue, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
@@ -186,6 +186,19 @@ describe('two passes find what one checkDataset finds', () => {
     stop.abort()
     await expect(issuesOf(images, { labels: null }, undefined, undefined, stop.signal)).rejects.toThrow()
   })
+
+  test("the pass over the whole folder's labels goes a slice at a time too, so the window gets its turns and a stop ends it part way", async () => {
+    let looked = 0
+    // Each image's labels are counted as they're read
+    const images = Array.from({ length: 4000 }, (_, k) => {
+      const { shapes, ...rest } = image(`${k}.png`, [rect(k % 2 ? 'car' : 'Car', 1, 1, 9, 9)])
+      return Object.defineProperty(rest, 'shapes', { enumerable: true, get: () => (looked++, shapes) }) as DatasetImage
+    })
+    const stop = new AbortController()
+    setImmediate(() => stop.abort())
+    await expect(issuesOf(images, { labels: ['car'] }, undefined, undefined, stop.signal)).rejects.toThrow()
+    expect(looked).toBeLessThan(images.length)
+  })
 })
 
 describe('a folder with planted problems', () => {
@@ -342,6 +355,24 @@ describe('checking again', () => {
     expect(await first).toEqual({ stopped: true })
     expect(await second).toHaveProperty('counts')
     forgetChecks(root)
+    expect(problemPage(root, ALL)).toBeNull()
+  })
+
+  test('a folder closed as its check ends, as another opens, keeps no check', async () => {
+    const root = await planted()
+    let closed = false
+    const result = await checkFolder(root, { prefer: 'labelme', labels: LABELS }, (p) => {
+      if (closed || p.phase !== 'check' || p.done < p.total) return
+      closed = true
+      // As project:close does, between the check's last slice and its end
+      setImmediate(() => {
+        forgetDataset(root)
+        forgetChecks(root)
+        closeProject(root)
+      })
+    })
+    expect(closed).toBe(true)
+    expect(result).toEqual({ stopped: true })
     expect(problemPage(root, ALL)).toBeNull()
   })
 })

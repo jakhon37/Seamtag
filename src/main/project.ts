@@ -7,9 +7,17 @@ import {
 } from '../shared/formats'
 import { FORMAT_VERSION, type LabelDoc, LabelFileError, parseLabelFile, serializeLabelFile, type Shape } from '../shared/labelfile'
 import { EMPTY_SUMMARY, type Summary, summarize } from '../shared/labels'
+import { nameKey } from './names'
 
 // What Chromium or libvips can show. labelme takes whatever Qt can read, which is much the same.
 export const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.jfif', '.png', '.bmp', '.gif', '.tif', '.tiff', '.webp', '.avif'])
+
+/**
+ * The image list's order: numbers in names by their value, so img_2 comes before img_10. One
+ * collator for every comparison: localeCompare with options makes a new one each time, which
+ * took seconds to sort a folder of 100,000 images.
+ */
+export const nameOrder = new Intl.Collator(undefined, { numeric: true }).compare
 
 export type LabelClass = { name: string; color: string }
 export type ProjectInfo = { name: string; classes: LabelClass[] }
@@ -37,6 +45,8 @@ type Root = {
   dir: string; outputDir: string | null; outputFile: string | null; images: Map<string, ImageItem>; embedded: Map<string, string>
   /** File names, without extensions, that more than one image has, in different folders */
   shared: Set<string>
+  /** How many images have each path without its extension, as the file system compares names: a.jpg and a.png share a.json */
+  stems: Map<string, number>
 }
 const roots = new Map<string, Root>()
 
@@ -71,6 +81,19 @@ export function imagePath(dir: string, name: string): string {
 export function isEmbedded(dir: string, name: string) {
   return getRoot(dir).embedded.has(name)
 }
+
+/** The one -O file every image's labels go to, when the folder was opened with one */
+export const outputFileOf = (dir: string) => getRoot(dir).outputFile
+
+/** Has another image of the folder this one's path but for its extension, as a.jpg and a.png have? */
+export const sharesStem = (dir: string, name: string) => (getRoot(dir).stems.get(nameKey(stemOf(name))) ?? 0) > 1
+
+/**
+ * An open folder as this opening of it, for what whole-folder passes keep of it: each opening
+ * is a new one, so what they keep goes with the folder when it's closed, however late a pass
+ * that was reading it ends. Undefined when it isn't open.
+ */
+export const opening = (dir: string): object | undefined => roots.get(dir)
 
 /** Where an image's labels live in a format: beside it, or in the output folder. */
 export function labelPath(dir: string, name: string, format: LabelFormat = 'labelme'): string {
@@ -242,7 +265,7 @@ async function scan(dir: string): Promise<string[]> {
     }
   }
   await walk('')
-  return found.sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+  return found.sort(nameOrder)
 }
 
 export async function readText(file: string): Promise<string | null> {
@@ -353,7 +376,7 @@ export async function openProject(target: string, output: string | null): Promis
   const outputFile = output && output.toLowerCase().endsWith('.json') ? path.resolve(output) : null
   const outputDir = output && !outputFile ? path.resolve(output) : null
   const names = await scan(dir)
-  const r: Root = { dir, outputDir, outputFile, images: new Map(), embedded: new Map(), shared: new Set() }
+  const r: Root = { dir, outputDir, outputFile, images: new Map(), embedded: new Map(), shared: new Set(), stems: new Map() }
   if (embeddedFile) {
     const name = posix(path.relative(dir, embeddedFile))
     r.embedded.set(name, embeddedFile)
@@ -365,6 +388,8 @@ export async function openProject(target: string, output: string | null): Promis
     const base = stemOf(path.basename(name))
     if (seen.has(base)) r.shared.add(base)
     seen.add(base)
+    const stem = nameKey(stemOf(name))
+    r.stems.set(stem, (r.stems.get(stem) ?? 0) + 1)
   }
   roots.set(dir, r)
   const images: ImageItem[] = names.map((name) => {
@@ -651,7 +676,10 @@ export async function trashImage(dir: string, name: string) {
     if (isYolo(labelPath(dir, name, 'yolo'))) labels.push({ format: 'yolo', file: labelPath(dir, name, 'yolo') })
     // The image first: if it can't go, its labels stay with it
     await trash(image)
-    r.images.delete(name)
+    if (r.images.delete(name)) {
+      const stem = nameKey(stemOf(name))
+      r.stems.set(stem, Math.max(0, (r.stems.get(stem) ?? 0) - 1))
+    }
     const kept: string[] = []
     for (const found of labels) {
       try {
