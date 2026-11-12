@@ -6,9 +6,12 @@ names with PyYAML, as X-AnyLabeling, CVAT and older Ultralytics do.
     uv run --no-project --python 3.12 --with numpy==2.3.4 --with pyyaml==6.0.3 --with pillow==12.0.0 python -I tests/parity/ultralytics_reads.py DIR...
 
 Each DIR is a dataset with DIR.expected.json beside it: its task, names, kpt_shape, flip_idx and the
-rows each label file holds, which tests/unit/ultralytics.test.ts writes when YOLO_PARITY_DIR is set.
-Fails if Ultralytics finds an image or label corrupt, drops a repeated row, reads a row other than as
-written, or would stop on the dataset as a whole.
+rows each label file holds, which tests/unit/ultralytics.test.ts writes when YOLO_PARITY_DIR is set
+(e2e/export.spec.ts writes one for each dataset the app exports). Fails if Ultralytics finds an image
+or label corrupt, drops a repeated row, reads a row other than as written, or would stop on the
+dataset as a whole. For an image whose entry lists `joined` objects (a class and its outlines' parts
+in pixels), the label file must hold the row Ultralytics' own merge_multi_segment makes of the parts,
+as convert_coco joins a COCO object's polygons, written as Seamtag writes rows.
 
 Ultralytics is AGPL-3.0, so its files are fetched at commit d2b7876 (v8.4.211, whose annotated tag
 is 483bc1b), checked against their SHA-256 and never kept. check_det_dataset, get_img_files and
@@ -37,6 +40,7 @@ SOURCES = {
     "ultralytics/utils/ops.py": "50267c27f8364c3c895b78986c7006b72d9c26d273ccd422cba5776d26c29039",
     "ultralytics/nn/autobackend.py": "e4086e22403440f8293815ee585d41865a6d360deb82776ed01b3245a5c64c26",
     "ultralytics/utils/__init__.py": "33647de7592615e51485e9c577c92bdb31670ecf373b8e333aa3448df92dd0fc",
+    "ultralytics/data/converter.py": "132871c377275302830ad976d9c11107f19e842e9ad1ff784e6362182fe38580",
 }
 LIFT = {
     "ultralytics/data/utils.py": ["IMG_FORMATS", "VID_FORMATS", "FORMATS_HELP_MSG", "DATASET_KEY_TYPES", "img2label_paths",
@@ -44,6 +48,7 @@ LIFT = {
     "ultralytics/utils/ops.py": ["xyxy2xywh", "segments2boxes", "empty_like"],
     "ultralytics/nn/autobackend.py": ["check_class_names"],
     "ultralytics/utils/__init__.py": ["YAML"],
+    "ultralytics/data/converter.py": ["min_index", "merge_multi_segment"],
 }
 
 
@@ -83,11 +88,24 @@ for path, names in LIFT.items():
     for _, code in lift(fetch(path), names):
         exec("from __future__ import annotations\n" + code, ns)
 YAML, check_class_names, verify_image_label, img2label_paths = ns["YAML"], ns["check_class_names"], ns["verify_image_label"], ns["img2label_paths"]
+merge_multi_segment = ns["merge_multi_segment"]
 IMG_FORMATS, DATASET_KEY_TYPES = ns["IMG_FORMATS"], ns["DATASET_KEY_TYPES"]
 
 
 def fail(message):
     sys.exit(f"FAIL {message}")
+
+
+def joined_row(cls, parts, width, height):
+    """An object's parts joined by merge_multi_segment, as convert_coco joins them, then written as Seamtag
+    writes a row: each point a share of the image with '%.6f', within 0 to 1, a point that repeats the one
+    before it or the first point at the end left out"""
+    points = np.concatenate(merge_multi_segment([[v for p in part for v in p] for part in parts]), axis=0)
+    shares = [("%.6f" % (min(max(x, 0), width) / width), "%.6f" % (min(max(y, 0), height) / height)) for x, y in points.tolist()]
+    kept = [p for i, p in enumerate(shares) if i == 0 or p != shares[i - 1]]
+    while len(kept) > 1 and kept[0] == kept[-1]:
+        kept.pop()
+    return " ".join([str(cls), *(v for p in kept for v in p)])
 
 
 def dataset_yaml(folder):
@@ -146,7 +164,7 @@ def check(folder):
     listed = sorted(str(folder / rel) for rel in expected["images"])
     if found != listed:
         fail(f"{folder}: Ultralytics finds images {found}, Seamtag wrote {listed}")
-    boxes = segments = rows = 0
+    boxes = segments = rows = merged = 0
     for rel, want in expected["images"].items():
         image = str(folder / rel)
         label = img2label_paths([image])[0]
@@ -173,6 +191,14 @@ def check(folder):
                 same = lb[i][0] == row[0] and np.array_equal(segs[i], row[1:].reshape(-1, 2))
             if not same:
                 fail(f"{rel} row {i + 1}: Ultralytics reads {lb[i]}{'' if task in ('detect', 'pose') else f' {segs[i]}'}, Seamtag wrote {row}")
+        if want.get("joined"):
+            with open(label, encoding="utf-8") as f:
+                text_rows = f.read().splitlines()
+            for obj in want["joined"]:
+                row = joined_row(obj["class"], obj["parts"], shape[1], shape[0])
+                if row not in text_rows:
+                    fail(f"{rel}: no row joins class {obj['class']}'s {len(obj['parts'])} parts as merge_multi_segment does: {row}")
+                merged += 1
         boxes += len(lb)
         segments += len(segs)
         rows += len(written)
@@ -181,7 +207,8 @@ def check(folder):
         fail(f"{folder}: {boxes} boxes and {segments} outlines")
     if task == "detect" and segments:
         fail(f"{folder}: {segments} outlines in a detect dataset")
-    print(f"ok {folder.name} ({task}): {len(listed)} images, {rows} rows, names {list(want_names.values())}")
+    joins = f", {merged} joined as merge_multi_segment joins them" if merged else ""
+    print(f"ok {folder.name} ({task}): {len(listed)} images, {rows} rows{joins}, names {list(want_names.values())}")
 
 
 if __name__ == "__main__":

@@ -10,8 +10,8 @@ import { newShape, type Shape } from '../../src/shared/labelfile'
 import { circlePolygon } from '../../src/shared/outline'
 import { ULTRALYTICS_YAML, yamlString } from '../../src/shared/pose'
 import {
-  countRows, guessTask, isDatasetYaml, isYoloImage, labelPathFor, labelRows, labelText, newRowStats, poseYamlKeys, quadKind, readDataYaml, readRows,
-  verifyRows, writeDataYaml, YOLO_TASKS, type YoloTask
+  countRows, guessTask, isDatasetYaml, isYoloImage, joinOutlines, labelPathFor, labelRows, labelText, maskOutlines, newRowStats, poseYamlKeys, quadKind,
+  readDataYaml, readRows, verifyRows, writeDataYaml, YOLO_TASKS, type YoloTask
 } from '../../src/shared/ultralytics'
 
 // What Ultralytics 8.4.211's own code makes of label files and data.yaml: tests/fixtures/ultralytics/make_verify_cases.py
@@ -144,17 +144,80 @@ describe('label rows written for each task', () => {
       expect(Math.abs(got[2 * i + 1] * 50 - py)).toBeLessThan(1e-4)
     })
   })
-  test("segment: a mask is the outline of each part along its pixels' edges; holes are filled and parts become objects, each with an issue", () => {
+  test("segment: a mask is its outline along its pixels' edges, holes filled; a mask in separate parts is one object, its outlines joined as Ultralytics joins them", () => {
     const ring = labelRows(image([shapes[4]], [masks[4]], [10, 10]), 'segment', CLASSES)
     // The 3 x 3 ring at (1, 1): its outer edge, corners cut, and the hole left out
     expect(ring.text).toBe('0 0.350000 0.400000 0.150000 0.400000 0.100000 0.350000 0.100000 0.150000 0.150000 0.100000 0.350000 0.100000 0.400000 0.150000 0.400000 0.350000\n')
     expect(ring.issues).toEqual([expect.objectContaining({ severity: 'warning', code: 'yolo-mask-holes', shape: 0 })])
     const parts = labelRows(image([newShape('cat', 'mask', [[0, 0], [3, 2]])], [bitmap(0, 0, ['1100', '1100', '0001'])], [10, 10]), 'segment', CLASSES)
+    // The square's outline from its corner nearest the dot, round it, then over to the dot and round that: Ultralytics'
+    // merge_multi_segment gives these points for the two outlines (tests/parity/ultralytics_reads.py runs it)
     expect(lines(parts.text)).toEqual([
-      '0 0.150000 0.200000 0.050000 0.200000 0.000000 0.150000 0.000000 0.050000 0.050000 0.000000 0.150000 0.000000 0.200000 0.050000 0.200000 0.150000',
-      '0 0.350000 0.300000 0.300000 0.250000 0.350000 0.200000 0.400000 0.250000'
+      '0 0.200000 0.150000 0.150000 0.200000 0.050000 0.200000 0.000000 0.150000 0.000000 0.050000 0.050000 0.000000 0.150000 0.000000 0.200000 0.050000 ' +
+      '0.200000 0.150000 0.300000 0.250000 0.350000 0.200000 0.400000 0.250000 0.350000 0.300000 0.300000 0.250000'
     ])
-    expect(parts.issues).toEqual([expect.objectContaining({ severity: 'info', code: 'yolo-mask-parts' })])
+    expect(parts.issues).toEqual([expect.objectContaining({ severity: 'info', code: 'yolo-joined', shape: 0 })])
+    expect(parts.issues[0].message).toBe("a.png: cat's mask is in 2 separate parts, one object, so they're joined into one outline, as Ultralytics' convert_coco joins an object's parts")
+    expect(verifyRows(parts.text, 'segment', 3)).toMatchObject({ status: 'ok', outline: true })
+  })
+  test('shapes sharing a label and a group_id are one object: one box in detect, one joined outline in segment, the smallest rotated box around them in OBB', () => {
+    const group = [
+      poly('cat', [[10, 10], [20, 10], [20, 20], [10, 20]]), rect('dog', [[50, 5], [60, 15]], { group_id: 1 }),
+      poly('cat', [[30, 10], [40, 10], [40, 20]]), poly('cat', [[70, 30], [80, 30], [80, 40]])
+    ]
+    group[0].group_id = 1
+    group[2].group_id = 1
+    // A shape of another label in the group, and a shape with no group, are objects of their own
+    const detect = labelRows(image(group), 'detect', CLASSES)
+    expect(lines(detect.text)).toEqual(['0 0.250000 0.300000 0.300000 0.200000', '1 0.550000 0.200000 0.100000 0.200000', '0 0.750000 0.700000 0.100000 0.200000'])
+    expect(detect.issues.map((i) => [i.severity, i.code, i.shape])).toEqual([['info', 'yolo-joined', 0]])
+    expect(detect.issues[0].message).toBe("a.png: cat is 2 shapes of group 1, one object, so it's one box around them all")
+    const segment = labelRows(image(group), 'segment', CLASSES)
+    expect(lines(segment.text)).toEqual([
+      '0 0.200000 0.200000 0.200000 0.400000 0.100000 0.400000 0.100000 0.200000 0.200000 0.200000 0.300000 0.200000 0.400000 0.200000 0.400000 0.400000 0.300000 0.200000',
+      '1 0.500000 0.100000 0.600000 0.100000 0.600000 0.300000 0.500000 0.300000',
+      '0 0.700000 0.600000 0.800000 0.600000 0.800000 0.800000'
+    ])
+    expect(segment.issues.map((i) => [i.code, i.shape, i.message])).toEqual([
+      ['yolo-joined', 0, "a.png: cat is 2 shapes of group 1, one object, so its 2 separate parts are joined into one outline, as Ultralytics' convert_coco joins an object's parts"]
+    ])
+    expect(verifyRows(segment.text, 'segment', 3).status).toBe('ok')
+    const obb = labelRows(image(group.slice(0, 3)), 'obb', CLASSES)
+    expect(lines(obb.text)).toEqual(['0 0.100000 0.200000 0.400000 0.200000 0.400000 0.400000 0.100000 0.400000', '1 0.500000 0.100000 0.600000 0.100000 0.600000 0.300000 0.500000 0.300000'])
+    expect(obb.issues.map((i) => [i.code, i.shape, i.message])).toEqual([['yolo-obb-fitted', 0, 'a.png: cat is 2 shapes of group 1, one object, so the smallest rotated box around them all is written']])
+  })
+  test("a part of an object that can't be written is left out and the rest joined; a mask's parts and other shapes in its group are one outline", () => {
+    const shapes = [
+      poly('cat', [[10, 10], [20, 10], [20, 20], [10, 20]]), poly('cat', [[200, 10], [210, 10], [210, 20]]), poly('cat', [[30, 10], [40, 10], [30, 10.0000001]]),
+      newShape('cat', 'mask', [[50, 30], [53, 32]])
+    ].map((s) => ({ ...s, group_id: 7 }))
+    const out = labelRows(image(shapes, [null, null, null, bitmap(50, 30, ['1100', '1100', '0001'])]), 'segment', CLASSES)
+    expect(out.issues.map((i) => [i.severity, i.code, i.shape])).toEqual([
+      ['warning', 'yolo-outside', 1], ['warning', 'yolo-few-points', 2], ['info', 'yolo-joined', 0]
+    ])
+    expect(out.issues[1].message).toBe('a.png: cat has a part with fewer than 3 points apart, so that part is left out')
+    expect(out.issues[2].message).toBe("a.png: cat is 3 shapes of group 7, one object, so its 3 separate parts are joined into one outline, as Ultralytics' convert_coco joins an object's parts")
+    expect(out.rows).toBe(1)
+    // The square, then the mask's two parts, each tied to the one before at their closest points
+    const want = joinOutlines([[[10, 10], [20, 10], [20, 20], [10, 20]], [[51.5, 32], [50.5, 32], [50, 31.5], [50, 30.5], [50.5, 30], [51.5, 30], [52, 30.5], [52, 31.5]], [[53.5, 33], [53, 32.5], [53.5, 32], [54, 32.5]]])
+    expect(lines(out.text)[0]).toBe(`0 ${want.map(([x, y]) => `${(x / 100).toFixed(6)} ${(y / 50).toFixed(6)}`).join(' ')}`)
+  })
+  test("joinOutlines ties each outline to the next at their closest points, the first such pair as numpy's argmin finds it, as Ultralytics' merge_multi_segment does", () => {
+    // What Ultralytics 8.4.211's own merge_multi_segment gives for these outlines
+    const square = (x: number, y: number) => [[x, y], [x + 4, y], [x + 4, y + 4], [x, y + 4]]
+    expect(joinOutlines([square(0, 0), square(10, 0), square(20, 0)])).toEqual([
+      [4, 0], [4, 4], [0, 4], [0, 0], [4, 0], [10, 0], [14, 0], [20, 0], [24, 0], [24, 4], [20, 4], [20, 0], [14, 0], [14, 4], [10, 4], [10, 0]
+    ])
+    // A middle outline whose tie with the next comes first in its points is walked the other way round
+    expect(joinOutlines([square(0, 0), [[14, 4], [10, 4], [10, 0], [14, 0]], square(20, 0)])).toEqual([
+      [4, 0], [4, 4], [0, 4], [0, 0], [4, 0], [10, 0], [10, 4], [14, 4], [20, 4], [20, 0], [24, 0], [24, 4], [20, 4], [14, 4], [14, 0], [10, 0]
+    ])
+    expect(joinOutlines([square(0, 0), square(10, 10), square(0, 20), [[30, 30], [34, 30], [34, 34]]])).toEqual([
+      [4, 4], [0, 4], [0, 0], [4, 0], [4, 4], [10, 10], [14, 10], [14, 14], [10, 14], [4, 20], [4, 24], [30, 30], [34, 30], [34, 34], [30, 30],
+      [4, 24], [0, 24], [0, 20], [4, 20], [10, 14], [10, 10]
+    ])
+    expect(joinOutlines([square(0, 0)])).toEqual(square(0, 0))
+    expect(joinOutlines([])).toEqual([])
   })
   test('obb: a box from its top left round, a rotated rectangle as stored, a rectangle drawn as a polygon as it is, other shapes as the smallest rotated box around them', () => {
     const square = poly('cat', [[20, 10], [30, 20], [20, 30], [10, 20]])
@@ -713,7 +776,8 @@ describe.skipIf(!PARITY)("datasets for Ultralytics' own checks", () => {
     classes: { person: ['nose', 'left_eye', 'right_eye'], yes: ['x', 'left', 'right'] },
     flip: { person: [['left_eye', 'right_eye']], yes: [['left', 'right']] }
   }
-  // Every kind of shape, some past the edges, a mask with a hole and two parts
+  // Every kind of shape, some past the edges, a mask with a hole and two parts, and two polygons that are one object
+  const MASK = bitmap(2, 2, ['1111100', '1001100', '1111100', '0000000', '0000011', '0000011'])
   const sample = (size: [number, number], name: string, labels: string[]): DatasetImage => {
     const [w, h] = size
     const shapes = [
@@ -723,10 +787,17 @@ describe.skipIf(!PARITY)("datasets for Ultralytics' own checks", () => {
       newShape(labels[3 % labels.length], 'oriented_rectangle', [[w * 0.2, h * 0.6], [w * 0.4, h * 0.7], [w * 0.35, h * 0.8], [w * 0.15, h * 0.7]]),
       newShape(labels[4 % labels.length], 'mask', [[2, 2], [8, 7]]),
       rect(labels[5 % labels.length], [[-3, h * 0.8], [w * 0.1, h + 4]]),
-      newShape(labels[0], 'line', [[1, 1], [5, 5]])
+      newShape(labels[0], 'line', [[1, 1], [5, 5]]),
+      newShape(labels[0], 'polygon', [[w * 0.55, h * 0.65], [w * 0.65, h * 0.66], [w * 0.6, h * 0.75]], { group_id: 3 }),
+      newShape(labels[0], 'polygon', [[w * 0.7, h * 0.85], [w * 0.75, h * 0.86], [w * 0.72, h * 0.95], [w * 0.69, h * 0.9]], { group_id: 3 })
     ]
-    return image(shapes, [null, null, null, null, bitmap(2, 2, ['1111100', '1001100', '1111100', '0000000', '0000011', '0000011'])], size, name)
+    return image(shapes, [null, null, null, null, MASK], size, name)
   }
+  // The objects written as outlines joined from several parts, with the parts in pixels, so the parity script can join them with Ultralytics' own code
+  const joined = (img: DatasetImage, names: string[]) => [
+    { class: names.indexOf(img.shapes[4].label), parts: maskOutlines(MASK).outer },
+    { class: names.indexOf(img.shapes[7].label), parts: [img.shapes[7].points, img.shapes[8].points] }
+  ]
   const poseSample = (size: [number, number], name: string): DatasetImage => {
     const [w, h] = size
     return image([
@@ -749,7 +820,7 @@ describe.skipIf(!PARITY)("datasets for Ultralytics' own checks", () => {
       // Never labelled: no label file, a background
       ['images/val/d.jpg', null]
     ]
-    const expected: Record<string, { status: string; rows: number[][] }> = {}
+    const expected: Record<string, { status: string; rows: number[][]; joined?: ReturnType<typeof joined> }> = {}
     for (const [rel, img] of images) {
       const size = img ? [img.width, img.height] : [32, 24]
       const file = path.join(root, rel)
@@ -766,6 +837,7 @@ describe.skipIf(!PARITY)("datasets for Ultralytics' own checks", () => {
       mkdirSync(path.dirname(label), { recursive: true })
       writeFileSync(label, out.text)
       expected[rel] = { status: out.rows ? 'ok' : 'empty', rows: lines(out.text).map((l) => l.split(' ').map(Number)) }
+      if (task === 'segment' && img.shapes.length > 8) expected[rel].joined = joined(img, names)
       expect(verifyRows(out.text, task, names.length, pose?.kptShape ?? null)).toMatchObject({ status: out.rows ? 'ok' : 'empty', repeated: [] })
     }
     writeFileSync(path.join(root, 'data.yaml'), writeDataYaml({ names, train: 'images/train', val: 'images/val', ...(pose ?? {}) }))

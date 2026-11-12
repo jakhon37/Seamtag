@@ -402,14 +402,70 @@ export function poseRows(image: DatasetImage, instances: PoseInstance[], classes
   return w.done()
 }
 
+// numpy's argmin over the squared distance of every pair of points, as Ultralytics' min_index
+// takes it: the first smallest, by the first outline's point, then the second's
+function closest(a: number[][], b: number[][]): [number, number] {
+  let best = Infinity, ia = 0, ib = 0
+  for (let i = 0; i < a.length; i++) {
+    const [ax, ay] = a[i]
+    for (let j = 0; j < b.length; j++) {
+      const dx = ax - b[j][0], dy = ay - b[j][1], d = dx * dx + dy * dy
+      if (d < best) {
+        best = d
+        ia = i
+        ib = j
+      }
+    }
+  }
+  return [ia, ib]
+}
+
 /**
- * An image's label file for a task: one row a shape, as shares of the image written with
- * Python's '%.6f' and kept within 0 to 1, so Ultralytics 8.3 to 8.4 accept every row.
- * - detect: every closed shape's box (a mask's around its pixels)
+ * Outlines of one object as a single outline, joined as Ultralytics 8.4.211's merge_multi_segment
+ * joins a COCO object's polygons in convert_coco (ultralytics/data/converter.py), written again
+ * from what it does. Each outline is tied to the next at their two closest points. The path goes
+ * round the first outline from its tie and back to it, along each middle outline from its tie
+ * with the one before to its tie with the one after (turned the other way round when that tie
+ * comes first in its points), round the last outline, then back along the middle outlines' other
+ * sides, so it crosses every tie there and back. One outline comes back as it is.
+ */
+export function joinOutlines(rings: number[][][]): number[][] {
+  if (rings.length < 2) return rings[0] ?? []
+  const n = rings.length
+  const ties: number[][] = rings.map(() => [])
+  for (let i = 1; i < n; i++) {
+    const [a, b] = closest(rings[i - 1], rings[i])
+    ties[i - 1].push(a)
+    ties[i].push(b)
+  }
+  // Each outline from its first tie round to it again, and where its second tie is on the way
+  const walks = rings.map((ring, i) => {
+    let [from, to = from] = ties[i]
+    let points = ring
+    if (ties[i].length === 2 && from > to) {
+      points = [...ring].reverse()
+      ;[from, to] = [ring.length - 1 - from, ring.length - 1 - to]
+    }
+    return { round: [...points.slice(from), ...points.slice(0, from), points[from]], to: to - from }
+  })
+  const path = [...walks[0].round]
+  for (let i = 1; i < n - 1; i++) path.push(...walks[i].round.slice(0, walks[i].to + 1))
+  path.push(...walks[n - 1].round)
+  for (let i = n - 2; i >= 1; i--) path.push(...walks[i].round.slice(walks[i].to))
+  return path
+}
+
+/**
+ * An image's label file for a task: one row an object, as shares of the image written with
+ * Python's '%.6f' and kept within 0 to 1, so Ultralytics 8.3 to 8.4 accept every row. Shapes
+ * sharing a label and a group_id are one object, as COCO's export and labelme 7.9.1's
+ * labelme2coco take them; any other shape is one on its own, a mask in separate parts too.
+ * - detect: every object's box (a mask's around its pixels; several shapes' around them all)
  * - segment: outlines; a box as its 4 corners, so box and outline rows never share a file;
- *   a circle as labelme2coco's polygon; a mask as the outline of each part, holes filled
+ *   a circle as labelme2coco's polygon; a mask as its outline, holes filled; an object of
+ *   several parts as one outline, joined as Ultralytics' convert_coco joins them (joinOutlines)
  * - obb: 4 corners; a rotated rectangle's as stored, a box's from the top left round, any other
- *   shape's smallest rotated rectangle
+ *   shape's or object of several shapes' smallest rotated rectangle
  * - pose: the posed objects poseInstances finds with the schema, as poseRows writes them
  * Lines, line strips, points (outside pose) and sets of points are left out, and so is a row
  * that repeats another, which Ultralytics would drop. An image with no rows gets an empty file,
@@ -435,49 +491,95 @@ export function labelRows(image: DatasetImage, task: YoloTask, classes: string[]
   const w = rowWriter(image)
   if (!w.ready()) return w.done()
   const { say } = w
-  image.shapes.forEach((s, i) => {
-    const type = s.shape_type
-    if (!CLOSED_TYPES.has(type)) return say('warning', 'yolo-open-shape', `${s.label} is ${KIND[type] ?? `a ${type}`}, which YOLO ${TASK_WORD[task]} files can't hold, so it's left out`, i)
-    const cls = classes.indexOf(s.label)
-    if (cls < 0) return say('warning', 'yolo-unknown-label', `${s.label} isn't in the class list, so it's left out`, i)
+  const { width: W, height: H } = image
+  type Part = { index: number; shape: Shape; mask: MaskBits | null; box: Box }
+  // A shape that can be part of an object, or null, saying why it can't
+  const partOf = (i: number): Part | null => {
+    const s = image.shapes[i], type = s.shape_type
+    const leave = (severity: Severity, code: string, message: string) => { say(severity, code, message, i); return null }
+    if (!CLOSED_TYPES.has(type)) return leave('warning', 'yolo-open-shape', `${s.label} is ${KIND[type] ?? `a ${type}`}, which YOLO ${TASK_WORD[task]} files can't hold, so it's left out`)
+    if (!classes.includes(s.label)) return leave('warning', 'yolo-unknown-label', `${s.label} isn't in the class list, so it's left out`)
     const mask = type === 'mask' ? image.masks[i] ?? null : null
-    if (type === 'mask' && !mask) return say('error', 'yolo-mask-unreadable', `${s.label}'s mask can't be decoded, so it's left out`, i)
+    if (type === 'mask' && !mask) return leave('error', 'yolo-mask-unreadable', `${s.label}'s mask can't be decoded, so it's left out`)
     const box = mask ? pixelBox(mask) : shapeBox(s)
-    if (!box) return say('warning', 'yolo-no-area', `${s.label} has no pixels, so it's left out`, i)
+    if (!box) return leave('warning', 'yolo-no-area', `${s.label} has no pixels, so it's left out`)
     const where = w.misplaced(box)
-    if (where === 'flat') return say('warning', 'yolo-no-area', `${s.label} has no area, so it's left out`, i)
-    if (where === 'outside') return say('warning', 'yolo-outside', `${s.label} lies outside the image, so it's left out`, i)
+    if (where === 'flat') return leave('warning', 'yolo-no-area', `${s.label} has no area, so it's left out`)
+    if (where === 'outside') return leave('warning', 'yolo-outside', `${s.label} lies outside the image, so it's left out`)
     w.cut(box, s.label, i)
-    if (task === 'detect') return w.add(`${cls} ${w.box(box)}`, s.label, i)
-    let outlines: number[][][]
-    if (task === 'obb') {
-      let corners: number[][] | null = type === 'rectangle' ? cornersOf(box) : type === 'oriented_rectangle' ? s.points : null
-      if (type === 'polygon' && isRectangle(s.points)) corners = s.points
-      if (!corners) {
-        // Every square around a circle is as small as any other: the upright one
-        const hull = type === 'circle' ? cornersOf(box) : convexHull(mask ? maskCorners(mask) : (s.points as Point[]))
-        if (!hull) return say('warning', 'yolo-no-area', `${s.label} has no area, so it's left out`, i)
-        corners = type === 'circle' ? hull : minAreaRect(hull)
-        say('warning', 'yolo-obb-fitted', `${s.label} is a ${type}, so the smallest rotated box around it is written`, i)
-      }
-      outlines = [corners]
-    } else if (mask) {
-      const { outer, holes } = maskOutlines(mask)
-      if (holes) say('warning', 'yolo-mask-holes', `${s.label}'s mask has ${holes === 1 ? 'a hole' : `${holes} holes`}, which a YOLO outline can't hold, so ${holes === 1 ? "it's" : "they're"} filled`, i)
-      if (outer.length > 1) say('info', 'yolo-mask-parts', `${s.label}'s mask is in ${outer.length} separate parts, so it's written as ${outer.length} objects`, i)
-      outlines = outer
-    } else if (type === 'circle') {
-      outlines = [circlePolygon(s.points[0], s.points[1])!]
-    } else outlines = [type === 'rectangle' ? cornersOf(box) : s.points]
-    for (const ring of outlines) {
-      const points = distinct(ring.map(w.point))
-      if (points.length < 3) {
-        say('warning', 'yolo-few-points', `${s.label} has fewer than 3 points apart, so it's left out`, i)
-        continue
-      }
-      w.add(`${cls} ${points.map((p) => p.join(' ')).join(' ')}`, s.label, i)
-    }
+    return { index: i, shape: s, mask, box }
+  }
+  // Objects in the order of their first shapes, each shape of an object read in turn
+  const objects = new Map<string | number, number[]>()
+  image.shapes.forEach((s, i) => {
+    const key = s.group_id === null ? i : `${s.label}\u0000${s.group_id}`
+    objects.set(key, [...(objects.get(key) ?? []), i])
   })
+  for (const members of objects.values()) {
+    const parts = members.map(partOf).filter((p): p is Part => p !== null)
+    if (!parts.length) continue
+    const first = parts[0], { label, group_id: group } = first.shape, cls = classes.indexOf(label), at = first.index
+    const shapes = `${label} is ${parts.length} shapes of group ${group}, one object,`
+    if (task === 'detect') {
+      if (parts.length > 1) say('info', 'yolo-joined', `${shapes} so it's one box around them all`, at)
+      const box = parts.map((p) => p.box).reduce((a, b): Box => [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])])
+      w.add(`${cls} ${w.box(box)}`, label, at)
+      continue
+    }
+    if (task === 'obb') {
+      const s = first.shape, type = s.shape_type
+      let corners: number[][] | null = null
+      if (parts.length === 1) {
+        corners = type === 'rectangle' ? cornersOf(first.box) : type === 'oriented_rectangle' ? s.points : null
+        if (type === 'polygon' && isRectangle(s.points)) corners = s.points
+      }
+      if (!corners) {
+        // Every square around a circle is as small as any other: the upright one. With other
+        // shapes, a circle counts as its polygon.
+        const around = parts.flatMap((p): Point[] => p.mask ? maskCorners(p.mask) : p.shape.shape_type === 'circle'
+          ? circlePolygon(p.shape.points[0], p.shape.points[1]) as Point[] : p.shape.shape_type === 'rectangle' ? cornersOf(p.box) : p.shape.points as Point[])
+        const hull = parts.length === 1 && type === 'circle' ? cornersOf(first.box) : convexHull(around)
+        if (!hull) {
+          say('warning', 'yolo-no-area', `${label} has no area, so it's left out`, at)
+          continue
+        }
+        corners = parts.length === 1 && type === 'circle' ? hull : minAreaRect(hull)
+        say('warning', 'yolo-obb-fitted', parts.length > 1 ? `${shapes} so the smallest rotated box around them all is written` : `${label} is a ${type}, so the smallest rotated box around it is written`, at)
+      }
+      const points = distinct(corners.map(w.point))
+      if (points.length < 3) say('warning', 'yolo-few-points', `${label} has fewer than 3 points apart, so it's left out`, at)
+      else w.add(`${cls} ${points.map((p) => p.join(' ')).join(' ')}`, label, at)
+      continue
+    }
+    // Segment: every part's outlines, a mask's one for each separate part of it
+    const rings: { ring: number[][]; index: number }[] = []
+    for (const p of parts) {
+      const s = p.shape
+      if (p.mask) {
+        const { outer, holes } = maskOutlines(p.mask)
+        if (holes) say('warning', 'yolo-mask-holes', `${s.label}'s mask has ${holes === 1 ? 'a hole' : `${holes} holes`}, which a YOLO outline can't hold, so ${holes === 1 ? "it's" : "they're"} filled`, p.index)
+        for (const ring of outer) rings.push({ ring, index: p.index })
+      } else if (s.shape_type === 'circle') rings.push({ ring: circlePolygon(s.points[0], s.points[1])!, index: p.index })
+      else rings.push({ ring: s.shape_type === 'rectangle' ? cornersOf(p.box) : s.points, index: p.index })
+    }
+    const kept = rings.filter(({ ring, index }) => {
+      if (distinct(ring.map(w.point)).length >= 3) return true
+      say('warning', 'yolo-few-points', rings.length > 1
+        ? `${label} has a part with fewer than 3 points apart, so that part is left out`
+        : `${label} has fewer than 3 points apart, so it's left out`, index)
+      return false
+    })
+    if (!kept.length) continue
+    if (kept.length > 1) {
+      say('info', 'yolo-joined', parts.length > 1
+        ? `${shapes} so its ${kept.length} separate parts are joined into one outline, as Ultralytics' convert_coco joins an object's parts`
+        : `${label}'s mask is in ${kept.length} separate parts, one object, so they're joined into one outline, as Ultralytics' convert_coco joins an object's parts`, at)
+    }
+    // Parts are joined where they lie in the image, as COCO's export keeps them
+    const inside = kept.map(({ ring }) => ring.map(([x, y]) => [Math.min(Math.max(x, 0), W), Math.min(Math.max(y, 0), H)]))
+    const points = distinct(joinOutlines(inside).map(w.point))
+    w.add(`${cls} ${points.map((p) => p.join(' ')).join(' ')}`, label, at)
+  }
   return w.done()
 }
 
