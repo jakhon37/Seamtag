@@ -108,3 +108,43 @@ jobs:
           dir=${{ runner.temp }}/e2e
           uv run --no-project --python 3.12 --with 'labelImg==1.8.6' python tests/parity/labelimg_reads.py $dir/labelimg $dir/labelimg-expected.json
           uv run --no-project --python 3.12 --with 'labelImg @ git+https://github.com/HumanSignal/labelImg@b33f965' python tests/parity/labelimg_reads.py $dir/labelimg $dir/labelimg-expected.json
+
+  coco-reads:
+    # COCO files this app writes must load, decode, measure and score in pycocotools
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: npm ci
+      - name: Write a COCO sample
+        run: npx vitest run tests/unit/coco.test.ts
+        env:
+          COCO_PARITY_DIR: ${{ runner.temp }}/coco
+      - name: Read it with pycocotools 2.0.11
+        run: uv run --no-project --python 3.12 --with pycocotools==2.0.11 --with numpy==2.5.4 python -I tests/parity/coco_reads.py ${{ runner.temp }}/coco
+
+  ultralytics-reads:
+    # YOLO datasets this app writes must pass Ultralytics 8.4.211's own label checks, without torch
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: npm ci
+      - name: Write a dataset of each task
+        run: npx vitest run tests/unit/ultralytics.test.ts
+        env:
+          YOLO_PARITY_DIR: ${{ runner.temp }}/yolo
+      - name: Read them with Ultralytics' own code
+        run: |
+          dir=${{ runner.temp }}/yolo
+          uv run --no-project --python 3.12 --with numpy==2.3.4 --with pyyaml==6.0.3 --with pillow==12.0.0 python -I tests/parity/ultralytics_reads.py $dir/detect $dir/segment $dir/pose $dir/obb
