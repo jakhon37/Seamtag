@@ -284,7 +284,7 @@ describe('checking again', () => {
     write(root, { 'b.json': labelme('b.png', [shape('cat', 'polygon', [[1, 1], [20, 1], [20, 20]])]) })
     rmSync(path.join(root, 'gone.json'))
     phases.length = 0
-    await checkFolder(root, { prefer: 'labelme', labels: LABELS, quick: true }, send)
+    await checkFolder(root, { prefer: 'labelme', labels: LABELS, saved: ['b.png'] }, send)
     expect([...new Set(phases)]).toEqual(['read', 'check'])
     expect(page()).not.toContainEqual(['repeated-points', 1])
     expect(page()).toContainEqual(['orphan-label-file', 1])
@@ -294,8 +294,37 @@ describe('checking again', () => {
     await png(path.join(root, 'j.png'))
     await openProject(root, null)
     phases.length = 0
-    await checkFolder(root, { prefer: 'labelme', labels: LABELS, quick: true }, send)
+    await checkFolder(root, { prefer: 'labelme', labels: LABELS, saved: [] }, send)
     expect([...new Set(phases)]).toEqual(['read', 'compare', 'orphans', 'check'])
+  })
+
+  test("after saves only the images saved are read again: a file changed outside the window waits for a full check", async () => {
+    const root = await planted()
+    await checkFolder(root, { prefer: 'labelme', labels: LABELS }, () => {})
+    const codes = () => problemPage(root, ALL)!.groups.map((g) => g.code)
+    const before = await readDataset(root, { prefer: 'labelme' })
+    // The window saved b without its repeated point; c's box was moved inside the image by another program
+    write(root, {
+      'b.json': labelme('b.png', [shape('cat', 'polygon', [[1, 1], [20, 1], [20, 20]])]),
+      'c.json': labelme('c.png', [box('dog', 30, 20, 40, 30)])
+    })
+    const summary = await checkFolder(root, { prefer: 'labelme', labels: LABELS, saved: ['b.png'] }, () => {})
+    expect(summary).toHaveProperty('counts')
+    expect(codes()).not.toContain('repeated-points')
+    expect(codes()).toContain('outside-image')
+    // Read as another format, any image could have other files: the whole folder is read
+    await checkFolder(root, { prefer: 'voc', labels: LABELS, saved: ['b.png'] }, () => {})
+    expect(codes()).not.toContain('outside-image')
+    await checkFolder(root, { prefer: 'labelme', labels: LABELS }, () => {})
+    expect(codes()).not.toContain('outside-image')
+    // readDataset's own: the images not named are the objects read before, their files not looked at
+    write(root, { 'a.json': labelme('a.png', []), 'd.json': labelme('d.png', []) })
+    const after = await readDataset(root, { prefer: 'labelme', only: new Set(['d.png']) })
+    const named = (images: typeof before, name: string) => images.find((i) => i.name === name)!
+    expect(named(after, 'd.png').shapes).toEqual([])
+    expect(named(after, 'a.png').shapes).toHaveLength(2)
+    expect(named(after, 'e.png')).toBe(named(before, 'e.png'))
+    expect(named(await readDataset(root, { prefer: 'labelme' }), 'a.png').shapes).toEqual([])
   })
 
   test('a stop ends the check, and the last result stays', async () => {
@@ -333,7 +362,7 @@ describe('renaming a label across the folder', () => {
     expect(read(root, 'd.json')).toContain('"Cat"')
     trashed = []
     const done = await renameRun(root, 'Cat', 'cat', 'labelme', null, () => {})
-    expect(done).toEqual({ stopped: false, shapes: 2, changed: ['d.png', 'v.png'], skipped: 1, failed: [] })
+    expect(done).toEqual({ stopped: false, shapes: 2, changed: ['d.png', 'v.png'], skipped: 1, failed: [], left: 0 })
     expect(JSON.parse(read(root, 'd.json')).shapes[0].label).toBe('cat')
     // VOC is changed where its objects are: the pose and the exact numbers stay
     expect(read(root, 'v.xml')).toContain('<name>cat</name><pose>Left</pose>')
@@ -357,12 +386,36 @@ describe('renaming a label across the folder', () => {
       expect(done.changed).toEqual(['h.png'])
       expect(done.failed).toEqual([{ name: 'd.png', reason: "d.json couldn't go to the trash, so it's left unchanged: The trash is full" }])
       expect(read(root, 'd.json')).toContain('"Cat"')
+      // d has the old name still, so the window keeps it in the label list
+      expect(done.left).toBe(1)
     } finally {
       setTrash(async (file) => {
         renameSync(file, path.join(bin, `${trashed.length}-${path.basename(file)}`))
         trashed.push(file)
       })
     }
+  })
+})
+
+describe('renaming: the new name and what keeps the old one', () => {
+  test('the new name is trimmed, as the label dialog trims a label, before the label list is asked', async () => {
+    const root = await planted()
+    const done = await renameRun(root, 'zebra', ' dog ', 'labelme', ['cat', 'dog'], () => {})
+    expect(done).toMatchObject({ changed: ['e.png'], shapes: 1, left: 0 })
+    expect(JSON.parse(read(root, 'e.json')).shapes[0].label).toBe('dog')
+    await renameRun(root, 'Cat', 'cat\t', 'labelme', null, () => {})
+    expect(JSON.parse(read(root, 'd.json')).shapes[0].label).toBe('cat')
+  })
+
+  test('images that share a label file keep the old name, and say so', async () => {
+    const root = await planted()
+    await png(path.join(root, 'k.png'))
+    await png(path.join(root, 'k.jpg'))
+    write(root, { 'k.json': labelme('k.png', [box('Cat', 1, 1, 5, 5)]) })
+    await openProject(root, null)
+    const done = await renameRun(root, 'Cat', 'cat', 'labelme', null, () => {})
+    expect(done).toMatchObject({ changed: ['d.png'], failed: [], left: 2 })
+    expect(read(root, 'k.json')).toContain('"Cat"')
   })
 })
 

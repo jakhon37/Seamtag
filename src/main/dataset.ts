@@ -48,6 +48,11 @@ export type ReadOptions = {
   onProgress?: (done: number, total: number) => void
   /** Stops the read, which then rejects with the signal's reason. What was read stays cached. */
   signal?: AbortSignal
+  /**
+   * Only these images are read again, as after the window saved their labels: the folder's
+   * others are as the last read found them, their files not looked at. Images never read are read.
+   */
+  only?: ReadonlySet<string>
 }
 
 type Cached = { key: string; image: DatasetImage }
@@ -84,7 +89,7 @@ type Run = {
  * summaries are, and in the folder's list order. A CreateML list, or the one -O labels.json
  * every image shares, is read once a run, not once an image.
  */
-export async function readDataset(root: string, { prefer = 'labelme', onProgress, signal }: ReadOptions = {}): Promise<DatasetImage[]> {
+export async function readDataset(root: string, { prefer = 'labelme', onProgress, signal, only }: ReadOptions = {}): Promise<DatasetImage[]> {
   const folder = folderOf(root)
   const names = folder.images
   const old = caches.get(root)
@@ -98,7 +103,8 @@ export async function readDataset(root: string, { prefer = 'labelme', onProgress
     while (next < names.length && !signal?.aborted) {
       const at = next++
       const name = names[at]
-      const read = await readImage(run, name, old?.images.get(name))
+      const cached = old?.images.get(name)
+      const read = only && cached && !only.has(name) ? cached : await readImage(run, name, cached)
       fresh.set(name, read)
       out[at] = read.image
       done++
@@ -108,7 +114,8 @@ export async function readDataset(root: string, { prefer = 'labelme', onProgress
       }
     }
   }))
-  const lists: Lists = new Map([...run.lists].filter(([file]) => run.used.has(file)))
+  // A read of a few images keeps every list: the images it didn't look at still read theirs
+  const lists: Lists = only ? run.lists : new Map([...run.lists].filter(([file]) => run.used.has(file)))
   if (signal?.aborted) {
     caches.set(root, { images: new Map([...(old?.images ?? []), ...fresh]), lists: run.lists })
     signal.throwIfAborted()

@@ -31,10 +31,11 @@ export type CheckRequest = {
   /** The label list: the config's labels, then the project's classes; null when there's none */
   labels: string[] | null
   /**
-   * After saves in the window, which write label files and never images: identical images and
-   * label files without images are taken from the last check unless the images changed
+   * After saves in the window, which write label files and never images: the images saved since
+   * the last check. Only their labels are read again; the rest of the folder, identical images
+   * and label files without images are as the last check found them, unless the images changed.
    */
-  quick?: boolean
+  saved?: string[]
 }
 export type CheckSummary = {
   /** When the check finished, in ms since 1970 */
@@ -84,6 +85,8 @@ export type RenameDone = {
   /** Label files left alone: unreadable, or shared by several images */
   skipped: number
   failed: { name: string; reason: string }[]
+  /** Images whose labels have the old name still: their file is shared, failed, or wasn't reached before a stop */
+  left: number
 }
 
 export type StatsRequest = {
@@ -146,6 +149,8 @@ type Own = { image: DatasetImage; issues: Issue[] }
 export type Found = { issues: Issue[]; own: Map<string, Own>; across: Issue[]; context: string; verifying: boolean }
 type Checked = {
   at: number
+  /** The save format it was read as */
+  prefer: LabelFormat
   images: DatasetImage[]
   byName: Map<string, DatasetImage>
   found: Found
@@ -272,15 +277,20 @@ function summaryOf(c: Checked): CheckSummary {
 /**
  * Dataset > Check labels: the folder read as the window's save format reads it, then
  * images that share a label file, identical image files, label files without their image,
- * and checkDataset's checks with the label list. Kept as the folder's last check.
+ * and checkDataset's checks with the label list. Kept as the folder's last check. After saves
+ * only the images saved are read again, so a folder of 100,000 isn't read once a save.
  */
-export async function checkFolder(root: string, { prefer, labels, quick = false }: CheckRequest, send: (p: Progress) => void): Promise<CheckSummary | Stopped> {
+export async function checkFolder(root: string, { prefer, labels, saved }: CheckRequest, send: (p: Progress) => void): Promise<CheckSummary | Stopped> {
   const signal = begin(root, 'check')
   const report = reporter(send)
   try {
     const before = checks.get(root)
-    const images = await readDataset(root, { prefer, signal, onProgress: (done, total) => report({ phase: 'read', done, total }) })
-    const same = quick && !!before && sameImages(before.images, images)
+    // Read as another format, the other images could have other files: those are read again too
+    const quick = !!saved && before?.prefer === prefer
+    const images = await readDataset(root, {
+      prefer, signal, only: quick ? new Set(saved) : undefined, onProgress: (done, total) => report({ phase: 'read', done, total })
+    })
+    const same = quick && sameImages(before!.images, images)
     let duplicates = same ? before!.duplicates : null
     if (!duplicates) {
       report({ phase: 'compare', done: 0, total: images.length }, true)
@@ -295,7 +305,9 @@ export async function checkFolder(root: string, { prefer, labels, quick = false 
     const found = await issuesOf(images, { labels, clashes: labelFileClashes(images), duplicates, orphans }, before?.found,
       (done, total) => report({ phase: 'check', done, total }), signal)
     const { issues } = found
-    const result: Checked = { at: Date.now(), images, byName: new Map(images.map((i) => [i.name, i])), found, duplicates, orphans, issues, files: strayFiles(issues, orphans) }
+    const result: Checked = {
+      at: Date.now(), prefer, images, byName: new Map(images.map((i) => [i.name, i])), found, duplicates, orphans, issues, files: strayFiles(issues, orphans)
+    }
     checks.set(root, result)
     return summaryOf(result)
   } catch (e) {
@@ -414,32 +426,37 @@ export async function renamePlan(root: string, from: string, prefer: LabelFormat
  * Renames a label in every label file of the folder that has it, each in its own format
  * through rewriteLabels, with the old file in the trash. The rename is made to what each file
  * holds as it's written, so nothing saved since the read is undone. `allowed` is the label
- * list when the config allows only its labels (validate_label: exact).
+ * list when the config allows only its labels (validate_label: exact). The new name is
+ * trimmed, as the window's label dialog trims a label.
  */
 export async function renameRun(root: string, from: string, to: string, prefer: LabelFormat, allowed: string[] | null,
   send: (p: Progress) => void): Promise<RenameDone> {
-  if (!to.trim()) throw new Error('A label needs a name, so nothing is renamed')
-  if (allowed && !allowed.includes(to)) throw new Error(`“${to}” isn't in the label list, and only listed labels are allowed.`)
+  const name = to.trim()
+  if (!name) throw new Error('A label needs a name, so nothing is renamed')
+  if (allowed && !allowed.includes(name)) throw new Error(`“${name}” isn't in the label list, and only listed labels are allowed.`)
   const signal = begin(root, 'rename')
   const report = reporter(send)
-  const done: RenameDone = { stopped: false, shapes: 0, changed: [], skipped: 0, failed: [] }
+  const done: RenameDone = { stopped: false, shapes: 0, changed: [], skipped: 0, failed: [], left: 0 }
   try {
     const images = await readDataset(root, { prefer, signal, onProgress: (n, total) => report({ phase: 'read', done: n, total }) })
-    const plan = renameLabel(images, from, to, labelFileClashes(images))
+    const plan = renameLabel(images, from, name, labelFileClashes(images))
     done.skipped = plan.skipped.length
     const byName = new Map(images.map((i) => [i.name, i]))
-    for (const [k, { name, renamed }] of plan.images.entries()) {
+    for (const [k, image] of plan.images.entries()) {
       if (signal.aborted) break
       try {
-        await rewriteLabels(root, name, renaming(from, to), null, byName.get(name)!)
-        done.changed.push(name)
-        done.shapes += renamed
+        await rewriteLabels(root, image.name, renaming(from, name), null, byName.get(image.name)!)
+        done.changed.push(image.name)
+        done.shapes += image.renamed
       } catch (e) {
-        done.failed.push({ name, reason: reason(e) })
+        done.failed.push({ name: image.name, reason: reason(e) })
       }
       report({ phase: 'write', done: k + 1, total: plan.images.length })
     }
     done.stopped = signal.aborted
+    // A file that can't be read is left alone too, but what it holds isn't known
+    const shared = plan.skipped.filter((s) => !byName.get(s.name)?.broken).length
+    done.left = shared + plan.images.length - done.changed.length
     return done
   } catch (e) {
     if (signal.aborted) return { ...done, stopped: true }

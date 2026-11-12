@@ -2078,7 +2078,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     setChecking({ quick, progress: null })
     let done = false
     try {
-      const result = await window.api.checkRun(root, { prefer: formatRef.current, labels: listedLabels, quick })
+      const result = await window.api.checkRun(root, { prefer: formatRef.current, labels: listedLabels, ...(quick ? { saved: looked } : {}) })
       if (seq !== checkSeq.current || !alive.current) return
       if ('stopped' in result) {
         if (!quick) setNotice(checkRef.current ? 'Check stopped: the problems shown are from the check before.' : 'Check stopped.')
