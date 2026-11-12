@@ -2557,6 +2557,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       if (target.closest?.('.menubar, .menu')) return
       if (target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || (target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'range' && (target as HTMLInputElement).type !== 'checkbox')) return
+      // Tab moves the focus through the docks' controls: only from the canvas, or with nothing focused, does it skip an AI shape
+      if (e.key === 'Tab' && target !== document.body && target !== canvasRef.current) return
       if (e.code === 'Space') {
         e.preventDefault()
         if (e.type === 'keydown') {
