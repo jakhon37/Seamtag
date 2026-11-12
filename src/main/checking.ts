@@ -3,6 +3,7 @@
 // for what it shows (a page of each group of problems, the statistics' tables), so a folder of
 // 100,000 images with 50,000 problems never crosses to it whole, and long passes give the
 // window's own requests a turn between slices.
+import { constants, promises as fs } from 'fs'
 import path from 'path'
 import {
   CHECKS, type CheckCode, checkDataset, type CheckOptions, type Clash, fixIssue, FIXES, type OrphanFile, renameLabel, type RenamePlan, renaming, tallyLabels
@@ -15,7 +16,7 @@ import { findDuplicateImages, labelFileClashes, orphanLabels, readDataset, rewri
 import { imageSize } from './images'
 import { decodeMask } from './masks'
 import { nameKey } from './names'
-import { folderOf } from './project'
+import { folderOf, writeAtomic } from './project'
 
 /** A pass the window can stop; one of each kind runs on a folder at a time */
 export type Job = 'check' | 'stats' | 'rename'
@@ -622,5 +623,26 @@ export function statsText(root: string): string | null {
   return c ? statsCsv(c.stats) : null
 }
 
-/** Where Save as CSV suggests: beside the folder, as the keypoints file is, and named after it, so it's never taken for a label file */
-export const statsFileName = (root: string) => path.join(path.dirname(root), `${path.basename(root)}-statistics.csv`)
+/**
+ * Where Save as CSV suggests: beside the folder, as the keypoints file is, and named after it,
+ * so it's never taken for a label file; in the folder itself when the one it's in can't be
+ * written to, as when it's the top of a removable drive, which the system mounts in a folder of
+ * its own (/media/<user>, /Volumes).
+ */
+export async function statsFileName(root: string) {
+  const parent = path.dirname(root)
+  const beside = await fs.access(parent, constants.W_OK).then(() => true, () => false)
+  return path.join(beside ? parent : root, `${path.basename(root)}-statistics.csv`)
+}
+
+/**
+ * Writes Save as CSV's file. The text goes to a file beside it first (writeAtomic), so a
+ * failure is told with the name of the file that was chosen, not that one's.
+ */
+export async function saveStats(file: string, text: string) {
+  try {
+    await writeAtomic(file, text)
+  } catch (e) {
+    throw new Error(`${path.basename(file)} can't be written in ${path.dirname(file)} (${(e as NodeJS.ErrnoException).code ?? reason(e)})`)
+  }
+}

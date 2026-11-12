@@ -1,11 +1,11 @@
-import { copyFileSync, mkdirSync, mkdtempSync, promises as fsp, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { copyFileSync, mkdirSync, mkdtempSync, promises as fsp, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
 import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
   checkFolder, type CheckSummary, fixShapes, folderStats, forgetChecks, issuesOf, problemPage, type ProblemQuery, type Progress, renamePlan, renameRun,
-  statsFileName, statsText, stopJob, strayFile, together
+  saveStats, statsFileName, statsText, stopJob, strayFile, together
 } from '../../src/main/checking'
 import { forgetDataset, readDataset } from '../../src/main/dataset'
 import { Stale } from '../../src/renderer/src/stale'
@@ -546,8 +546,43 @@ describe('statistics', () => {
     expect(again.labels[0]).toEqual({ label: 'cat', objects: 3, images: 2, types: { rectangle: 2, polygon: 1 } })
   })
 
-  test('Save as CSV suggests a file beside the folder, named after it', () => {
-    expect(statsFileName(path.join(tmpdir(), 'birds'))).toBe(path.join(tmpdir(), 'birds-statistics.csv'))
+  test("Save as CSV suggests a file beside the folder, named after it, or in it when the folder it's in can't be written to", async () => {
+    const parent = folder()
+    const root = path.join(parent, 'birds')
+    mkdirSync(root)
+    expect(await statsFileName(root)).toBe(path.join(parent, 'birds-statistics.csv'))
+    // As at the top of a removable drive, whose parent (/media/<user>, /Volumes) is the system's
+    const access = fsp.access.bind(fsp)
+    vi.spyOn(fsp, 'access').mockImplementation(async (file, mode) => {
+      if (file === parent) throw Object.assign(new Error(`EACCES: permission denied, access '${parent}'`), { code: 'EACCES' })
+      return access(file, mode)
+    })
+    try {
+      expect(await statsFileName(root)).toBe(path.join(root, 'birds-statistics.csv'))
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  test("a CSV that can't be saved is told by the name it was given, not the file its text goes to first, and is left as it was", async () => {
+    const dir = folder()
+    const file = path.join(dir, 'birds-statistics.csv')
+    writeFileSync(file, 'old')
+    // As in a folder the user can't write to: Node's message names the file beside the one chosen
+    const write = fsp.writeFile.bind(fsp)
+    vi.spyOn(fsp, 'writeFile').mockImplementation(async (to, data, options) => {
+      if (String(to).endsWith('.tmp')) throw Object.assign(new Error(`EACCES: permission denied, open '${String(to)}'`), { code: 'EACCES' })
+      return write(to, data, options)
+    })
+    try {
+      await expect(saveStats(file, 'label,objects\r\n')).rejects.toThrow(new Error(`birds-statistics.csv can't be written in ${dir} (EACCES)`))
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(readdirSync(dir)).toEqual(['birds-statistics.csv'])
+    expect(readFileSync(file, 'utf8')).toBe('old')
+    await saveStats(file, 'label,objects\r\n')
+    expect(readFileSync(file, 'utf8')).toBe('label,objects\r\n')
   })
 
   test("slices' statistics put together are the whole folder's", () => {

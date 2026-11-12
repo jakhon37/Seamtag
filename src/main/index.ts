@@ -4,7 +4,7 @@ import path from 'path'
 import { pathToFileURL } from 'url'
 import { cancelDownload, download, listModels, release, removeModel } from './ai'
 import {
-  checkFolder, fixShapes, folderStats, forgetChecks, problemPage, renamePlan, renameRun, statsFileName, statsText, stopJob, strayFile
+  checkFolder, fixShapes, folderStats, forgetChecks, problemPage, renamePlan, renameRun, saveStats, statsFileName, statsText, stopJob, strayFile
 } from './checking'
 import { forgetDataset } from './dataset'
 import {
@@ -19,7 +19,7 @@ import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImp
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
 import {
   closeProject, hasLabelsIn, imagePath, labelsFile, loadLabels, openProject, type ProjectInfo, readLabelFile, rootsOpen, saveLabels,
-  saveProjectFile, type SaveRequest, serial, setTrash, summarizeAll, trashImage, trashLabels, writeAtomic
+  saveProjectFile, type SaveRequest, serial, setTrash, summarizeAll, trashImage, trashLabels
 } from './project'
 
 const NAME = 'Seamtag'
@@ -239,11 +239,11 @@ function registerIpc() {
     if (text === null) throw new Error('Count the folder first')
     // GTK's save dialog asks before replacing a file only when told to; the others always ask
     const r = await dialog.showSaveDialog(win!, {
-      title: 'Save statistics as CSV', defaultPath: statsFileName(root), filters: [{ name: 'CSV files', extensions: ['csv'] }],
+      title: 'Save statistics as CSV', defaultPath: await statsFileName(root), filters: [{ name: 'CSV files', extensions: ['csv'] }],
       properties: ['showOverwriteConfirmation']
     })
     if (r.canceled || !r.filePath) return null
-    await writeAtomic(r.filePath, text)
+    await saveStats(r.filePath, text)
     return r.filePath
   })
 
