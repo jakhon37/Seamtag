@@ -223,6 +223,30 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await menu(page, 'File', 'Import dataset…')
   await dialog.getByRole('button', { name: 'YOLO dataset folder…' }).click()
   await expect(dialog).toContainText('These rows fit OBB and Segment: click the one they were made for.')
+  // Each group of choices is one Tab stop, at the choice made, the first while none is, and the arrow keys move the choice round it
+  const policy = dialog.getByRole('radiogroup', { name: 'Images that have labels' })
+  const [skip, add, replace] = ['Skip them', 'Add shapes', 'Replace'].map((name) => policy.getByRole('radio', { name }))
+  const [detect, segment] = ['Detect', 'Segment'].map((name) => tasks.getByRole('radio', { name, exact: true }))
+  await page.keyboard.press('Tab')
+  await expect(detect).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(skip).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect(add).toBeFocused()
+  await expect(add).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('ArrowLeft')
+  await page.keyboard.press('ArrowLeft')
+  await expect(replace).toBeFocused()
+  await expect(replace).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('ArrowRight')
+  await expect(skip).toHaveAttribute('aria-checked', 'true')
+  // A task chosen with them is read again, and has the focus back once it's read, so the arrow keys go on from it
+  await page.keyboard.press('Shift+Tab')
+  await expect(detect).toBeFocused()
+  await page.keyboard.press('ArrowRight')
+  await expect(segment).toHaveAttribute('aria-checked', 'true')
+  await expect(segment).toBeFocused()
+  await expect(dialog).not.toContainText('These rows fit')
   await dialog.getByRole('radio', { name: 'OBB (guess)' }).click()
   await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'true')
   await expect(dialog).not.toContainText('These rows fit')
@@ -308,12 +332,13 @@ test('the Import window holds the focus: Tab goes round its controls, Escape clo
     await page.keyboard.press('Tab')
     expect(await holds()).toBe(true)
   }
-  // Ctrl+W behind it waits, and Escape closes it
+  // Ctrl+W behind it waits, and Escape closes it; the focus goes to the image, as the menu item that opened it has gone
   await page.keyboard.press('ControlOrMeta+w')
   await page.waitForTimeout(300)
   await expect(dialog).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
+  await expect(page.getByTestId('canvas')).toBeFocused()
   await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
 
   // A file dropped on the window while it shows what it read opens nothing: the import goes into this folder
@@ -427,6 +452,26 @@ test("the Import window's words: counts that agree, its Problems, severities and
   await page.screenshot({ path: `${SHOTS}/import-words-light-1500.png` })
   await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
   await page.keyboard.press('Escape')
+
+  // Forty of its images aren't here: in the smallest window their group opens to its messages in the window's own scroll
+  const away = path.join(src, 'words-away.json')
+  writeFileSync(away, JSON.stringify({ images: [image(1, 'a.png'), ...Array.from({ length: 40 }, (_, k) => image(k + 2, `away-${k}.png`))], categories, annotations: [polygon(1, 1, 1)] }))
+  await size(app, page, 960, 600)
+  await read(away, 'COCO file…')
+  const missing = dialog.locator('.import-group[data-code="coco-image-missing"]')
+  await missing.getByRole('button', { name: /Images not in this folder/ }).click()
+  await expect(missing.locator('.import-rows li')).toHaveCount(21)
+  const scrolls = (selector: string) => dialog.locator(selector).evaluate((el) => el.scrollHeight > el.clientHeight + 1)
+  expect(await scrolls('.import-rows')).toBe(false)
+  expect(await scrolls('.import-body')).toBe(true)
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+    await dialog.locator('.import-body').evaluate((el) => { el.scrollTop = el.scrollHeight })
+    await page.screenshot({ path: `${SHOTS}/import-rows-${theme}-960.png` })
+  }
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+  await page.keyboard.press('Escape')
+  await size(app, page, 1500, 940)
 
   // A keypoint data.yaml doesn't name, and the keypoints file that names it
   await read(pose, 'YOLO dataset folder…')

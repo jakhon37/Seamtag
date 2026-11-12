@@ -28,6 +28,8 @@ test('About, Keyboard shortcuts, AI models and Brightness and contrast hold the 
     await page.keyboard.press('Escape')
     await expect(dialog).toHaveCount(0)
     expect(await page.evaluate(() => document.querySelectorAll('[inert]').length)).toBe(0)
+    // The menu item that opened it has gone with the menu: the image has the focus, where the keys go
+    await expect(page.getByTestId('canvas')).toBeFocused()
   }
   // The folder is as it was
   await expect(page.locator('.files .file .name')).toHaveText(['a.png'])

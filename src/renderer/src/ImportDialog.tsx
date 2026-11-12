@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { YoloTask } from '../../shared/ultralytics'
 import { useModal } from './Modal'
 import { showMore } from './Problems'
+import Radios from './Radios'
 import {
   type ImportPolicy, type ImportPreview, type ImportProgress, type ImportReport, type ImportRequest, type IssueGroup, type LabelFormat, plainError
 } from './types'
@@ -27,9 +28,7 @@ const TASKS: { task: YoloTask; label: string; title: string }[] = [
   { task: 'pose', label: 'Pose', title: 'A box and keypoints a row' },
   { task: 'obb', label: 'OBB', title: 'Rotated boxes: a class and 4 corners' }
 ]
-const POLICIES: { policy: ImportPolicy; label: string }[] = [
-  { policy: 'skip', label: 'Skip them' }, { policy: 'add', label: 'Add shapes' }, { policy: 'replace', label: 'Replace' }
-]
+const POLICIES: { id: ImportPolicy; name: string }[] = [{ id: 'skip', name: 'Skip them' }, { id: 'add', name: 'Add shapes' }, { id: 'replace', name: 'Replace' }]
 
 const count = (n: number) => n.toLocaleString('en-GB')
 const some = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`
@@ -134,6 +133,8 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
   const [had, setHad] = useState<ReadonlySet<string>>(() => new Set(known))
   const busy = stage === 'busy'
   const box = useRef<HTMLDivElement>(null)
+  // A task chosen is read again: its button has the focus back once it's read, so the arrow keys go on from it
+  const toTask = useRef(false)
 
   useEffect(() => window.api.onImportProgress(setProgress), [])
   // What was read is let go of with the window
@@ -174,8 +175,15 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
   }
   const chooseTask = (task: YoloTask) => {
     setConfirmed(true)
-    if (request && task !== preview?.task?.task) read({ ...request, task })
+    if (!request || task === preview?.task?.task) return
+    toTask.current = true
+    read({ ...request, task })
   }
+  useEffect(() => {
+    if (stage === 'busy') return
+    if (stage === 'preview' && toTask.current) box.current?.querySelector<HTMLElement>('[aria-label="Task"] [aria-checked="true"]')?.focus()
+    toTask.current = false
+  }, [stage])
   const pickKeypoints = async () => {
     const file = await window.api.pickFile('Choose a keypoints file', [{ name: 'Keypoints files', extensions: ['yaml', 'yml'] }])
     if (file && request) read({ ...request, task: 'pose', keypoints: file })
@@ -251,18 +259,12 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
             {p.task && (
               <section className="import-section">
                 <h4>Task</h4>
-                <div className={`import-seg ${asking ? 'ask' : ''}`} role="radiogroup" aria-label="Task">
-                  {TASKS.map((t) => {
-                    // While the window asks, no task is chosen: the guess is only marked as one, and
-                    // the tasks the rows fit stand out from those they don't
-                    const on = !asking && p.task!.task === t.task
-                    return (
-                      <button key={t.task} role="radio" aria-checked={on} className={on ? 'on' : asking && fits.includes(t.task) ? 'fits' : ''} title={t.title} onClick={() => chooseTask(t.task)}>
-                        {t.label}{p.task!.guess === t.task ? ' (guess)' : ''}
-                      </button>
-                    )
-                  })}
-                </div>
+                <Radios label="Task" className={`import-seg ${asking ? 'ask' : ''}`} value={asking ? null : p.task.task} onChoose={chooseTask}
+                  choices={TASKS.map((t) => ({
+                    // While the window asks, no task is chosen: the guess is only marked as one, and the tasks the
+                    // rows fit stand out from those they don't
+                    id: t.task, name: `${t.label}${p.task!.guess === t.task ? ' (guess)' : ''}`, title: t.title, className: asking && fits.includes(t.task) ? 'fits' : undefined
+                  }))} />
                 <p className="muted">{p.task.reason}.</p>
                 {asking && (
                   <p className="warn ask">
@@ -307,11 +309,7 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
                 <h4>Images that have labels</h4>
                 {p.labelled > 0 && (
                   <>
-                    <div className="import-seg" role="radiogroup" aria-label="Images that have labels">
-                      {POLICIES.map((o) => (
-                        <button key={o.policy} role="radio" aria-checked={policy === o.policy} className={policy === o.policy ? 'on' : ''} onClick={() => setPolicy(o.policy)}>{o.label}</button>
-                      ))}
-                    </div>
+                    <Radios label="Images that have labels" className="import-seg" value={policy} choices={POLICIES} onChoose={setPolicy} />
                     <p>{labelledText(p, policy)}</p>
                     {policy !== 'skip' && converted > 0 && (
                       <p className="muted">{some(converted, 'of them has', 'of them have')} Pascal VOC, YOLO or CreateML labels: {converted === 1 ? 'it gets' : 'they get'} LabelMe JSON, which holds every shape type, with {converted === 1 ? 'its' : 'their'} boxes{policy === 'replace' ? ' replaced' : ' kept'}, and the old {converted === 1 ? 'file goes' : 'files go'} to the trash.</p>

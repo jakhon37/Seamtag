@@ -3,7 +3,8 @@ import { type ReactNode, type RefObject, useEffect, useLayoutEffect, useRef, use
 // Windows over the page behave as one. Focus goes into a window as it opens and stays there, Tab
 // and Shift+Tab going round its controls; the page behind it, a window under it too, is inert to
 // the keyboard, the mouse and screen readers; Escape does what the window says, wherever the focus
-// is; and the focus goes back where it was once the window closes. The last window opened is on top.
+// is; and the focus goes back where it was once the window closes, or to the image when that's
+// gone, as a menu's item is with its menu. The last window opened is on top.
 
 type Open = { box: HTMLElement; escape: () => void }
 const stack: Open[] = []
@@ -31,6 +32,8 @@ function stops(box: HTMLElement) {
     el.getClientRects().length > 0 && !(el instanceof HTMLInputElement && el.type === 'radio' && el.name && !el.checked))
 }
 const follows = (a: Node, b: Node) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+/** Where the keys go with nothing else to take them: the image, while a folder is open */
+const home = () => document.querySelector<HTMLElement>('.canvas-wrap > canvas')
 
 function onKey(e: KeyboardEvent) {
   const top = stack[stack.length - 1]
@@ -56,7 +59,7 @@ function onKey(e: KeyboardEvent) {
 /**
  * Makes `box` a modal window; it needs tabIndex={-1}, role="dialog", aria-modal="true" and a name.
  * `onEscape` runs on Escape, wherever the focus is: it closes the window, or while a job runs does
- * what the window's Close button does.
+ * what the window's own button does then, as Stop does in the Export and Import windows.
  */
 export function useModal(box: RefObject<HTMLElement>, onEscape: () => void) {
   // Where the focus was before the window, or a control of it, took it
@@ -75,12 +78,14 @@ export function useModal(box: RefObject<HTMLElement>, onEscape: () => void) {
       stack.splice(stack.indexOf(me), 1)
       if (!stack.length) window.removeEventListener('keydown', onKey, true)
       shield()
-      // The focus that was in the window goes back where it was, if that's still there
+      // The focus that was in the window goes back where it was, if that's still there; else to the
+      // window under it, or with none, to the image, so the next Tab goes on from there, not the top
       const now = document.activeElement
-      if (top && (!now || now === document.body || el.contains(now)) && opener instanceof HTMLElement && opener !== document.body && opener.isConnected) {
-        opener.focus({ preventScroll: true })
-      }
       const under = stack[stack.length - 1]?.box
+      if (top && (!now || now === document.body || el.contains(now))) {
+        const back = opener instanceof HTMLElement && opener !== document.body && opener.isConnected ? opener : under ? null : home()
+        back?.focus({ preventScroll: true })
+      }
       if (top && under && !under.contains(document.activeElement)) under.focus({ preventScroll: true })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

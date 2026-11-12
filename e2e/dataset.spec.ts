@@ -639,6 +639,8 @@ test('Statistics and a rename over it hold the focus: Tab goes round each, Escap
   await page.keyboard.press('Escape')
   await expect(stats).toHaveCount(0)
   expect(await page.evaluate(() => document.querySelectorAll('[inert]').length)).toBe(0)
+  // Opened from the menu, whose item has gone with it, it gives the focus to the image
+  await expect(page.getByTestId('canvas')).toBeFocused()
   expect(JSON.parse(readFileSync(path.join(dir, 'e.json'), 'utf8')).shapes[0].label).toBe('zebra')
 
   // Both, at the smallest window and a large one, dark and light: each opens holding the focus, and Escape closes it

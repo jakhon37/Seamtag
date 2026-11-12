@@ -4,6 +4,7 @@ import type { ExportFormat, ExportOptions, ExportProgress, ExportResult, IssueGr
 import type { Issue, Severity } from '../../shared/dataset'
 import { useModal } from './Modal'
 import { showMore } from './Problems'
+import Radios from './Radios'
 import { type LabelFormat, plainError } from './types'
 
 // File > Export dataset…: the folder's labels as a COCO or Ultralytics YOLO dataset. A check runs
@@ -65,6 +66,8 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const [kept, setKept] = useState<Kept>(readKept)
   const [out, setOut] = useState<{ path: string; problem: string | null } | null>(null)
   const [keypoints, setKeypoints] = useState<KeypointsSummary | null>(null)
+  // Whether the keypoints file chosen is one the window made, which may lack keypoints no image has
+  const [made, setMade] = useState(false)
   const [check, setCheck] = useState<Preflight | null>(null)
   const [checking, setChecking] = useState(false)
   // Checks again with the same read of the folder (a keypoints file chosen again), or with a new one (Check again, or after an export fails)
@@ -82,6 +85,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const session = useRef(`${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`)
   const box = useRef<HTMLDivElement>(null)
   const errorsBox = useRef<HTMLDivElement>(null)
+  const keypointsHint = useRef<HTMLParagraphElement>(null)
   const set = (change: Partial<Kept>) => setKept((k) => ({ ...k, ...change }))
 
   const coco = kept.format.startsWith('coco')
@@ -148,13 +152,18 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
       const picked = make ? await window.api.exportMakeKeypoints(root, prefer) : await window.api.exportKeypoints()
       if (!picked) return
       setKeypoints(picked)
+      setMade(make)
       setAgain((a) => a + 1)
       setError('')
-      setNote(make ? `${baseName(picked.file)} is made from the folder's posed objects: edit it to name keypoints that are missing, then choose it again.` : '')
     } catch (e) {
       setError(plainError(e))
     }
   }
+  // What's left to do with a file just made is said under the Keypoints file, brought into view: Make one…
+  // in an error is in the other column, and in a short window the Keypoints file is below the fold
+  useEffect(() => {
+    if (made) keypointsHint.current?.scrollIntoView({ block: 'nearest' })
+  }, [made, keypoints])
   // Errors an option of the window fixes get a button for it in their group, as the option itself is
   // often out of view in a short window. A label file or an image repaired or replaced meanwhile,
   // in another app, is read again only when the folder is: Check again reads it afresh.
@@ -193,8 +202,11 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
       setRunning(false)
     }
   }
+  // Escape does what the window's button does: Cancel or Close, or while the export runs Stop, as in the
+  // Import window. A click beside the window never stops an export
   const close = () => {
-    if (!running) onClose()
+    if (running) void window.api.exportStop()
+    else onClose()
   }
   useModal(box, close)
 
@@ -212,7 +224,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   // Stop would into Close when the export ends: the window takes the focus instead
 
   return (
-    <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
+    <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && !running && onClose()}>
       <div className={`dialog export-dialog ${done ? 'done' : ''}`} role="dialog" aria-modal="true" aria-label="Export dataset" tabIndex={-1} ref={box}
         onKeyDown={(e) => e.stopPropagation()}>
         <h3>Export dataset</h3>
@@ -237,11 +249,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
               {out?.problem && <p className="bad">{out.problem}</p>}
 
               <h4>Split</h4>
-              <div className="seg small" role="radiogroup" aria-label="Split">
-                {SPLITS.map((s) => (
-                  <button key={s.id} role="radio" aria-checked={kept.mode === s.id} className={kept.mode === s.id ? 'on' : ''} onClick={() => set({ mode: s.id })}>{s.name}</button>
-                ))}
-              </div>
+              <Radios label="Split" className="seg small" value={kept.mode} choices={SPLITS} onChoose={(mode) => set({ mode })} />
               {kept.mode === 'ratio' && (
                 <div className="export-shares">
                   {(['train', 'val', 'test', 'seed'] as const).map((k) => (
@@ -261,11 +269,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
               {sharesBad && <p className="bad">{sharesBad}</p>}
 
               <h4>Images</h4>
-              <div className="seg small" role="radiogroup" aria-label="Images">
-                {IMAGES.filter((m) => coco || m.id !== 'leave').map((m) => (
-                  <button key={m.id} role="radio" aria-checked={images === m.id} className={images === m.id ? 'on' : ''} onClick={() => set({ images: m.id })}>{m.name}</button>
-                ))}
-              </div>
+              <Radios label="Images" className="seg small" value={images} choices={IMAGES.filter((m) => coco || m.id !== 'leave')} onChoose={(id) => set({ images: id })} />
               <p className="export-hint">{IMAGES.find((m) => m.id === images)!.hint}</p>
               <label className="check"><input type="checkbox" checked={kept.backgrounds} onChange={(e) => set({ backgrounds: e.target.checked })} />Include never-labelled images as backgrounds</label>
               <label className="check"><input type="checkbox" checked={kept.leaveAi} onChange={(e) => set({ leaveAi: e.target.checked })} />Leave unaccepted AI proposals out</label>
@@ -285,7 +289,11 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
                     </p>
                   )}
                   <button className="ghost export-make" onClick={() => pickKeypoints(true)}>Make a keypoints file…</button>
-                  <p className="export-hint">X-AnyLabeling's pose file. Making one lists each box's label with the labels of the points sharing its group_id.</p>
+                  <p className="export-hint" ref={keypointsHint}>
+                    {made && keypoints
+                      ? `${baseName(keypoints.file)} lists the point labels found with each box in the folder: add any keypoint names that are missing, then choose the file again.`
+                      : "X-AnyLabeling's pose file. Making one lists each box's label with the labels of the points sharing its group_id."}
+                  </p>
                 </>
               )}
             </fieldset>
@@ -407,6 +415,7 @@ function Group({ id, group, open: first, fixes = [] }: { id: number; group: Issu
       setBusy(false)
     }
   }
+  // What fixes the group comes under its title, where its messages, which grow in the column, can't push it out of view
   return (
     <div className={`export-group is-${group.severity}`}>
       <button className="export-group-head" aria-expanded={open} onClick={() => setOpen(!open)}>
@@ -415,6 +424,7 @@ function Group({ id, group, open: first, fixes = [] }: { id: number; group: Issu
         <span className="name">{group.title}</span>
         <b>{n(group.count)}</b>
       </button>
+      {fixes.length > 0 && <div className="export-fixes">{fixes.map((f) => <button key={f.label} className="ghost" onClick={f.run}>{f.label}</button>)}</div>}
       {open && (
         <ul className="export-rows">
           {rows.map((r, i) => <li key={i}>{r.message}</li>)}
@@ -423,7 +433,6 @@ function Group({ id, group, open: first, fixes = [] }: { id: number; group: Issu
             : <li className="muted">The first {n(rows.length)} of {n(group.count)} are shown.</li>)}
         </ul>
       )}
-      {fixes.length > 0 && <div className="export-fixes">{fixes.map((f) => <button key={f.label} className="ghost" onClick={f.run}>{f.label}</button>)}</div>}
     </div>
   )
 }

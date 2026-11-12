@@ -348,7 +348,7 @@ async function drop(page: Page, file: string, on: string) {
 }
 const holds = (page: Page) => page.evaluate(() => !!document.querySelector('.export-dialog')?.contains(document.activeElement))
 
-test('the Export window holds the focus through an export: Tab goes round it, Escape closes its summary, and a file dropped on it opens nothing', async () => {
+test('the Export window holds the focus through an export: Tab goes round it, a choice is one stop, Escape stops an export and closes its summary, and a file dropped on it opens nothing', async () => {
   const dir = await project('export-held', { a: doc('a', [square('cat', 20, 20, 120, 120)]), b: doc('b', [square('dog', 30, 30, 90, 90)]) })
   const other = await project('export-held-other', { x: doc('x', [square('cow', 10, 10, 50, 50)]), y: null })
   const out = path.join(OUT, 'held')
@@ -356,15 +356,18 @@ test('the Export window holds the focus through an export: Tab goes round it, Es
   mkdirSync(OUT, { recursive: true })
   const { app, page, errors } = await launch(dir)
   await stubDialogs(app)
-  // The export starts a moment late, so the window can be seen running
-  await app.evaluate(({ ipcMain }) => {
-    const handlers = (ipcMain as any)._invokeHandlers as Map<string, (...args: unknown[]) => unknown>
-    const run = handlers.get('export:run')!
-    handlers.set('export:run', async (...args: unknown[]) => {
-      await new Promise((done) => setTimeout(done, 1500))
-      return run(...args)
-    })
+  // The images are copied slowly while the test says so, so the window can be seen running, and stopped
+  await app.evaluate(() => {
+    const fs = process.mainModule!.require('fs').promises
+    const g = globalThis as any
+    const copyFile = fs.copyFile
+    g.slow = 0
+    fs.copyFile = async (...args: unknown[]) => {
+      if (g.slow) await new Promise((done) => setTimeout(done, g.slow))
+      return copyFile.apply(fs, args)
+    }
   })
+  const slow = (ms: number) => app.evaluate((_e, v) => void ((globalThis as any).slow = v), ms)
   const dialog = await openExport(page)
   await expect(dialog).toHaveAttribute('aria-modal', 'true')
   expect(await holds(page)).toBe(true)
@@ -381,6 +384,33 @@ test('the Export window holds the focus through an export: Tab goes round it, Es
     await page.keyboard.press('Tab')
     expect(await holds(page)).toBe(true)
   }
+  // Split and Images are a Tab stop each, at the choice made, as the formats are, and the arrow keys move the choice round them
+  const split = dialog.getByRole('radiogroup', { name: 'Split' }), kept = dialog.getByRole('radiogroup', { name: 'Images' })
+  const [none, ratio] = [split.getByRole('radio', { name: 'None' }), split.getByRole('radio', { name: 'By ratio' })]
+  const [copy, link, leave] = ['Copy', 'Hard link', 'Leave in place'].map((name) => kept.getByRole('radio', { name }))
+  await dialog.getByRole('button', { name: 'Choose…' }).first().focus()
+  for (const stop of [none, copy, dialog.getByLabel('Include never-labelled images as backgrounds')]) {
+    await page.keyboard.press('Tab')
+    await expect(stop).toBeFocused()
+  }
+  await page.keyboard.press('Shift+Tab')
+  await page.keyboard.press('ArrowRight')
+  await expect(link).toBeFocused()
+  await expect(link).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('ArrowLeft')
+  // Round from the first to the last
+  await change(dialog, () => page.keyboard.press('ArrowLeft'))
+  await expect(leave).toBeFocused()
+  await expect(leave).toHaveAttribute('aria-checked', 'true')
+  await change(dialog, () => page.keyboard.press('ArrowDown'))
+  await expect(copy).toHaveAttribute('aria-checked', 'true')
+  await page.keyboard.press('Shift+Tab')
+  await expect(none).toBeFocused()
+  await change(dialog, () => page.keyboard.press('ArrowDown'))
+  await expect(ratio).toBeFocused()
+  await expect(ratio).toHaveAttribute('aria-checked', 'true')
+  await change(dialog, () => page.keyboard.press('ArrowUp'))
+  await expect(none).toHaveAttribute('aria-checked', 'true')
   // A file dropped on the window leaves the folder open behind it as it is
   const top = (await page.locator('.topbar .muted').first().textContent())!
   await drop(page, path.join(other, 'x.png'), '.export-dialog')
@@ -392,6 +422,7 @@ test('the Export window holds the focus through an export: Tab goes round it, Es
   await dialog.getByRole('button', { name: 'Choose…' }).first().click()
   const go = dialog.getByRole('button', { name: 'Export 2 images' })
   await expect(go).toBeEnabled()
+  await slow(3000)
   await go.focus()
   await page.keyboard.press('Enter')
   // Export gives way to Stop: the window keeps the focus, Stop is a Shift+Tab away, and Ctrl+W waits
@@ -402,16 +433,24 @@ test('the Export window holds the focus through an export: Tab goes round it, Es
   await page.keyboard.press('Shift+Tab')
   await expect(stop).toBeFocused()
   await page.keyboard.press('ControlOrMeta+w')
+  // Escape stops it, as Stop does, and as it stops an import: the window stays, and nothing is written
   await page.keyboard.press('Escape')
+  await expect(dialog.locator('.export-note')).toHaveText('Stopped: nothing was written.', { timeout: 30000 })
+  expect(existsSync(out)).toBe(false)
+  expect(await holds(page)).toBe(true)
+  await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
+  await slow(0)
+  await go.click()
   await expect(dialog.locator('.export-done')).toBeVisible({ timeout: 60000 })
   await expect(dialog.locator('.export-lead')).toContainText('Exported 2 images and 2 objects')
-  await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
-  // The summary holds the focus too, not on its Close where Stop was, so a late press on Stop closes nothing; Escape closes it
+  // The summary holds the focus too, not on its Close where Stop was, so a late press on Stop closes nothing
   expect(await holds(page)).toBe(true)
   await expect(dialog.locator('.actions').getByRole('button', { name: 'Close' })).not.toBeFocused()
   await page.screenshot({ path: `${SHOTS}/export-held-done-dark-1500.png` })
+  // Escape closes it, and the focus goes to the image, as the menu item that opened the window has gone
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
+  await expect(page.getByTestId('canvas')).toBeFocused()
   expect(files(out)).toEqual(['annotations/instances_default.json', 'images/default/a.png', 'images/default/b.png'])
 
   // At the smallest window and a large one, dark and light, it opens holding the focus, and Escape closes it
@@ -516,6 +555,16 @@ test('in the smallest window an error that stops the export shows first, with th
   await change(dialog, () => make.click())
   await expect(dialog.locator('.export-errors')).toHaveCount(0)
   await expect(dialog.locator('.export-options')).toContainText('person: 2 keypoints')
+  // What was made, and what's left to do with it, is said under the Keypoints file, brought into view
+  const made = dialog.locator('.export-options .export-hint', { hasText: 'small-keypoints.yaml lists' })
+  await expect(made).toHaveText('small-keypoints.yaml lists the point labels found with each box in the folder: add any keypoint names that are missing, then choose the file again.')
+  await expect.poll(() => inView(dialog.locator('.export-options'), made)).toBe(true)
+  await page.screenshot({ path: `${SHOTS}/export-keypoints-made-dark-960.png` })
+  // A format that takes no keypoints file says nothing of it
+  await choose(dialog, 'YOLO detect')
+  await expect(dialog.getByText('lists the point labels')).toHaveCount(0)
+  await choose(dialog, 'YOLO pose')
+  await expect(made).toBeVisible()
 
   // On a large screen the window grows past 860 px, so the posed formats' options need no scrolling
   await answer(app, 'opens', path.join(OUT, 'small'))
@@ -569,5 +618,66 @@ test("a label file that can't be read stops the export, says how to clear it, an
   await page.screenshot({ path: `${SHOTS}/export-broken-repaired-light-1500.png` })
   await dialog.getByRole('button', { name: 'Cancel' }).click()
   await expect(dialog).toHaveCount(0)
+  await finish(app, errors)
+})
+
+test("an opened group's messages grow in the column, which alone scrolls, an error's fix stays under its title, and the summary's numbers end where its buttons do", async () => {
+  // Twelve shapes past the image's bottom edge, a message each, and twelve label files cut off, an error each
+  const files: Record<string, string> = { a: doc('a', Array.from({ length: 12 }, (_, k) => square('cat', 10 + k * 30, 250, 35 + k * 30, 340))) }
+  for (let k = 0; k < 12; k++) files[`b${k}`] = doc(`b${k}`, [square('dog', 50, 50, 150, 150)]).slice(0, 60)
+  const dir = await project('export-rows', files)
+  const out = path.join(OUT, 'rows')
+  rmSync(out, { recursive: true, force: true })
+  mkdirSync(OUT, { recursive: true })
+  const { app, page, errors } = await launch(dir)
+  await stubDialogs(app)
+  await resize(app, page, 960, 600)
+  const dialog = await openExport(page)
+  const column = dialog.locator('.export-check')
+  const scrolls = (part: Locator) => part.evaluate((el) => el.scrollHeight > el.clientHeight + 1)
+  // The error comes open, its messages in the column, with Check again under its title, in view
+  const error = dialog.locator('.export-errors .export-group')
+  await expect(error.locator('.export-rows li')).toHaveCount(12)
+  expect(await scrolls(error.locator('.export-rows'))).toBe(false)
+  expect(await scrolls(column)).toBe(true)
+  expect(await inView(column, error.getByRole('button', { name: 'Check again' }))).toBe(true)
+  await page.screenshot({ path: `${SHOTS}/export-rows-error-dark-960.png` })
+  const group = dialog.locator('.export-group', { hasText: "Shapes past the image's edge" })
+  await group.locator('.export-group-head').click()
+  await expect(group.locator('.export-rows li')).toHaveCount(12)
+  expect(await scrolls(group.locator('.export-rows'))).toBe(false)
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+    await group.locator('.export-rows li').nth(4).scrollIntoViewIfNeeded()
+    await page.screenshot({ path: `${SHOTS}/export-rows-${theme}-960.png` })
+  }
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+
+  // Repaired and checked again, the export goes ahead
+  for (let k = 0; k < 12; k++) writeFileSync(path.join(dir, `b${k}.json`), doc(`b${k}`, [square('dog', 50, 50, 150, 150)]))
+  await change(dialog, () => error.getByRole('button', { name: 'Check again' }).click())
+  await expect(dialog.locator('.export-errors')).toHaveCount(0)
+  await answer(app, 'opens', out)
+  await dialog.getByRole('button', { name: 'Choose…' }).first().click()
+  await dialog.getByRole('button', { name: 'Export 13 images' }).click()
+  await expect(dialog.locator('.export-done')).toBeVisible({ timeout: 60000 })
+  const right = (part: Locator) => part.evaluate((el) => Math.round(el.getBoundingClientRect().right))
+  // Where the words or numbers themselves end
+  const ends = (part: Locator) => part.evaluate((el) => {
+    const words = document.createRange()
+    words.selectNodeContents(el)
+    return Math.round(words.getBoundingClientRect().right)
+  })
+  const close = dialog.locator('.actions').getByRole('button', { name: 'Close' })
+  for (const [width, height] of [[960, 600], [1500, 940]]) {
+    await resize(app, page, width, height)
+    for (const part of ['.export-table', '.export-done .kv', '.export-accepted']) expect(await right(dialog.locator(part))).toBe(await right(close))
+    for (const part of ['.export-table tbody tr:first-child td:last-child', '.export-done .kv b', '.export-accepted b']) expect(await ends(dialog.locator(part).first())).toBe(await right(close))
+    for (const theme of ['dark', 'light']) {
+      await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+      await page.screenshot({ path: `${SHOTS}/export-summary-${theme}-${width}.png` })
+    }
+  }
+  await closeDialog(dialog)
   await finish(app, errors)
 })

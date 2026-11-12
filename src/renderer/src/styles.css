@@ -423,11 +423,14 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .export-sev.is-warning { color: var(--warn-text); }
 .export-sev.is-info { color: var(--muted); }
 .export-sev.is-ok { color: var(--ok); }
-.export-rows { list-style: none; margin: 0 0 6px; padding: 2px 6px 2px 47px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); max-height: 240px; overflow-y: auto; }
+/* An opened group's messages grow in the column, which scrolls, a page of them at a time: they don't scroll inside it */
+.export-rows { list-style: none; margin: 0 0 6px; padding: 2px 6px 2px 47px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
 .export-rows li { overflow-wrap: anywhere; }
 .export-status { flex: 1; min-width: 0; font-size: 12px; }
-.export-done { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 12px 16px; }
-.export-done > * { max-width: 680px; }
+/* The summary's numbers end where the buttons under them do: room is kept for its scrollbar, there or not, in its 16 px
+   edge, and the counts' last column has no edge of its own */
+.export-done { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 8px; padding: 12px 6px 12px 16px; }
+.export-done .export-table th:last-child, .export-done .export-table td:last-child { padding-right: 0; }
 .export-path { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .export-done .kv b { overflow-wrap: anywhere; }
 .export-accepted { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
@@ -475,7 +478,8 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .import-group.is-error .sev { color: var(--danger); }
 .import-group.is-warning .sev { color: var(--warn-text); }
 .import-group.is-info .sev { color: var(--muted); }
-.import-rows { list-style: none; margin: 2px 0 8px 28px; padding: 0; display: flex; flex-direction: column; gap: 3px; max-height: 220px; overflow-y: auto; font-size: 12px; color: var(--muted); }
+/* As the Export window's: an opened group's messages grow in the window's body, which scrolls */
+.import-rows { list-style: none; margin: 2px 0 8px 28px; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
 .import-rows li { overflow-wrap: anywhere; }
 .import-rows .more { padding: 0; color: var(--accent); }
 .import-busy { gap: 8px; padding-top: 18px; padding-bottom: 18px; }
