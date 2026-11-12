@@ -529,3 +529,45 @@ test('in the smallest window an error that stops the export shows first, with th
   await expect(dialog).toHaveCount(0)
   await finish(app, errors)
 })
+
+test("a label file that can't be read stops the export, says how to clear it, and Check again reads it afresh once it's repaired", async () => {
+  const dir = await project('export-broken', { a: doc('a', [square('cat', 20, 20, 120, 100)]), b: doc('b', [square('dog', 50, 50, 150, 150)]) })
+  // b's label file cut off in the middle, as by a crash
+  writeFileSync(path.join(dir, 'b.json'), doc('b', [square('dog', 50, 50, 150, 150)]).slice(0, 60))
+  const { app, page, errors } = await launch(dir)
+  await stubDialogs(app)
+  await resize(app, page, 960, 600)
+  const dialog = await openExport(page)
+  const error = dialog.locator('.export-errors .export-group')
+  const said = /^b\.png: its label file, b\.json, can't be read \(.+\), so its labels can't be exported: repair or delete the label file, then check again$/
+  for (const format of ['COCO', 'YOLO detect']) {
+    if (format !== 'COCO') await choose(dialog, format)
+    await expect(error).toHaveCount(1)
+    await expect(error.locator('.export-group-head')).toContainText("Label files that can't be read")
+    await expect(error.locator('.export-rows li')).toHaveText(said)
+    await expect(error.getByRole('button', { name: 'Check again' })).toBeVisible()
+    await expect(dialog.locator('#export-why')).toHaveText('Fix the error first')
+  }
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+    for (const [width, height] of [[960, 600], [1500, 940]]) {
+      await resize(app, page, width, height)
+      await fits(page)
+      await page.screenshot({ path: `${SHOTS}/export-broken-${theme}-${width}.png` })
+    }
+  }
+  // Checked again before it's repaired, it still stops the export
+  await change(dialog, () => error.getByRole('button', { name: 'Check again' }).click())
+  await expect(error.locator('.export-rows li')).toHaveText(said)
+  // Repaired in another app while the window is open: Check again reads it, and the export can go ahead
+  writeFileSync(path.join(dir, 'b.json'), doc('b', [square('dog', 50, 50, 150, 150)]))
+  await change(dialog, () => error.getByRole('button', { name: 'Check again' }).click())
+  await expect(dialog.locator('.export-errors')).toHaveCount(0)
+  await expect(dialog.locator('.export-lead')).toHaveText('2 images and 2 objects')
+  await expect(dialog.locator('#export-why')).toHaveText('Choose a folder to export to')
+  expect(await page.evaluate(() => !!document.querySelector('.export-dialog')?.contains(document.activeElement))).toBe(true)
+  await page.screenshot({ path: `${SHOTS}/export-broken-repaired-light-1500.png` })
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toHaveCount(0)
+  await finish(app, errors)
+})

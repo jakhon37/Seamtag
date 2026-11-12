@@ -5,7 +5,7 @@
 // again from what they do: Ultralytics is AGPL-3.0, so none of its code is copied here. Each
 // image's own label file stays the working copy; these files are made from it and read into it.
 import yaml from 'js-yaml'
-import type { DatasetImage, Issue, KeypointSchema, MaskBits, PoseInstance, Severity } from './dataset'
+import { type DatasetImage, type Issue, type KeypointSchema, type MaskBits, type PoseInstance, REPLACE_IMAGE, type Severity, unreadableLabels } from './dataset'
 import { pyFixed } from './formats'
 import { newShape, type Shape } from './labelfile'
 import { circlePolygon, CLOSED_TYPES } from './outline'
@@ -329,8 +329,8 @@ function rowWriter(image: DatasetImage) {
     done: (): Rows => ({ text: lines.map((l) => `${l}\n`).join(''), rows: lines.length, issues }),
     /** False, with an error, when the image's labels or size can't be read */
     ready() {
-      if (image.broken) say('error', 'yolo-broken', `its label file can't be read (${image.broken}), so it's left out`)
-      else if (!(W > 0 && H > 0)) say('error', 'yolo-no-size', "the image's size can't be read, so its labels can't be written as shares of it")
+      if (image.broken) say('error', 'yolo-broken', unreadableLabels(image.file, image.broken))
+      else if (!(W > 0 && H > 0)) say('error', 'yolo-no-size', `the image's size can't be read, so its labels can't be written as shares of it: ${REPLACE_IMAGE}`)
       else return true
       return false
     },

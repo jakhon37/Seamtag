@@ -225,14 +225,14 @@ describe('writing COCO', () => {
     ])
   })
 
-  test('images whose label file or pixels can\'t be read are left out with an error', () => {
+  test('images whose label file or pixels can\'t be read are left out with an error that says what lets the export go ahead', () => {
     const broken = { ...image('a.png', 20, 20, []), broken: "It isn't valid JSON" }
     const unread = { ...image('b.png', 0, 0, []), unreadable: 'Input file is missing' }
     const { dataset, issues } = instancesOf([{ image: broken, fileName: 'a.png' }, { image: unread, fileName: 'b.png' }, { image: image('c.png', 5, 5, []), fileName: 'c.png' }])
     expect(dataset.images).toEqual([{ id: 1, width: 5, height: 5, file_name: 'c.png' }])
     expect(issues.map((i) => [i.severity, i.message])).toEqual([
-      ['error', "a.png: its label file can't be read (It isn't valid JSON), so the image is left out"],
-      ['error', "b.png can't be read (Input file is missing), so it's left out"]
+      ['error', "a.png: its label file, a.json, can't be read (It isn't valid JSON), so its labels can't be exported: repair or delete the label file, then check again"],
+      ['error', "b.png can't be read (Input file is missing), so its labels can't be exported: replace the image with one that opens, then check again"]
     ])
   })
 })

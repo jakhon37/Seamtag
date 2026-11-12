@@ -748,9 +748,18 @@ describe('what stops an export', () => {
     await picture(path.join(dir, 'a.jpg'))
     writeFileSync(path.join(dir, 'b.json'), '{ not json')
     await openProject(dir, null)
-    const check = await preflight(dir, options())
+    const check = await preflight(dir, options(), { read: 'one' })
     expect(codes(check).filter(([s]) => s === 'error')).toEqual([['error', 'export-shared-label-file', 1], ['error', 'coco-broken-labels', 1]])
     expect(check.groups.find((g) => g.code === 'export-shared-label-file')!.issues[0].message).toBe("a.jpg and a.png share one label file, a.json, so whose labels are whose can't be told: give each image its own name")
+    // The label file that can't be read stops the export, and says what lets it go ahead
+    for (const format of ['coco', 'yolo-detect'] as const) {
+      const broken = (await preflight(dir, options({ format }), { read: 'one' })).groups.find((g) => g.code === (format === 'coco' ? 'coco-broken-labels' : 'yolo-broken'))!
+      expect([broken.severity, broken.issues[0].message]).toEqual(['error', expect.stringMatching(/^b\.png: its label file, b\.json, can't be read \(.+\), so its labels can't be exported: repair or delete the label file, then check again$/)])
+    }
+    // Repaired: a check that reads the folder again, as Check again does, no longer finds it
+    writeFileSync(path.join(dir, 'b.json'), labelme('b.png', [square('cat', 1, 1)]))
+    expect(codes(await preflight(dir, options(), { read: 'one' })).some(([, code]) => code === 'coco-broken-labels')).toBe(true)
+    expect(codes(await preflight(dir, options(), { read: 'two' })).filter(([s]) => s === 'error')).toEqual([['error', 'export-shared-label-file', 1]])
     // Every image sharing one -O labels.json is one problem, its images named a few at a time
     const shared = folder()
     for (const name of ['p.png', 'q.png', 'r.png', 's.png', 't.png']) await picture(path.join(shared, name))

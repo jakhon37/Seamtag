@@ -10,7 +10,7 @@
 // When writing objects whole puts a shape before one it came after, every shape keeps its place
 // in the label file as `index`, so importing puts them back in order. A keypoints file keeps its
 // posed objects' outlines the same way, so it gives them back on its own.
-import { type DatasetImage, type Issue, type KeypointSchema, type MaskBits, type PoseInstance, type Severity, sizeText } from './dataset'
+import { type DatasetImage, type Issue, type KeypointSchema, type MaskBits, type PoseInstance, REPLACE_IMAGE, type Severity, sizeText, unreadableLabels } from './dataset'
 import { newShape, pointCount, readShape, type Shape, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
 import { short } from './pose'
@@ -347,13 +347,13 @@ export function writeCoco(entries: CocoEntry[], options: CocoOptions): { dataset
   }
   const images: CocoImage[] = [], annotations: CocoAnnotation[] = []
   for (const entry of entries) {
-    const { name, broken, unreadable, width, height } = entry.image
+    const { name, file, broken, unreadable, width, height } = entry.image
     if (broken !== undefined) {
-      issues.push(issue('error', 'coco-broken-labels', name, `${name}: its label file can't be read (${broken}), so the image is left out`))
+      issues.push(issue('error', 'coco-broken-labels', name, `${name}: ${unreadableLabels(file, broken)}`))
       continue
     }
     if (unreadable !== undefined || !(width > 0 && height > 0)) {
-      issues.push(issue('error', 'coco-unreadable-image', name, `${name} can't be read${unreadable ? ` (${unreadable})` : ''}, so it's left out`))
+      issues.push(issue('error', 'coco-unreadable-image', name, `${name} can't be read${unreadable ? ` (${unreadable})` : ''}, so its labels can't be exported: ${REPLACE_IMAGE}`))
       continue
     }
     const image_id = images.length + 1

@@ -76,3 +76,12 @@ export const SEVERITIES: Severity[] = ['error', 'warning', 'info']
 
 /** A size in messages, width first, as Statistics and the status bar write it: 6,050 × 12,300 */
 export const sizeText = (width: number, height: number) => `${width.toLocaleString('en-GB')} × ${height.toLocaleString('en-GB')}`
+
+// What COCO's and YOLO's writers say of an image whose label file, or the image itself, can't be
+// read. Both are errors, as the export can't know what to write for it, so they say what lets it
+// go ahead: the Export window's Check again reads the folder afresh.
+/** An image whose label file can't be read, `why` saying why */
+export const unreadableLabels = (file: string | null, why: string) =>
+  `its label file${file ? `, ${file.split(/[\\/]/).pop()},` : ''} can't be read (${why}), so its labels can't be exported: repair or delete the label file, then check again`
+/** What to do about an image that can't be read */
+export const REPLACE_IMAGE = 'replace the image with one that opens, then check again'

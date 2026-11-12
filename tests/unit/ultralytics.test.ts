@@ -263,9 +263,13 @@ describe('label rows written for each task', () => {
       expect(verifyRows(out.text, task, 3, [1, 3]).status).toBe('empty')
     }
   })
-  test("an image whose labels or size can't be read gets no rows, and an error", () => {
-    expect(labelRows({ ...image([rect('cat', [[1, 1], [5, 5]])]), broken: "It isn't valid JSON" }, 'detect', CLASSES).issues[0]).toMatchObject({ severity: 'error', code: 'yolo-broken' })
-    expect(labelRows(image([rect('cat', [[1, 1], [5, 5]])], [], [0, 0]), 'detect', CLASSES).issues[0]).toMatchObject({ severity: 'error', code: 'yolo-no-size' })
+  test("an image whose labels or size can't be read gets no rows, and an error that says what lets the export go ahead, as COCO's does", () => {
+    expect(labelRows({ ...image([rect('cat', [[1, 1], [5, 5]])]), broken: "It isn't valid JSON" }, 'detect', CLASSES).issues[0]).toMatchObject({
+      severity: 'error', code: 'yolo-broken', message: "a.png: its label file, a.json, can't be read (It isn't valid JSON), so its labels can't be exported: repair or delete the label file, then check again"
+    })
+    expect(labelRows(image([rect('cat', [[1, 1], [5, 5]])], [], [0, 0]), 'detect', CLASSES).issues[0]).toMatchObject({
+      severity: 'error', code: 'yolo-no-size', message: "a.png: the image's size can't be read, so its labels can't be written as shares of it: replace the image with one that opens, then check again"
+    })
     expect(labelRows(image([newShape('cat', 'mask', [[1, 1], [3, 3]])]), 'segment', CLASSES).issues[0]).toMatchObject({ severity: 'error', code: 'yolo-mask-unreadable' })
   })
 

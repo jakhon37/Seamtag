@@ -67,7 +67,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const [keypoints, setKeypoints] = useState<KeypointsSummary | null>(null)
   const [check, setCheck] = useState<Preflight | null>(null)
   const [checking, setChecking] = useState(false)
-  // Checks again with the same read of the folder (a keypoints file chosen again), or with a new one (after an export fails)
+  // Checks again with the same read of the folder (a keypoints file chosen again), or with a new one (Check again, or after an export fails)
   const [again, setAgain] = useState(0)
   const [reread, setReread] = useState(0)
   const [progress, setProgress] = useState<ExportProgress | null>(null)
@@ -156,12 +156,15 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
     }
   }
   // Errors an option of the window fixes get a button for it in their group, as the option itself is
-  // often out of view in a short window
+  // often out of view in a short window. A label file or an image repaired or replaced meanwhile,
+  // in another app, is read again only when the folder is: Check again reads it afresh.
+  const checkAgain: Fix[] = [{ label: 'Check again', run: () => setReread((r) => r + 1) }]
   const fixes: Record<string, Fix[]> = {
     'export-ai-pending': [{ label: 'Leave them out', run: () => set({ leaveAi: true }) }],
     'export-no-keypoints': [{ label: 'Choose one…', run: () => pickKeypoints(false) }, { label: 'Make one…', run: () => pickKeypoints(true) }],
     'export-keypoints-unreadable': [{ label: 'Choose another…', run: () => pickKeypoints(false) }],
-    'export-in-label-file': [{ label: 'Copy the images instead', run: () => set({ images: 'copy' }) }]
+    'export-in-label-file': [{ label: 'Copy the images instead', run: () => set({ images: 'copy' }) }],
+    'coco-broken-labels': checkAgain, 'yolo-broken': checkAgain, 'coco-unreadable-image': checkAgain, 'yolo-no-size': checkAgain
   }
   // The footer's word on what blocks the export goes to the first error, open, wherever the column is scrolled
   const showErrors = () => {
