@@ -1,17 +1,17 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, cpSync, existsSync, promises as fsp, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import yaml from 'js-yaml'
 import sharp from 'sharp'
-import { describe, expect, test } from 'vitest'
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { readYoloDataset } from '../../src/main/ultralytics'
 import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
 import { circlePolygon } from '../../src/shared/outline'
 import { ULTRALYTICS_YAML, yamlString } from '../../src/shared/pose'
 import {
-  countRows, guessTask, isYoloImage, labelPathFor, labelRows, labelText, newRowStats, poseYamlKeys, quadKind, readDataYaml, readRows, verifyRows,
-  writeDataYaml, YOLO_TASKS, type YoloTask
+  countRows, guessTask, isDatasetYaml, isYoloImage, labelPathFor, labelRows, labelText, newRowStats, poseYamlKeys, quadKind, readDataYaml, readRows,
+  verifyRows, writeDataYaml, YOLO_TASKS, type YoloTask
 } from '../../src/shared/ultralytics'
 
 // What Ultralytics 8.4.211's own code makes of label files and data.yaml: tests/fixtures/ultralytics/make_verify_cases.py
@@ -95,6 +95,8 @@ const rect = (label: string, points: number[][], extra: Partial<Shape> = {}) => 
 const poly = (label: string, points: number[][]) => newShape(label, 'polygon', points)
 const lines = (text: string) => text.split('\n').filter(Boolean)
 const codes = (issues: { code: string }[]) => issues.map((i) => i.code)
+// Paths and messages as written on Linux and macOS, so the tests read the same on Windows
+const slash = (text: string) => text.split(path.sep).join('/')
 const CLASSES = ['cat', 'dog', 'bird']
 
 describe('label rows written for each task', () => {
@@ -225,6 +227,21 @@ describe('label rows written for each task', () => {
     expect(edge.issues.map((i) => [i.code, i.shape])).toEqual([['pose-no-keypoints', 0], ['pose-no-keypoints', 1], ['yolo-outside', 0], ['yolo-clamped', 1]])
   })
 
+  test("pose: an object whose box has no width or height is left out with its keypoints, as Ultralytics drops it in training, and so is one only touching the image", () => {
+    const out = labelRows(image([
+      rect('person', [[20, 10], [20, 30]], { group_id: 1 }), newShape('nose', 'point', [[20, 20]], { group_id: 1 }),
+      newShape('wrist', 'point', [[60, 20]], { group_id: 2 }),
+      rect('hand', [[-10, 0], [0, 10]], { group_id: 3 }), newShape('wrist', 'point', [[0, 5]], { group_id: 3 }),
+      rect('person', [[10, 5], [30, 25]], { group_id: 4 }), newShape('nose', 'point', [[20, 10]], { group_id: 4 })
+    ]), 'pose', ['person', 'hand'], SCHEMA)
+    expect(lines(out.text)).toEqual(['0 0.200000 0.300000 0.200000 0.400000 0.200000 0.200000 2 0 0 0 0 0 0'])
+    expect(out.issues.map((i) => [i.severity, i.code, i.shape])).toEqual([
+      ['warning', 'pose-no-box', 2], ['warning', 'yolo-no-area', 0], ['warning', 'yolo-no-area', 2], ['warning', 'yolo-outside', 3]
+    ])
+    expect(out.issues[0].message).toBe("a.png: group 2 has keypoints of hand but no box, and the box around its one point has no area: add a box with the class's label")
+    expect(out.issues[1].message).toBe("a.png: person's box has no width or height, so it's left out with its keypoints, as Ultralytics would drop it in training")
+  })
+
   test("every file Seamtag writes passes Ultralytics' checks for its task, with nothing dropped as a repeat", () => {
     // Shapes of every kind, some reaching past the edges, at a size whose shares don't come out even
     let seed = 7
@@ -315,6 +332,25 @@ describe('label rows read back into shapes', () => {
     expect(keypointsInDetect.shapes.map((s) => s.shape_type)).toEqual(['rectangle'])
     expect(codes(keypointsInDetect.issues)).toEqual(['yolo-keypoints-dropped'])
   })
+  test('a file that starts with a byte order mark, which Ultralytics refuses, is read without it, and the warning says so', () => {
+    const got = read('\ufeff0 0.5 0.5 0.2 0.2\n1 0.3 0.3 0.1 0.1\n', 'detect')
+    expect(got.verdict).toMatchObject({ status: 'corrupt', line: 1 })
+    expect(got.shapes.map((s) => [s.label, s.points])).toEqual([['cat', [[40, 20], [60, 30]]], ['dog', [[25, 12.5], [35, 17.5]]]])
+    expect(got.issues.map((i) => i.message)).toEqual([
+      "The label file: it starts with a byte order mark, which Ultralytics reads as part of the first number, so it would leave this image out of training; it's read here without the mark"
+    ])
+    const more = read('\ufeff0 0.5 0.5 0.2 0.2\n7 0.5 0.5 0.2 0.2\n', 'detect')
+    expect(more.issues.map((i) => i.code)).toEqual(['yolo-corrupt', 'yolo-row'])
+    expect(more.issues[0].message).toMatch(/training, as it would without the mark, since line 2's class, 7, is past the 3 classes \(0 to 2\); it's read here without the mark$/)
+  })
+  test("values holding characters that don't show are quoted with them written out", () => {
+    const got = read('0 0.5\u200b 0.5 0.2 0.2\n', 'detect')
+    expect(got.issues.map((i) => i.message)).toEqual([
+      "The label file: Ultralytics would leave this image out of training, as line 1 has 0.5\\u200b, which isn't a number",
+      "The label file: line 1 has 0.5\\u200b, which isn't a number, so it's left out"
+    ])
+    expect(verifyRows('0\ufeff 0.5 0.5 0.2 0.2\n', 'detect', 3).reason).toBe("line 1 has 0\\ufeff, which isn't a number")
+  })
   test('rows Ultralytics would refuse are read where they can be, and the file and each row left out get an issue', () => {
     const got = read('0 0.5 0.5 0.2 0.2\n7 0.5 0.5 0.2 0.2\n1 0.5 x 0.2 0.2\n2 1.5 0.5 0.2 0.2\n', 'detect')
     expect(got.verdict.status).toBe('corrupt')
@@ -379,6 +415,12 @@ kpt_names:
     expect(readDataYaml(files['byte order mark and CRLF'])).toMatchObject({ data: { train: 'a', val: 'b', names: ['x'] }, issues: [] })
     expect(readDataYaml(files['quoted names and escapes']).data.names).toEqual(['say "hi"', "it's", 'tab\there'])
   })
+  test("a YAML is a dataset's when it holds train, val or validation as a folder, a file or a list", () => {
+    expect(['train: images/train\nval: images/val\n', 'val: [a, b]\n', 'validation: v.txt\n', '\ufefftrain: a\n'].map(isDatasetYaml)).toEqual([true, true, true, true])
+    // X-AnyLabeling's keypoint file, a model's settings, a training run's args.yaml, and what isn't a map of keys
+    const others = ['classes:\n  person: [nose]\nhas_visible: true\n', 'nc: 80\nbackbone: []\n', 'task: detect\nval: true\n', 'train: [a\n', '- train\n', '']
+    expect(others.map(isDatasetYaml)).toEqual(others.map(() => false))
+  })
   test('what check_det_dataset refuses comes back as an error that says why', () => {
     const errors = (text: string) => readDataYaml(text, 'data.yaml').issues.filter((i) => i.severity === 'error').map((i) => i.message)
     expect(errors('train: a\nnames: [x]')).toEqual(['data.yaml has no val, which Ultralytics needs'])
@@ -426,8 +468,9 @@ describe('which task a dataset is for', () => {
     // One length of odd values: outlines, or keypoints without visibility
     expect(guess(['0 0.1 0.1 0.3 0.1 0.3 0.4\n', '1 0.2 0.2 0.4 0.2 0.4 0.5\n'])).toMatchObject({ task: 'segment', others: ['pose'], kptShape: [1, 2], ask: true })
   })
-  test('label files with no rows are all backgrounds, and there is nothing to ask', () => {
-    expect(guess(['', '\n'])).toMatchObject({ task: 'detect', ask: false, stats: { files: 2, empty: 2, rows: 0 } })
+  test('label files with no rows, or no label files at all, make every image a background, and there is nothing to ask', () => {
+    expect(guess(['', '\n'])).toMatchObject({ task: 'detect', ask: false, reason: 'The label files have no rows, so every image is a background', stats: { files: 2, empty: 2, rows: 0 } })
+    expect(guess([])).toMatchObject({ task: 'detect', ask: false, reason: 'No label files were found, so every image is a background' })
   })
 })
 
@@ -450,7 +493,7 @@ describe("Ultralytics' file rules", () => {
 describe('datasets on disk, laid out as tools write them (tests/fixtures/ultralytics/make_layouts.py)', () => {
   const LAYOUTS = path.join(FIXTURES, 'layouts')
   const items = (d: Awaited<ReturnType<typeof readYoloDataset>>) =>
-    d.splits.map((s) => [s.name, s.items.map((i) => [path.relative(d.root, i.image), i.label && path.relative(d.root, i.label)])])
+    d.splits.map((s) => [s.name, s.items.map((i) => [slash(path.relative(d.root, i.image)), i.label && slash(path.relative(d.root, i.label))])])
 
   test("a Roboflow download: ../train/images is read as train/images, its outlines are segment's", async () => {
     for (const target of ['roboflow', 'roboflow/data.yaml']) {
@@ -501,7 +544,7 @@ describe('datasets on disk, laid out as tools write them (tests/fixtures/ultraly
     expect(items(d)).toEqual([['', [['x.jpg', 'x.txt'], ['y.jpg', 'y.txt']]]])
     expect(d.guess.task).toBe('detect')
   })
-  test("lists of images that aren't there fall back to images/<split>; a path from another computer to the YAML's folder; several YAMLs and none at all are errors", async () => {
+  test("lists of images that aren't there fall back to images/<split>; a path from another computer to the YAML's folder; two datasets' YAMLs and no images are errors", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'seamtag-yolo-'))
     try {
       const put = (p: string, text = '') => { mkdirSync(path.dirname(path.join(dir, p)), { recursive: true }); writeFileSync(path.join(dir, p), text) }
@@ -514,14 +557,150 @@ describe('datasets on disk, laid out as tools write them (tests/fixtures/ultraly
       expect(items(d)).toEqual([['train', [['images/train/a.jpg', 'labels/train/a.txt']]], ['val', [['images/train/a.jpg', 'labels/train/a.txt']]]])
       expect(d.issues.map((i) => [i.severity, i.code])).toEqual([['info', 'yolo-root'], ['info', 'yolo-list-fallback'], ['info', 'yolo-two-splits']])
       expect(d.issues[2].message).toBe('1 image is in both train and val')
-      put('ds/other.yaml', 'train: a\n')
-      expect((await readYoloDataset(path.join(dir, 'ds'))).issues[0]).toMatchObject({ severity: 'error', code: 'yolo-many-yaml' })
+      // Of several datasets' YAML files data.yaml is taken, and two others are asked about
+      put('ds/other.yaml', 'train: a\nval: a\n')
+      expect((await readYoloDataset(path.join(dir, 'ds'))).yaml).toBe(path.join(dir, 'ds', 'data.yaml'))
+      put('two/a.yaml', 'train: a\nval: a\n')
+      put('two/b.yaml', 'train: b\nval: b\n')
+      expect((await readYoloDataset(path.join(dir, 'two'))).issues[0]).toMatchObject({ severity: 'error', code: 'yolo-many-yaml' })
       put('empty/notes.txt', 'hello')
       expect((await readYoloDataset(path.join(dir, 'empty'))).issues.map((i) => i.code)).toEqual(['yolo-no-images'])
       expect((await readYoloDataset(path.join(dir, 'nowhere'))).issues.map((i) => i.code)).toEqual(['yolo-missing'])
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('datasets on disk, wherever they sit', () => {
+  const LAYOUTS = path.join(FIXTURES, 'layouts')
+  const items = (d: Awaited<ReturnType<typeof readYoloDataset>>) =>
+    d.splits.map((s) => [s.name, s.items.map((i) => [slash(path.relative(d.root, i.image)), i.label && slash(path.relative(d.root, i.label))])])
+  const codes = (d: Awaited<ReturnType<typeof readYoloDataset>>) => d.issues.map((i) => [i.severity, i.code])
+  let dir = ''
+  const put = (p: string, text = '') => {
+    mkdirSync(path.dirname(path.join(dir, p)), { recursive: true })
+    writeFileSync(path.join(dir, p), text)
+  }
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), 'seamtag-yolo-'))
+  })
+  afterEach(() => {
+    vi.restoreAllMocks()
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("a folder without data.yaml is read in place, so a folder above it named images doesn't hide the labels beside its images", async () => {
+    const pets = path.join(dir, 'photos', 'images', 'pets')
+    cpSync(path.join(LAYOUTS, 'flat'), pets, { recursive: true })
+    const d = await readYoloDataset(pets)
+    expect(d.names).toEqual(['cat', 'dog'])
+    expect(items(d)).toEqual([['', [['x.jpg', 'x.txt'], ['y.jpg', 'y.txt']]]])
+    expect(d.guess).toMatchObject({ task: 'detect', ask: false, stats: { files: 2, rows: 2 } })
+    expect(codes(d)).toEqual([['info', 'yolo-no-yaml']])
+  })
+  test("labels beside their images in an images folder are read from there, and a dataset's images folder picked alone finds its labels in ../labels, each with a note", async () => {
+    put('tree/classes.txt', 'x\n')
+    put('tree/images/a.jpg')
+    put('tree/images/a.txt', '0 0.5 0.5 0.2 0.2\n')
+    const tree = await readYoloDataset(path.join(dir, 'tree'))
+    expect(items(tree)).toEqual([['', [['images/a.jpg', 'images/a.txt']]]])
+    expect(codes(tree)).toEqual([['info', 'yolo-no-yaml'], ['info', 'yolo-label-beside']])
+    expect(slash(tree.issues[1].message)).toBe("images/a.txt is beside its image in an images folder, so it's read from there, though Ultralytics would look in labels/")
+    put('ds/images/b.jpg')
+    put('ds/images/c.jpg')
+    put('ds/labels/b.txt', '0 0.5 0.5 0.2 0.2\n')
+    const alone = await readYoloDataset(path.join(dir, 'ds', 'images'))
+    expect(items(alone)).toEqual([['', [['b.jpg', '../labels/b.txt'], ['c.jpg', null]]]])
+    expect(codes(alone)).toEqual([['info', 'yolo-label-outside'], ['info', 'yolo-no-yaml']])
+    expect(slash(alone.issues[0].message)).toBe("../labels/b.txt is outside images, where Ultralytics' rule puts it (the last images folder in an image's path becomes labels), so it's read from there")
+  })
+  test("a data.yaml's images have their labels only where Ultralytics looks; ones beside them it wouldn't reach are a warning, and no label files at all another", async () => {
+    put('images/ds/data.yaml', 'train: train\nval: train\nnames: [x]\n')
+    put('images/ds/train/a.jpg')
+    put('images/ds/train/a.txt', '0 0.5 0.5 0.2 0.2\n')
+    put('images/ds/train/b.jpg')
+    const d = await readYoloDataset(path.join(dir, 'images', 'ds'))
+    expect(items(d)).toEqual([['train', [['train/a.jpg', null], ['train/b.jpg', null]]], ['val', [['train/a.jpg', null], ['train/b.jpg', null]]]])
+    expect(codes(d)).toEqual([['warning', 'yolo-label-unreached'], ['info', 'yolo-two-splits']])
+    expect(d.issues[0].image).toBe(path.join(dir, 'images', 'ds', 'train', 'a.jpg'))
+    expect(slash(d.issues[0].message)).toBe("train/a.txt is beside its image, but Ultralytics looks for its labels in ../../labels/ds/train (the last images folder in the path becomes labels), so it would train that image as a background, and it's read as such here: move the label files there")
+    expect(d.guess.reason).toBe('No label files were found, so every image is a background')
+    rmSync(path.join(dir, 'images', 'ds', 'train', 'a.txt'))
+    const none = await readYoloDataset(path.join(dir, 'images', 'ds'))
+    expect(codes(none)).toEqual([['info', 'yolo-two-splits'], ['warning', 'yolo-no-labels']])
+    expect(none.issues[1].message).toBe("None of the 2 images has a label file where Ultralytics looks (labels for the last images folder in its path, else beside it), so they'd train as backgrounds")
+  })
+  test("only a dataset's YAML is taken for its data.yaml: a keypoint file or a training run's args.yaml is passed over, and the folder read as images and labels", async () => {
+    const xany = path.join(dir, 'xany')
+    cpSync(path.join(LAYOUTS, 'flat'), xany, { recursive: true })
+    put('xany/pose_config.yaml', 'classes:\n  person: [nose, left_eye]\nhas_visible: true\n')
+    put('xany/runs/detect/train/args.yaml', 'task: detect\nmode: train\ndata: data.yaml\nval: true\nsplit: val\n')
+    // A data.yaml below the top is taken only for what it holds
+    put('xany/config/data.yaml', 'model: yolo11n.pt\nepochs: 100\n')
+    const d = await readYoloDataset(xany)
+    expect(d.yaml).toBeNull()
+    expect(d.names).toEqual(['cat', 'dog'])
+    expect(items(d)).toEqual([['', [['x.jpg', 'x.txt'], ['y.jpg', 'y.txt']]]])
+    expect(codes(d)).toEqual([['info', 'yolo-yaml-passed'], ['info', 'yolo-no-yaml']])
+    expect(d.issues[0].message).toBe("pose_config.yaml and 2 more YAML files aren't datasets' (there's no train or val in them), so xany is read as images and labels")
+  })
+  test("a dataset's YAML below the top is found when the top has none; the one named after the folder comes first, and two others are asked about", async () => {
+    put('proj/notes.yaml', 'title: x\n')
+    put('proj/sets/one/data.yaml', 'train: images\nval: images\nnames: [a]\n')
+    put('proj/sets/one/images/a.jpg')
+    expect((await readYoloDataset(path.join(dir, 'proj'))).yaml).toBe(path.join(dir, 'proj', 'sets', 'one', 'data.yaml'))
+    put('proj/sets/two/data.yaml', 'train: images\nval: images\nnames: [a]\n')
+    expect((await readYoloDataset(path.join(dir, 'proj'))).issues.map((i) => i.code)).toEqual(['yolo-many-yaml'])
+    // As find_dataset_yaml prefers it
+    put('proj/proj.yaml', 'train: sets/one/images\nval: sets/one/images\nnames: [a]\n')
+    put('proj/data.yaml', 'train: sets/one/images\nval: sets/one/images\nnames: [a]\n')
+    expect((await readYoloDataset(path.join(dir, 'proj'))).yaml).toBe(path.join(dir, 'proj', 'proj.yaml'))
+  })
+  test('label files are found as the file system finds them: through links, never folders, other cases only where it ignores case, and in folders that can\'t be listed', async () => {
+    put('fs/data.yaml', 'train: images\nval: images\nnames: [x]\n')
+    for (const name of ['a', 'b', 'c', 'd', 'e']) put(`fs/images/${name}.jpg`)
+    put('fs/labels/a.txt', '0 0.5 0.5 0.2 0.2\n')
+    put('fs/real/b.txt', '0 0.5 0.5 0.2 0.2\n')
+    try {
+      symlinkSync(path.join(dir, 'fs', 'real', 'b.txt'), path.join(dir, 'fs', 'labels', 'b.txt'))
+    } catch {
+      // Windows makes links only for administrators and in developer mode
+      put('fs/labels/b.txt', '0 0.5 0.5 0.2 0.2\n')
+    }
+    mkdirSync(path.join(dir, 'fs', 'labels', 'c.txt'))
+    put('fs/labels/D.TXT', '0 0.5 0.5 0.2 0.2\n')
+    const read = async () => Object.fromEntries((await readYoloDataset(path.join(dir, 'fs'))).splits[0].items.map((i) => [path.basename(i.image), i.label && path.basename(i.label)]))
+    // Whether D.TXT is d's is the file system's to say, as it is for Ultralytics
+    const caseless = existsSync(path.join(dir, 'fs', 'labels', 'd.txt'))
+    expect(await read()).toEqual({ 'a.jpg': 'a.txt', 'b.jpg': 'b.txt', 'c.jpg': null, 'd.jpg': caseless ? 'd.txt' : null, 'e.jpg': null })
+    // A folder that can be entered but not listed (as root, it can be listed anyway)
+    chmodSync(path.join(dir, 'fs', 'labels'), 0o311)
+    try {
+      expect(await read()).toEqual({ 'a.jpg': 'a.txt', 'b.jpg': 'b.txt', 'c.jpg': null, 'd.jpg': caseless ? 'd.txt' : null, 'e.jpg': null })
+    } finally {
+      chmodSync(path.join(dir, 'fs', 'labels'), 0o755)
+    }
+  })
+  test('a split of more images than a call takes arguments is listed whole, from a folder or a list file', async () => {
+    // Over 125,000 paths spread into a call overflow the stack. So many files would take half a
+    // minute to make, so a folder's listing is made up, and val lists the same images
+    const N = 140_000
+    const ds = path.join(dir, 'ds')
+    const many = path.join(ds, 'images', 'train', 'many')
+    mkdirSync(many, { recursive: true })
+    const names = Array.from({ length: N }, (_, i) => `${i}.jpg`)
+    put('ds/data.yaml', 'train: images/train\nval: val.txt\nnames: [x]\n')
+    put('ds/val.txt', names.map((n) => path.join(many, n)).join('\n'))
+    const entries = names.map((name) => ({ name, isFile: () => true, isDirectory: () => false, isSymbolicLink: () => false }))
+    const readdir = fsp.readdir.bind(fsp)
+    vi.spyOn(fsp, 'readdir').mockImplementation(((p: string, o: object) => (p === many ? Promise.resolve(entries) : readdir(p, o as never))) as never)
+    const d = await readYoloDataset(ds)
+    expect(d.splits.map((s) => [s.name, s.items.length])).toEqual([['train', N], ['val', N]])
+    expect(d.issues.map((i) => [i.code, i.message])).toEqual([
+      ['yolo-two-splits', `${N} images are in both train and val`],
+      ['yolo-no-labels', `None of the ${N} images has a label file where Ultralytics looks (labels for the last images folder in its path, else beside it), so they'd train as backgrounds`]
+    ])
   })
 })
 

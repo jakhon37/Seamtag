@@ -8,7 +8,9 @@ import path from 'path'
 import type { Issue, Severity } from '../shared/dataset'
 import { readClasses, YOLO_CLASSES } from '../shared/formats'
 import { pyFloat } from '../shared/pose'
-import { countRows, type DataYaml, guessTask, isYoloImage, labelPathFor, labelText, newRowStats, readDataYaml, type TaskGuess } from '../shared/ultralytics'
+import {
+  countRows, type DataYaml, guessTask, isDatasetYaml, isYoloImage, labelPathFor, labelText, newRowStats, readDataYaml, type TaskGuess
+} from '../shared/ultralytics'
 
 /** An image of the dataset and its label file (null when it has none, a background to Ultralytics); paths are absolute */
 export type YoloItem = { image: string; label: string | null; split: string }
@@ -38,62 +40,141 @@ const stat = (p: string) => fs.stat(p).catch(() => null)
 const isDir = async (p: string) => (await stat(p))?.isDirectory() ?? false
 const isFile = async (p: string) => (await stat(p))?.isFile() ?? false
 
-/** Every file under a folder, as Python's glob('**') lists them: names starting with a dot are left out */
-async function walk(dir: string, seen = new Set<string>()): Promise<string[]> {
+// A tidy folder and a path inside it, joined without path.join's tidying, which takes ten times as long
+const join = (dir: string, rel: string) => (dir.endsWith(path.sep) ? dir + rel : dir + path.sep + rel)
+
+/**
+ * Every file under a folder, as Python's glob('**') lists them: names starting with a dot are left
+ * out. Files are added to `out` one at a time: a folder can hold more of them than a call takes
+ * arguments (about 125,000 with Node's stack), so a list of files is never spread into one.
+ */
+async function walk(dir: string, out: string[] = [], seen = new Set<string>()): Promise<string[]> {
   const real = await fs.realpath(dir).catch(() => dir)
   // A link back up the tree would go round for ever
-  if (seen.has(real)) return []
+  if (seen.has(real)) return out
   seen.add(real)
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
-  const out: string[] = []
   for (const e of entries) {
     if (e.name.startsWith('.')) continue
-    const full = path.join(dir, e.name)
-    const directory = e.isDirectory() || (e.isSymbolicLink() && (await isDir(full)))
-    if (directory) out.push(...(await walk(full, seen)))
+    const full = join(dir, e.name)
+    if (e.isDirectory() || (e.isSymbolicLink() && (await isDir(full)))) await walk(full, out, seen)
     else out.push(full)
   }
   return out
 }
 
 /**
- * Ultralytics' find_dataset_yaml: .yaml files at the top, else anywhere below, else .yml the same
- * way; of several, those named after the folder. Hidden folders aren't searched here.
+ * A check of whether files are there that lists each folder once: a stat of every label file
+ * takes ten seconds for COCO's 118,000. A name a listing holds only in another case or Unicode
+ * form, or as a link or a folder, is left to stat, so the file system decides as Ultralytics'
+ * os.path.isfile would (macOS's and Windows' ignore case), and so are names beyond ASCII that
+ * aren't listed as they are, and every name in a folder that can't be listed.
  */
-function datasetYamls(dir: string, files: string[]): string[] {
-  for (const ext of ['.yaml', '.yml']) {
-    const all = files.filter((f) => path.extname(f).toLowerCase() === ext)
-    if (!all.length) continue
-    const top = all.filter((f) => path.dirname(f) === dir)
-    const found = top.length ? top : all
-    if (found.length === 1) return found
-    const named = found.filter((f) => path.basename(f, path.extname(f)) === path.basename(dir))
-    return named.length ? named : found
+function fileCheck(): (file: string) => Promise<boolean> {
+  type Listing = { files: Set<string>; names: Set<string> } | null
+  const listings = new Map<string, Promise<Listing>>()
+  const ascii = (name: string) => /^[\x00-\x7f]*$/.test(name)
+  // Generous, so anything a file system that ignores case could take for an ASCII name folds alike (a Kelvin sign for k)
+  const fold = (name: string) => (ascii(name) ? name : name.normalize('NFKC').toUpperCase()).toLowerCase()
+  const list = (dir: string) => {
+    let listing = listings.get(dir)
+    if (!listing) {
+      listing = fs.readdir(dir, { withFileTypes: true }).then((entries) => {
+        const files = new Set<string>(), names = new Set<string>()
+        for (const e of entries) {
+          if (e.isFile()) files.add(e.name)
+          names.add(fold(e.name))
+        }
+        return { files, names }
+      }, (e: NodeJS.ErrnoException) => (e.code === 'ENOENT' || e.code === 'ENOTDIR' ? { files: new Set<string>(), names: new Set<string>() } : null))
+      listings.set(dir, listing)
+    }
+    return listing
   }
-  return []
+  return async (file) => {
+    const listing = await list(path.dirname(file))
+    const name = path.basename(file)
+    if (!listing) return isFile(file)
+    if (listing.files.has(name)) return true
+    return (!ascii(name) || listing.names.has(fold(name))) && isFile(file)
+  }
 }
 
 const sortPaths = (files: string[]) => files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+const YAML_FILE = /\.ya?ml$/i
+const stem = (file: string) => path.basename(file, path.extname(file))
+
+/**
+ * A folder's data.yaml, looked for as Ultralytics' find_dataset_yaml looks when check_det_dataset
+ * is given a folder: at the top, and anywhere below only when the top has none; of several, .yaml
+ * before .yml, then the one named after the folder, and here data.yaml after that. Only a
+ * dataset's YAML counts (isDatasetYaml, or a data.yaml at the top, whose problems are then told):
+ * X-AnyLabeling's keypoint file, a model's settings or a training run's args.yaml beside the
+ * images are passed over, so a folder without a dataset's YAML is read as images and labels.
+ * `files` is every file under the folder when it had to be listed.
+ */
+async function findDatasetYaml(dir: string): Promise<{ found: string[]; passed: string[]; files: string[] | null }> {
+  const passed: string[] = []
+  const pick = async (candidates: string[], top: boolean) => {
+    const taken: string[] = []
+    for (let i = 0; i < candidates.length; i += BATCH) {
+      const batch = candidates.slice(i, i + BATCH)
+      const texts = await Promise.all(batch.map((f) => fs.readFile(f, 'utf8').catch(() => null)))
+      batch.forEach((f, j) => {
+        const text = texts[j]
+        ;((top && stem(f).toLowerCase() === 'data') || (text !== null && isDatasetYaml(text)) ? taken : passed).push(f)
+      })
+    }
+    if (taken.length < 2) return taken
+    const yamls = taken.filter((f) => path.extname(f).toLowerCase() === '.yaml')
+    const pool = yamls.length ? yamls : taken
+    for (const named of [pool.filter((f) => stem(f) === path.basename(dir)), pool.filter((f) => stem(f).toLowerCase() === 'data')]) {
+      if (named.length === 1) return named
+    }
+    return pool
+  }
+  const top: string[] = []
+  for (const e of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const full = path.join(dir, e.name)
+    if (!e.name.startsWith('.') && YAML_FILE.test(e.name) && (e.isFile() || (e.isSymbolicLink() && (await isFile(full))))) top.push(full)
+  }
+  let found = await pick(sortPaths(top), true)
+  let files: string[] | null = null
+  if (!found.length) {
+    files = await walk(dir)
+    found = await pick(files.filter((f) => YAML_FILE.test(f) && path.dirname(f) !== dir), false)
+  }
+  return { found, passed, files }
+}
 
 /**
  * The images of the dataset in a folder without data.yaml, by split: the folder after the last
  * images folder in their path (images/train/a.jpg), or before it (Roboflow's train/images/a.jpg)
  */
 function splitOf(root: string, image: string): string {
-  const parts = path.relative(root, image).split(path.sep)
+  const parts = inside(root, image).split(path.sep)
   const folders = parts.slice(0, -1)
   const k = folders.lastIndexOf('images')
   if (k < 0) return ''
   return folders[k + 1] ?? folders[k - 1] ?? ''
 }
 
+// A file's path inside a folder it was listed from, without path.relative, which takes far longer
+const inside = (root: string, file: string) => (file.startsWith(root + path.sep) ? file.slice(root.length + 1) : path.relative(root, file))
+
 const SPLIT_ORDER = ['train', 'val', 'valid', 'validation', 'test']
 const splitRank = (name: string) => (SPLIT_ORDER.includes(name) ? SPLIT_ORDER.indexOf(name) : SPLIT_ORDER.length)
+
+// "a.txt", or "a.txt and 2 more label files", for messages about many files
+const some = (first: string, n: number, kind: string) => (n > 1 ? `${first} and ${n - 1} more ${kind}${n > 2 ? 's' : ''}` : first)
 
 /**
  * A dataset from a data.yaml file, or a folder: its own data.yaml (found as Ultralytics finds it),
  * or, without one, the images under it, split by their folders, with names from a classes.txt at
- * the top or in labels/, or class_0, class_1 and so on. Nothing is written.
+ * the top or in labels/, or class_0, class_1 and so on. A data.yaml's images have their labels
+ * where Ultralytics looks for them, and nowhere else; a folder without one is read in place: the
+ * images folder rule counts from the folder (so folders above it named images don't count), then
+ * a label beside its image is taken, then one where Ultralytics' rule finds it. Nothing is written.
  */
 export async function readYoloDataset(target: string): Promise<YoloDataset> {
   const issues: Issue[] = []
@@ -109,34 +190,44 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
   let yamlFile: string | null = null
   let files: string[] | null = null
   if (info.isFile()) {
-    if (!/\.ya?ml$/i.test(target)) {
+    if (!YAML_FILE.test(target)) {
       say('error', 'yolo-not-yaml', `${path.basename(target)} isn't a data.yaml: pick the dataset's YAML file or its folder`)
       return empty(path.dirname(target), null)
     }
     yamlFile = target
   } else {
-    files = await walk(target)
-    const found = datasetYamls(target, files)
-    if (found.length > 1) {
-      say('error', 'yolo-many-yaml', `${target} holds ${found.length} YAML files (${found.map((f) => path.relative(target, f)).join(', ')}): pick the dataset's own`)
+    const search = await findDatasetYaml(target)
+    if (search.found.length > 1) {
+      say('error', 'yolo-many-yaml', `${target} holds ${search.found.length} datasets' YAML files (${search.found.map((f) => path.relative(target, f)).join(', ')}): pick the dataset's own`)
       return empty(target, null)
     }
-    yamlFile = found[0] ?? null
+    yamlFile = search.found[0] ?? null
+    files = search.files
+    if (!yamlFile && search.passed.length) {
+      const n = search.passed.length
+      say('info', 'yolo-yaml-passed', `${some(path.relative(target, search.passed[0]), n, 'YAML file')} ${n > 1 ? "aren't datasets'" : "isn't a dataset's"} (there's no train or val in ${n > 1 ? 'them' : 'it'}), so ${path.basename(target)} is read as images and labels`)
+    }
   }
 
   let data: DataYaml
   let root: string
   const splits: YoloSplit[] = []
+  const exists = fileCheck()
   if (yamlFile) {
-    // Ultralytics reads it as UTF-8, leaving out what isn't
-    const read = readDataYaml(await fs.readFile(yamlFile, 'utf8'), path.basename(yamlFile))
+    // Ultralytics reads it as UTF-8
+    const text = await fs.readFile(yamlFile, 'utf8').catch(() => null)
+    if (text === null) {
+      say('error', 'yolo-yaml', `${path.basename(yamlFile)} can't be read, so the dataset can't be`)
+      return empty(path.dirname(yamlFile), yamlFile)
+    }
+    const read = readDataYaml(text, path.basename(yamlFile))
     data = read.data
     issues.push(...read.issues)
     root = await rootOf(data.path, path.dirname(yamlFile), path.basename(yamlFile), say)
     for (const name of ['train', 'val', 'test'] as const) {
       const spec = data[name]
       if (!spec) continue
-      const images = await splitImages(root, name, spec, say)
+      const images = await splitImages(root, name, spec, say, exists)
       splits.push({ name, items: images.map((image) => ({ image, label: null, split: name })) })
     }
   } else {
@@ -161,13 +252,53 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
     }
   }
 
-  // Each image's label file, looked for a few at a time
+  // Each image's label file, looked for once however many splits hold it
   const items = splits.flatMap((s) => s.items)
-  for (let i = 0; i < items.length; i += BATCH) {
-    await Promise.all(items.slice(i, i + BATCH).map(async (item) => {
-      const label = labelPathFor(item.image, path.sep)
-      if (await isFile(label)) item.label = label
-    }))
+  const labelOf = new Map<string, string | null>()
+  for (const item of items) labelOf.set(item.image, null)
+  const beside = new Set<string>(), outside = new Set<string>()
+  const unreached = new Map<string, { near: string; rule: string }>()
+  const lookUp = async (image: string) => {
+    // img2label_paths on the whole path, as Ultralytics trains a data.yaml's images; inside the folder for one without
+    const rule = yamlFile ? labelPathFor(image, path.sep) : join(root, labelPathFor(inside(root, image), path.sep))
+    if (await exists(rule)) {
+      labelOf.set(image, rule)
+      return
+    }
+    // An image's name ends with its format after a dot, so this is labelPathFor with no images folder
+    const near = `${image.slice(0, image.lastIndexOf('.'))}.txt`
+    if (near !== rule && (await exists(near))) {
+      if (yamlFile) unreached.set(image, { near, rule })
+      else {
+        labelOf.set(image, near)
+        beside.add(near)
+      }
+      return
+    }
+    if (yamlFile) return
+    // A dataset's images folder picked on its own has its labels beside it, in ../labels
+    const whole = labelPathFor(image, path.sep)
+    if (whole !== rule && whole !== near && (await exists(whole))) {
+      labelOf.set(image, whole)
+      outside.add(whole)
+    }
+  }
+  const images = [...labelOf.keys()]
+  for (let i = 0; i < images.length; i += BATCH) await Promise.all(images.slice(i, i + BATCH).map(lookUp))
+  for (const item of items) item.label = labelOf.get(item.image) ?? null
+  const rel = (f: string) => path.relative(root, f)
+  if (beside.size) {
+    const n = beside.size
+    say('info', 'yolo-label-beside', `${some(rel([...beside][0]), n, 'label file')} ${n > 1 ? 'are beside their images' : 'is beside its image'} in an images folder, so ${n > 1 ? "they're" : "it's"} read from there, though Ultralytics would look in labels/`)
+  }
+  if (outside.size) {
+    const n = outside.size
+    say('info', 'yolo-label-outside', `${some(rel([...outside][0]), n, 'label file')} ${n > 1 ? 'are' : 'is'} outside ${path.basename(root)}, where Ultralytics' rule puts ${n > 1 ? 'them' : 'it'} (the last images folder in an image's path becomes labels), so ${n > 1 ? "they're" : "it's"} read from there`)
+  }
+  if (unreached.size) {
+    const n = unreached.size
+    const [image, { near, rule }] = [...unreached][0]
+    say('warning', 'yolo-label-unreached', `${some(rel(near), n, 'label file')} ${n > 1 ? 'are beside their images' : 'is beside its image'}, but Ultralytics looks for ${n > 1 ? 'their labels' : 'its labels'} in ${rel(path.dirname(rule))} (the last images folder in the path becomes labels), so it would train ${n > 1 ? 'those images as backgrounds' : 'that image as a background'}, and ${n > 1 ? "they're" : "it's"} read as such here: move the label files there`, image)
   }
   const owner = new Map<string, string>()
   const seen = new Map<string, string>()
@@ -183,6 +314,12 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
     }
   }
   for (const [pair, n] of both) say('info', 'yolo-two-splits', `${n === 1 ? '1 image is' : `${n} images are`} in both ${pair}`)
+  if (seen.size && !owner.size && !unreached.size) {
+    const all = seen.size === 1 ? 'The one image has no' : `None of the ${seen.size} images has a`
+    say('warning', 'yolo-no-labels', yamlFile
+      ? `${all} label file where Ultralytics looks (labels for the last images folder in its path, else beside it), so ${seen.size === 1 ? 'it' : 'they'}'d train as ${seen.size === 1 ? 'a background' : 'backgrounds'}`
+      : `${all} label file beside it or in labels/, so ${seen.size === 1 ? 'it' : 'they'}'d read as ${seen.size === 1 ? 'a background' : 'backgrounds'}`)
+  }
 
   // What the rows look like, and the highest class number for a folder with no names
   const stats = newRowStats()
@@ -209,8 +346,7 @@ export async function readYoloDataset(target: string): Promise<YoloDataset> {
     data.names = Array.from({ length: top + 1 }, (_, i) => `class_${i}`)
     if (top >= 0) say('info', 'yolo-no-yaml', `${path.basename(target)} has neither data.yaml nor ${YOLO_CLASSES}, so the classes are named class_0 to class_${top}`)
   }
-  const images = splits.reduce((n, s) => n + s.items.length, 0)
-  if (!images) say('error', 'yolo-no-images', `No images were found${yamlFile ? ` for ${path.basename(yamlFile)}'s splits` : ` in ${target}`}`)
+  if (!seen.size) say('error', 'yolo-no-images', `No images were found${yamlFile ? ` for ${path.basename(yamlFile)}'s splits` : ` in ${target}`}`)
   return {
     yaml: yamlFile, root, names: data.names, kptShape: data.kptShape, kptNames: data.kptNames, flipIdx: data.flipIdx, splits,
     guess: guessTask(stats, data.kptShape), issues
@@ -234,17 +370,23 @@ async function rootOf(given: string | null, yamlDir: string, file: string, say: 
  * A split's images, as get_img_files lists them: a folder's images at any depth, an image, or a
  * text file listing images, where ./ lines are relative to the list. Ultralytics takes other
  * lines from the folder it runs in; here they're tried from the list's folder and the root, and
- * CVAT's data/ prefix is dropped. When most of a list isn't there, images/<split> is read.
+ * CVAT's data/ prefix is dropped. When most of a list isn't there, images/<split> is read. Lists
+ * are added a file at a time, never spread into a call, as walk explains.
  */
-async function splitImages(root: string, split: string, spec: string | string[], say: (s: Severity, code: string, m: string) => void): Promise<string[]> {
+async function splitImages(
+  root: string, split: string, spec: string | string[], say: (s: Severity, code: string, m: string) => void, exists: (file: string) => Promise<boolean>
+): Promise<string[]> {
   const entries: string[] = []
   if (typeof spec === 'string') {
     // Roboflow writes ../train/images beside its train folder; Ultralytics retries without the ../
     let p = path.resolve(root, spec)
     if (!(await stat(p)) && spec.startsWith('../')) p = path.resolve(root, spec.slice(3))
     entries.push(p)
-  } else entries.push(...spec.map((s) => path.resolve(root, s)))
+  } else for (const s of spec) entries.push(path.resolve(root, s))
   const images: string[] = []
+  const add = (files: string[]) => {
+    for (const f of files) if (isYoloImage(f)) images.push(f)
+  }
   for (const p of entries) {
     const info = await stat(p)
     if (!info) {
@@ -252,22 +394,28 @@ async function splitImages(root: string, split: string, spec: string | string[],
       continue
     }
     if (info.isDirectory()) {
-      images.push(...(await walk(p)).filter(isYoloImage))
+      add(await walk(p))
       continue
     }
     if (isYoloImage(p)) {
       images.push(p)
       continue
     }
-    const listed = (await fs.readFile(p, 'utf8')).trim().split(/\r\n|\r|\n/).map((l) => l.trim()).filter(Boolean)
+    const text = await fs.readFile(p, 'utf8').catch(() => null)
+    if (text === null) {
+      say('warning', 'yolo-split-missing', `${split}: ${path.relative(root, p)} can't be read, so its images are left out`)
+      continue
+    }
+    const listed = text.trim().split(/\r\n|\r|\n/).map((l) => l.trim()).filter(Boolean)
     const dir = path.dirname(p)
     const found: string[] = []
     const missing: string[] = []
     const where = async (line: string) => {
+      // get_img_files turns / into the system's separator first, so C:/data/a.jpg is C:\data\a.jpg on Windows
       const tries = line.startsWith('./') ? [path.resolve(dir, line)]
-        : path.isAbsolute(line) ? [line]
+        : path.isAbsolute(line) ? [path.resolve(line)]
           : [path.resolve(dir, line), path.resolve(root, line), ...(line.startsWith('data/') ? [path.resolve(root, line.slice(5))] : [])]
-      for (const t of tries) if (await isFile(t)) return t
+      for (const t of tries) if (await exists(t)) return t
       return null
     }
     for (let i = 0; i < listed.length; i += BATCH) {
@@ -277,11 +425,11 @@ async function splitImages(root: string, split: string, spec: string | string[],
     const fallback = path.join(root, 'images', split)
     if (missing.length && missing.length * 2 >= listed.length && (await isDir(fallback))) {
       say('info', 'yolo-list-fallback', `${split}: ${missing.length} of the ${listed.length} images ${path.basename(p)} lists aren't there, so ${path.relative(root, fallback)} is read instead`)
-      images.push(...(await walk(fallback)).filter(isYoloImage))
+      add(await walk(fallback))
       continue
     }
     if (missing.length) say('warning', 'yolo-list-missing', `${split}: ${missing.length} of the ${listed.length} images ${path.basename(p)} lists aren't there, such as ${missing[0]}`)
-    images.push(...found)
+    add(found)
   }
-  return sortPaths(images.filter(isYoloImage))
+  return sortPaths(images)
 }

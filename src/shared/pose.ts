@@ -43,13 +43,26 @@ function asciiDigits(s: string) {
   })
 }
 
+// Printable ASCII has no whitespace to strip and no digits but 0 to 9, so nearly every value in a
+// label file skips both steps, which cost 30 times what Number() does
+const PRINTABLE = /^[\x21-\x7e]*$/
+const NOT_ASCII = /[^\x00-\x7f]/
+const pyText = (s: string) => {
+  if (PRINTABLE.test(s)) return s
+  const t = s.replace(TRIM, '')
+  return NOT_ASCII.test(t) ? asciiDigits(t) : t
+}
+
 const PY_DIGITS = '\\d(?:_?\\d)*'
 const PY_FLOAT = new RegExp(`^[+-]?(?:(?:${PY_DIGITS}(?:\\.(?:${PY_DIGITS})?)?|\\.${PY_DIGITS})(?:[eE][+-]?${PY_DIGITS})?|inf|infinity|nan)$`, 'i')
 const PY_INT = new RegExp(`^[+-]?${PY_DIGITS}$`)
+// Decimals without underscores, which Number() reads as float() does
+const DECIMAL = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/
 
 /** Python's float() of a string, or null where it raises ValueError */
 export function pyFloat(s: string): number | null {
-  const t = asciiDigits(s.replace(TRIM, ''))
+  const t = pyText(s)
+  if (DECIMAL.test(t)) return Number(t)
   if (!PY_FLOAT.test(t)) return null
   const lower = t.toLowerCase().replace(/_/g, '')
   if (/nan$/.test(lower)) return NaN
@@ -59,7 +72,7 @@ export function pyFloat(s: string): number | null {
 
 /** Python's int() of a string, or null where it raises ValueError */
 export function pyInt(s: string): number | null {
-  const t = asciiDigits(s.replace(TRIM, ''))
+  const t = pyText(s)
   return PY_INT.test(t) ? Number(t.replace(/_/g, '')) : null
 }
 
@@ -334,7 +347,10 @@ export function poseInstances(image: DatasetImage, schema: KeypointSchema): { in
       label = fits[0]
       const xs = named.map((i) => image.shapes[i].points[0][0]), ys = named.map((i) => image.shapes[i].points[0][1])
       box = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]
-      say('warning', 'pose-no-box', `group ${g} has keypoints of ${label} but no box, so the box around its points is used`, named[0])
+      const flat = !(box[2] > box[0] && box[3] > box[1])
+      say('warning', 'pose-no-box', flat
+        ? `group ${g} has keypoints of ${label} but no box, and the box around ${named.length === 1 ? 'its one point' : 'its points, which lie in a line,'} has no area: add a box with the class's label`
+        : `group ${g} has keypoints of ${label} but no box, so the box around its points is used`, named[0])
     }
     const names = schema.classes[label]
     const keypoints: PoseInstance['keypoints'] = names.map(() => null)

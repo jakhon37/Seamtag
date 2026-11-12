@@ -58,6 +58,15 @@ type Row = { line: number; tokens: string[] }
 const rowsOf = (text: string): Row[] =>
   text.split(LINES).map((l, i) => ({ line: i + 1, tokens: l.split(SPLIT).filter(Boolean) })).filter((r) => r.tokens.length)
 
+const BOM = '\ufeff'
+// Characters that don't show, such as a byte order mark, as Python's repr() writes them, so a
+// message never quotes a value whose fault can't be seen
+const shown = (token: string) => token.replace(/\p{C}/gu, (c) => {
+  const code = c.codePointAt(0)!
+  const [prefix, digits] = code <= 0xff ? ['x', 2] : code <= 0xffff ? ['u', 4] : ['U', 8]
+  return `\\${prefix}${code.toString(16).padStart(digits, '0')}`
+})
+
 /** A label file's bytes as Python reads them with encoding="utf-8": null when they aren't UTF-8. A byte order mark stays. */
 export function labelText(bytes: Uint8Array): string | null {
   try {
@@ -118,6 +127,8 @@ export function verifyRows(text: string | null, task: YoloTask, nc: number, kptS
   const base: Verdict = { status: 'ok', reason: null, line: null, repeated: [], outline: false, boxes: [], outlines: [], keypoints: null }
   if (text === null) return { ...base, status: 'missing' }
   const corrupt = (reason: string, line: number | null): Verdict => ({ ...base, status: 'corrupt', reason, line })
+  // strip() leaves a byte order mark on the first value, and every path ends in float() of it
+  if (text.startsWith(BOM)) return corrupt('it starts with a byte order mark, which Ultralytics reads as part of the first number', 1)
   const pose = task === 'pose'
   const [nkpt, ndim] = kptShape ?? [0, 0]
   let rows = rowsOf(text)
@@ -130,11 +141,11 @@ export function verifyRows(text: string | null, task: YoloTask, nc: number, kptS
   if (outline) {
     const box = rows.find((r) => r.tokens.length === 5)
     if (box) return corrupt('it mixes box rows of 5 values with outline rows of 7 or more', box.line)
-    for (const r of rows) if (pyFloat(r.tokens[0]) === null) return corrupt(`line ${r.line}'s class, ${r.tokens[0]}, isn't a number`, r.line)
+    for (const r of rows) if (pyFloat(r.tokens[0]) === null) return corrupt(`line ${r.line}'s class, ${shown(r.tokens[0])}, isn't a number`, r.line)
     for (const r of rows) {
       const values = r.tokens.slice(1).map(pyFloat)
       const bad = values.findIndex((v) => v === null)
-      if (bad >= 0) return corrupt(`line ${r.line} has ${r.tokens[bad + 1]}, which isn't a number`, r.line)
+      if (bad >= 0) return corrupt(`line ${r.line} has ${shown(r.tokens[bad + 1])}, which isn't a number`, r.line)
       if (values.length % 2) return corrupt(`line ${r.line} has an odd number of coordinates`, r.line)
       if (!values.length) return corrupt(`line ${r.line} has a class but no points`, r.line)
       const points: number[][] = []
@@ -151,7 +162,7 @@ export function verifyRows(text: string | null, task: YoloTask, nc: number, kptS
     for (const r of rows) {
       const values = r.tokens.map(pyFloat)
       const bad = values.findIndex((v) => v === null)
-      if (bad >= 0) return corrupt(`line ${r.line} has ${r.tokens[bad]}, which isn't a number`, r.line)
+      if (bad >= 0) return corrupt(`line ${r.line} has ${shown(r.tokens[bad])}, which isn't a number`, r.line)
       lb.push(values.map((v) => f32(v!)))
     }
   }
@@ -179,10 +190,10 @@ export function verifyRows(text: string | null, task: YoloTask, nc: number, kptS
   }
   // "non-integer class labels"
   const fraction = lb.findIndex((r) => r[0] % 1 !== 0)
-  if (fraction >= 0) return corrupt(`line ${rows[fraction].line}'s class, ${rows[fraction].tokens[0]}, isn't a whole number`, rows[fraction].line)
+  if (fraction >= 0) return corrupt(`line ${rows[fraction].line}'s class, ${shown(rows[fraction].tokens[0])}, isn't a whole number`, rows[fraction].line)
   // "Label class 3 exceeds dataset class count 3"
   const past = lb.findIndex((r) => !(r[0] < nc))
-  if (past >= 0) return corrupt(`line ${rows[past].line}'s class, ${rows[past].tokens[0]}, is past the ${nc} classes (0 to ${nc - 1})`, rows[past].line)
+  if (past >= 0) return corrupt(`line ${rows[past].line}'s class, ${shown(rows[past].tokens[0])}, is past the ${nc} classes (0 to ${nc - 1})`, rows[past].line)
   // np.unique over the rows; "distinct polygons can share a class and box", so outlines are compared again with their points, bit for bit
   const repeats = (key: (r: number[], i: number) => string) => {
     const seen = new Set<string>()
@@ -328,8 +339,9 @@ function rowWriter(image: DatasetImage) {
       const [a, c] = [x0, x1].map((v) => Math.min(Math.max(v, 0), W)), [b, d] = [y0, y1].map((v) => Math.min(Math.max(v, 0), H))
       return `${pyFixed((a + c) / 2 / W)} ${pyFixed((b + d) / 2 / H)} ${pyFixed((c - a) / W)} ${pyFixed((d - b) / H)}`
     },
-    /** Does a box reach into the image? A box of no size counts when it's inside. */
-    meets: ([x0, y0, x1, y1]: Box) => x1 >= 0 && y1 >= 0 && x0 <= W && y0 <= H,
+    /** Why a box can't be written: it has no width or height, or no part of it is in the image */
+    misplaced: ([x0, y0, x1, y1]: Box): 'flat' | 'outside' | null =>
+      !(x1 - x0 > 0 && y1 - y0 > 0) ? 'flat' : !(Math.min(x1, W) - Math.max(x0, 0) > 0 && Math.min(y1, H) - Math.max(y0, 0) > 0) ? 'outside' : null,
     // Cut at the image's edge: shapes a pixel or less past it were drawn to the edge
     cut(box: Box, label: string, shape?: number) {
       const over = Math.max(-box[0], -box[1], box[2] - W, box[3] - H)
@@ -362,7 +374,15 @@ export function poseRows(image: DatasetImage, instances: PoseInstance[], classes
       w.say('warning', 'yolo-unknown-label', `${p.label} isn't in the class list, so it's left out`, p.shapes[0])
       continue
     }
-    if (!w.meets(p.box)) {
+    const where = w.misplaced(p.box)
+    // Ultralytics trains without an object whose box has no width or height, keypoints and all:
+    // Instances.remove_zero_area_boxes after Mosaic, RandomPerspective.box_candidates without it
+    // (ultralytics/data/augment.py), though verify_image_label takes the row
+    if (where === 'flat') {
+      w.say('warning', 'yolo-no-area', `${p.label}'s box has no width or height, so it's left out with its keypoints, as Ultralytics would drop it in training`, p.shapes[0])
+      continue
+    }
+    if (where === 'outside') {
       w.say('warning', 'yolo-outside', `${p.label} lies outside the image, so it's left out`, p.shapes[0])
       continue
     }
@@ -415,7 +435,6 @@ export function labelRows(image: DatasetImage, task: YoloTask, classes: string[]
   const w = rowWriter(image)
   if (!w.ready()) return w.done()
   const { say } = w
-  const { width: W, height: H } = image
   image.shapes.forEach((s, i) => {
     const type = s.shape_type
     if (!CLOSED_TYPES.has(type)) return say('warning', 'yolo-open-shape', `${s.label} is ${KIND[type] ?? `a ${type}`}, which YOLO ${TASK_WORD[task]} files can't hold, so it's left out`, i)
@@ -425,10 +444,9 @@ export function labelRows(image: DatasetImage, task: YoloTask, classes: string[]
     if (type === 'mask' && !mask) return say('error', 'yolo-mask-unreadable', `${s.label}'s mask can't be decoded, so it's left out`, i)
     const box = mask ? pixelBox(mask) : shapeBox(s)
     if (!box) return say('warning', 'yolo-no-area', `${s.label} has no pixels, so it's left out`, i)
-    if (!(box[2] - box[0] > 0 && box[3] - box[1] > 0)) return say('warning', 'yolo-no-area', `${s.label} has no area, so it's left out`, i)
-    if (!(Math.min(box[2], W) - Math.max(box[0], 0) > 0 && Math.min(box[3], H) - Math.max(box[1], 0) > 0)) {
-      return say('warning', 'yolo-outside', `${s.label} lies outside the image, so it's left out`, i)
-    }
+    const where = w.misplaced(box)
+    if (where === 'flat') return say('warning', 'yolo-no-area', `${s.label} has no area, so it's left out`, i)
+    if (where === 'outside') return say('warning', 'yolo-outside', `${s.label} lies outside the image, so it's left out`, i)
     w.cut(box, s.label, i)
     if (task === 'detect') return w.add(`${cls} ${w.box(box)}`, s.label, i)
     let outlines: number[][][]
@@ -529,6 +547,21 @@ export type DataYaml = {
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const typeName = (v: unknown) => (Array.isArray(v) ? 'a list' : isObject(v) ? 'a map' : typeof v === 'number' ? 'a number' : typeof v === 'boolean' ? 'true or false' : 'text')
+const loadYaml = (text: string) => yaml.load(text.startsWith(BOM) ? text.slice(1) : text, { schema: ULTRALYTICS_YAML })
+
+/**
+ * Is this YAML a dataset's? check_det_dataset needs train and val, each a folder, a file or a
+ * list, so a map holding one of them (or validation, read as val) is taken for one. X-AnyLabeling's
+ * keypoint file, a model's settings and a training run's args.yaml (val: true) aren't.
+ */
+export function isDatasetYaml(text: string): boolean {
+  try {
+    const raw = loadYaml(text)
+    return isObject(raw) && ['train', 'val', 'validation'].some((k) => typeof raw[k] === 'string' || Array.isArray(raw[k]))
+  } catch {
+    return false
+  }
+}
 
 /**
  * data.yaml, read as Ultralytics 8.4.211 reads it (its own YAML reader, then check_det_dataset's
@@ -542,7 +575,7 @@ export function readDataYaml(text: string, file = 'data.yaml'): { data: DataYaml
   const say = (severity: Severity, code: string, message: string) => issues.push(issue(severity, code, null, `${file} ${message}`))
   let raw: unknown
   try {
-    raw = yaml.load(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text, { schema: ULTRALYTICS_YAML })
+    raw = loadYaml(text)
   } catch (e) {
     say('error', 'yolo-yaml', `isn't valid YAML (${(e as Error).message.split('\n')[0]}), so it can't be read`)
     return { data, issues }
@@ -736,7 +769,9 @@ export function guessTask(stats: RowStats, kptShape: [number, number] | null = n
     const off = stats.rows - count(want)
     return guess('pose', `data.yaml gives kpt_shape [${kptShape.join(', ')}]${off ? `, though ${off} of the ${stats.rows} rows don't have the ${want} values it needs` : ''}`, [], kptShape)
   }
-  if (!lengths.length) return guess('detect', 'The label files have no rows, so every image is a background', [], null, false)
+  if (!lengths.length) {
+    return guess('detect', stats.files ? 'The label files have no rows, so every image is a background' : 'No label files were found, so every image is a background', [], null, false)
+  }
   const values = lengths.join(', ')
   if (lengths.length === 1) {
     const n = lengths[0]
@@ -802,7 +837,13 @@ export function readRows(text: string, o: ReadOptions): { shapes: Shape[]; issue
   const file = o.file ?? 'The label file'
   const say = (severity: Severity, code: string, message: string) => issues.push(issue(severity, code, o.image ?? null, `${file}${message}`))
   const shapes: Shape[] = []
-  if (verdict.status === 'corrupt') say('warning', 'yolo-corrupt', `: Ultralytics would leave this image out of training, as ${verdict.reason}`)
+  // Python keeps a byte order mark, as Windows Notepad's older UTF-8 saves write one; the rows are read without it
+  const bom = text.startsWith(BOM)
+  if (bom) {
+    const rest = verifyRows(text.slice(1), o.task, o.names.length, o.kptShape ?? null)
+    const also = rest.status === 'corrupt' ? `, as it would without the mark, since ${rest.reason}` : ''
+    say('warning', 'yolo-corrupt', `: it starts with a byte order mark, which Ultralytics reads as part of the first number, so it would leave this image out of training${also}; it's read here without the mark`)
+  } else if (verdict.status === 'corrupt') say('warning', 'yolo-corrupt', `: Ultralytics would leave this image out of training, as ${verdict.reason}`)
   if (verdict.repeated.length) say('info', 'yolo-repeated', `: ${verdict.repeated.length === 1 ? 'a row repeats' : `${verdict.repeated.length} rows repeat`} an earlier one and ${verdict.repeated.length === 1 ? "isn't" : "aren't"} read, as Ultralytics drops them`)
   const W = o.width, H = o.height
   const [nkpt, ndim] = o.kptShape ?? [0, 0]
@@ -818,19 +859,19 @@ export function readRows(text: string, o: ReadOptions): { shapes: Shape[]; issue
     for (let k = 1; k + 1 < v.length; k += 2) out.push([pixel(v[k], W), pixel(v[k + 1], H)])
     return out
   }
-  for (const { line, tokens } of rowsOf(text)) {
+  for (const { line, tokens } of rowsOf(bom ? text.slice(1) : text)) {
     if (skip.has(line)) continue
     const at = `: line ${line}`
     const parsed = tokens.map(pyFloat)
     const bad = parsed.findIndex((v) => v === null || !Number.isFinite(v))
     if (bad >= 0) {
-      say('warning', 'yolo-row', `${at} has ${tokens[bad]}, which isn't a number, so it's left out`)
+      say('warning', 'yolo-row', `${at} has ${shown(tokens[bad])}, which isn't a number, so it's left out`)
       continue
     }
     let v = parsed as number[]
     const c = f32(v[0])
     if (!Number.isInteger(c) || c < 0 || c >= o.names.length) {
-      say('warning', 'yolo-row', `${at}'s class, ${tokens[0]}, isn't one of the ${o.names.length} classes (0 to ${o.names.length - 1}), so it's left out`)
+      say('warning', 'yolo-row', `${at}'s class, ${shown(tokens[0])}, isn't one of the ${o.names.length} classes (0 to ${o.names.length - 1}), so it's left out`)
       continue
     }
     const label = o.names[c]

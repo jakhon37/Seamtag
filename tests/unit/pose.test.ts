@@ -104,6 +104,15 @@ describe('posed objects in an image', () => {
     expect(two.instances).toEqual([])
     expect(two.issues[0]).toMatchObject({ severity: 'error', code: 'pose-no-class' })
   })
+  test("a group without a box whose points lie in a line, or that has one point, is told its box has no area", () => {
+    const line = poseInstances(image([point('nose', 4, 20, 30), point('left_eye', 4, 20, 10)]), SCHEMA)
+    expect(line.instances[0].box).toEqual([20, 10, 20, 30])
+    expect(line.issues.map((i) => i.message)).toEqual(["a.jpg: group 4 has keypoints of person but no box, and the box around its points, which lie in a line, has no area: add a box with the class's label"])
+    const one = poseInstances(image([point('thumb', 2, 5, 5)]), SCHEMA)
+    expect(one.issues.map((i) => [i.severity, i.code, i.message])).toEqual([
+      ['warning', 'pose-no-box', "a.jpg: group 2 has keypoints of hand but no box, and the box around its one point has no area: add a box with the class's label"]
+    ])
+  })
   test('two boxes in a group, unknown keypoint names and repeated ones are errors, which stop a pose export', () => {
     const { instances, issues } = poseInstances(image([
       box('person', 1), box('person', 1), point('nose', 1, 20, 20),
@@ -151,5 +160,21 @@ describe("Python's float() and int(), which Ultralytics reads numbers with", () 
     ]
     for (const [s, want] of cases) expect(pyFloat(s), s).toEqual(want)
     expect([pyInt('007'), pyInt('1_000'), pyInt('-3'), pyInt('1.0'), pyInt('0x1f')]).toEqual([7, 1000, -3, null, null])
+  })
+  test("plain values, which label files are made of, read within a few times what Number() takes", () => {
+    // Every token of every label file is read this way, 40 million of them in a COCO-sized dataset
+    const values = Array.from({ length: 100000 }, (_, i) => (((i * 7919) % 1000003) / 1000003).toFixed(6))
+    const fastest = (read: (s: string) => number | null) => {
+      let best = Infinity, sum = 0
+      for (let k = 0; k < 3; k++) {
+        const t = performance.now()
+        for (const v of values) sum += read(v) ?? 0
+        best = Math.min(best, performance.now() - t)
+      }
+      // The sum is used, so no read can be left out as unused
+      expect(sum).toBeGreaterThan(0)
+      return best
+    }
+    expect(fastest(pyFloat)).toBeLessThan(10 * fastest(Number))
   })
 })
