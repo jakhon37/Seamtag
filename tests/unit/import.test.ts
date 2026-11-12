@@ -11,7 +11,7 @@ import { setFolding } from '../../src/main/names'
 import { openProject, serial, setTrash } from '../../src/main/project'
 import { type CocoEntry, readCoco, writeCoco } from '../../src/shared/coco'
 import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
-import { newShape, parseLabelFile, type Shape } from '../../src/shared/labelfile'
+import { newShape, parseLabelFile, type Shape, shapeRecord } from '../../src/shared/labelfile'
 import { poseInstances, writePoseYaml } from '../../src/shared/pose'
 import { rleToMaskBits } from '../../src/shared/rle'
 import { labelRows, writeDataYaml } from '../../src/shared/ultralytics'
@@ -147,10 +147,10 @@ describe('a COCO file', () => {
     const p = await read(root, { kind: 'coco', path: file, labels: ['cat'] })
     expect([p.images, p.matched, p.byName, p.base, p.missing, p.fresh, p.labelled, p.blocked]).toEqual([3, 3, 0, '', 0, 3, 0, 0])
     expect(p.labels).toEqual([
-      { label: 'cat', fresh: 2, labelled: 0, listed: true },
-      { label: 'ball', fresh: 1, labelled: 0, listed: false },
-      { label: 'blob', fresh: 1, labelled: 0, listed: false },
-      { label: 'dog', fresh: 1, labelled: 0, listed: false }
+      { label: 'cat', fresh: 2, labelled: 0, added: 0, listed: true },
+      { label: 'ball', fresh: 1, labelled: 0, added: 0, listed: false },
+      { label: 'blob', fresh: 1, labelled: 0, added: 0, listed: false },
+      { label: 'dog', fresh: 1, labelled: 0, added: 0, listed: false }
     ])
     const r = await save()
     expect([r.written, r.total, r.done, r.shapes, r.trashed, r.stopped]).toEqual([3, 3, 3, 5, 0, false])
@@ -544,6 +544,28 @@ describe('images that have labels', () => {
     expect(group(again, 'unchanged')!.count).toBe(2)
   })
 
+  test('Add counts what it writes: the shapes an image has already, and images that have every one, which it leaves as they are without writing or counting them', async () => {
+    const dir = folder()
+    for (const n of ['a.png', 'b.png', 'c.png', 'd.png']) await png(path.join(dir, n))
+    // a has every imported shape, b the dog only, d none of them; c has no labels. Written as the app writes shapes, which the imported ones are compared with.
+    const saved = (image: string, shapes: Shape[]) => labelme(image, shapes.map((sh) => shapeRecord(sh)) as unknown as Shape[])
+    write(dir, { 'a.json': saved('a.png', [...own(), ...imported()]), 'b.json': saved('b.png', [...own(), imported()[0]]), 'd.json': saved('d.png', own()) })
+    const before = text(dir, 'a.json')
+    const file = cocoFile(path.join(folder(), 'c.json'), ['a.png', 'b.png', 'c.png', 'd.png'].map((n) => entry(n, imported())), ['dog', 'person'])
+    const root = await open(dir)
+    const p = await read(root, { kind: 'coco', path: file })
+    expect([p.fresh, p.labelled, p.empty, p.unchanged]).toEqual([1, 3, 0, 1])
+    // Replace writes every shape into the labelled images; Add only those they haven't
+    expect(p.labels.map((l) => [l.label, l.fresh, l.labelled, l.added])).toEqual([['dog', 1, 3, 1], ['person', 1, 3, 2]])
+    const told: [number, number][] = []
+    const r = await writeImport('add', (at) => told.push([at.done, at.total]), (b) => batches.push(b as Batch))
+    expect([r.total, r.written, r.shapes, r.repeated]).toEqual([3, 3, 5, 3])
+    expect([told[0], told[told.length - 1]]).toEqual([[0, 3], [3, 3]])
+    expect(group(r, 'unchanged')!.rows).toEqual(["a.png has all 2 imported shapes already, so it's left as it is"])
+    expect(text(dir, 'a.json')).toBe(before)
+    expect(brief(doc(dir, 'b.json').shapes)).toEqual(brief([...own(), imported()[0], { ...imported()[1], group_id: 2 }]))
+  })
+
   test('Replace writes the new file beside the old one, sends the old one to the trash, then gives the new one its name', async () => {
     const { dir, file, root } = await setUp()
     const before = text(dir, 'a.json')
@@ -833,6 +855,11 @@ describe('a YOLO dataset', () => {
     expect([q.task!.task, q.task!.guess, q.fresh]).toEqual(['segment', 'obb', 1])
     await save()
     expect(doc(dir, 'a.json').shapes.map((s) => s.shape_type)).toEqual(['polygon'])
+    // Read again as the guess, OBB, the image hasn't the rotated box; as Segment it has the outline, which Add leaves as it is
+    const obb = await read(root, { kind: 'yolo', path: ds })
+    expect([obb.task!.task, obb.labelled, obb.unchanged, obb.labels.map((l) => [l.label, l.labelled, l.added])]).toEqual(['obb', 1, 0, [['plate', 1, 1]]])
+    const outline = await read(root, { kind: 'yolo', path: ds, task: 'segment' })
+    expect([outline.unchanged, outline.labels.map((l) => [l.label, l.labelled, l.added])]).toEqual([1, [['plate', 1, 0]]])
   })
 
   test("pose keypoints are named by data.yaml's kpt_names, else a keypoint file, else kp0, kp1 and on, which the window is told", async () => {

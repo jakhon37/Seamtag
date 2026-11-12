@@ -46,8 +46,11 @@ export type ImportProgress = { phase: string; done: number; total: number }
 /** Issues of one kind: how many, and the first few; the rest come a page at a time from importRows */
 export type IssueGroup = { code: string; severity: Severity; title: string; count: number; rows: string[] }
 
-/** A label's shapes in images without labels, which every choice writes, and in labelled ones, which Add and Replace write too */
-export type LabelCount = { label: string; fresh: number; labelled: number; listed: boolean }
+/**
+ * A label's shapes in images without labels, which every choice writes, and in labelled ones,
+ * which Replace writes too; of those, `added` are the ones Add writes, the rest being there already
+ */
+export type LabelCount = { label: string; fresh: number; labelled: number; added: number; listed: boolean }
 
 /** What reading a dataset found, before anything is written */
 export type ImportPreview = {
@@ -71,6 +74,9 @@ export type ImportPreview = {
   blank: number
   /** Labelled images the dataset gives no shapes (an empty YOLO label file): every choice leaves them alone */
   empty: number
+  /** Labelled images that have every shape the dataset gives them already, which Add leaves as they are, and those of them in LabelImg's formats */
+  unchanged: number
+  unchangedLabelImg: number
   /** Label files that can't be read: never touched */
   unreadable: number
   /** Images that can't take labels from it: sizes differ, label file shared, image unreadable */
@@ -129,6 +135,15 @@ type Entry = {
   has: { format: LabelFormat; file: string } | null
   /** Why its label file can't be read: such a file is never touched */
   broken: string | null
+  /** The labels of the shapes it has, as looking at its label file found them */
+  own: Set<string> | null
+  /**
+   * Add: the labels of the shapes it would get, those it has already being left out; null when
+   * they weren't compared with its own, which share no label with them or couldn't be read again
+   */
+  adds: Record<string, number> | null
+  /** Add: the dataset's shapes it has already */
+  repeated: number
 }
 
 type CocoReader = { found: CocoFound; shapes: (ids: number[]) => Promise<CocoShapes[]>; close: () => void }
@@ -332,6 +347,7 @@ export async function readImport(root: string, req: ImportRequest, progress: (p:
     s.listed = new Set(req.labels)
     if (s.yolo && ((req.task ?? s.yolo.task) !== s.yolo.task || (req.keypoints ?? null) !== s.yolo.keypoints)) {
       await readLabelRows(s, req.task ?? s.yolo.task, req.keypoints ?? null, progress, signal)
+      if (!signal.aborted) await compare(s, progress, signal)
       if (signal.aborted) throw new Error('Stopped')
     }
     return preview(s)
@@ -379,6 +395,8 @@ async function readNew(folder: ReturnType<typeof folderOf>, req: ImportRequest, 
   if (s.yolo) await readLabelRows(s, s.yolo.task, null, progress, signal)
   if (signal.aborted) return quit()
   await look(s, s.entries.filter((e) => !e.blocked), progress, signal)
+  if (signal.aborted) return quit()
+  await compare(s, progress, signal)
   if (signal.aborted) return quit()
   // A size that differs was told for each COCO image already
   for (const e of s.entries) if (e.blocked && e.blocked.code !== 'import-size') s.issues.push(e.blocked)
@@ -522,7 +540,7 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
 const tally = (): Record<string, number> => Object.create(null)
 
 const entry = (name: string, label: string | null, byName: boolean): Entry =>
-  ({ name, size: null, ids: [], label, byName, annotations: 0, shapes: 0, labels: tally(), pixels: 0, blocked: null, has: null, broken: null })
+  ({ name, size: null, ids: [], label, byName, annotations: 0, shapes: 0, labels: tally(), pixels: 0, blocked: null, has: null, broken: null, own: null, adds: null, repeated: 0 })
 
 // YOLO
 
@@ -703,11 +721,51 @@ async function look(s: Session, entries: Entry[], progress: (p: ImportProgress) 
     try {
       const read = await readLabels(s.root, e.name, found, async () => e.size ?? [1, 1])
       if (!read) e.blocked = say('error', 'import-other-images', e.name, `${e.name}'s label file, ${path.basename(found.file)}, is a CreateML list of other images, so nothing is imported into it`)
+      else e.own = new Set(read.doc.shapes.map((sh) => sh.label))
     } catch (err) {
       e.broken = message(err)
       s.issues.push(say('warning', 'import-label-unreadable', e.name, `${path.basename(found.file)} can't be read, so it's never touched: ${message(err)}`))
     }
   }, (done) => progress({ phase: 'Looking at their label files', done, total }), signal)
+}
+
+/**
+ * Add: what each labelled image would get, worked out as writing works it out (addShapes), so the
+ * window counts what Add writes rather than every shape the dataset has for it. Only images whose
+ * own shapes share a label with the dataset's can have any of them already; their labels are read
+ * again, a batch at a time, rather than kept from looking at them, and the dataset's masks are
+ * made PNGs only where the image has masks of its own to match them with.
+ */
+async function compare(s: Session, progress: (p: ImportProgress) => void, signal: AbortSignal) {
+  for (const e of s.entries) {
+    e.adds = null
+    e.repeated = 0
+  }
+  const todo = s.entries.filter((e) => e.has && !e.blocked && !e.broken && e.shapes && Object.keys(e.labels).some((label) => e.own?.has(label)))
+  const total = todo.length
+  let done = 0
+  if (total) progress({ phase: 'Comparing with the shapes they have', done, total })
+  for (const batch of writeBatches(todo)) {
+    if (signal.aborted) return
+    const own = new Map<string, Shape[]>()
+    await pool(batch, 8, async (e) => {
+      const found = await findLabels(s.root, e.name, s.prefer).catch(() => null)
+      const read = found && (await readLabels(s.root, e.name, found, async () => e.size ?? [1, 1]).catch(() => null))
+      if (read) own.set(e.name, read.doc.shapes)
+    }, () => {}, signal)
+    if (signal.aborted) return
+    const made = await shapesFor(s, batch, (e) => !!own.get(e.name)?.some((sh) => sh.shape_type === 'mask'))
+    for (const e of batch) {
+      const mine = own.get(e.name)
+      if (!mine) continue
+      const { added, repeated } = addShapes(mine, made.get(e.name) ?? [])
+      e.adds = tally()
+      for (const sh of added) e.adds[sh.label] = (e.adds[sh.label] ?? 0) + 1
+      e.repeated = repeated
+    }
+    done += batch.length
+    progress({ phase: 'Comparing with the shapes they have', done, total })
+  }
 }
 
 // What the window is sent
@@ -728,9 +786,11 @@ function groupsOf(issues: Issue[]): IssueGroup[] {
 // file without rows is the exception, being how a YOLO dataset marks an image with no objects:
 // an image without labels gets an empty label file too.
 const nothing = (s: Session, e: Entry) => !e.shapes && !(s.kind === 'yolo' && e.label && !e.annotations)
+// Whether comparing found that a labelled image has every shape the dataset gives it already, so Add leaves it as it is
+const hasEvery = (e: Entry) => !!e.adds && !Object.keys(e.adds).length && e.repeated > 0
 
 function preview(s: Session): ImportPreview {
-  let fresh = 0, blank = 0, labelled = 0, labelImg = 0, empty = 0, unreadable = 0, blocked = 0, none = 0, byName = 0
+  let fresh = 0, blank = 0, labelled = 0, labelImg = 0, empty = 0, unchanged = 0, unchangedLabelImg = 0, unreadable = 0, blocked = 0, none = 0, byName = 0
   const counts = new Map<string, LabelCount>()
   for (const e of s.entries) {
     if (e.byName) byName++
@@ -740,16 +800,26 @@ function preview(s: Session): ImportPreview {
     if (e.has) {
       labelled++
       if (!e.shapes) empty++
-      else if (e.has.format !== 'labelme') labelImg++
+      else {
+        const other = e.has.format !== 'labelme'
+        if (other) labelImg++
+        if (hasEvery(e)) {
+          unchanged++
+          if (other) unchangedLabelImg++
+        }
+      }
     } else {
       fresh++
       if (!e.shapes) blank++
     }
     for (const [label, n] of Object.entries(e.labels)) {
       let c = counts.get(label)
-      if (!c) counts.set(label, (c = { label, fresh: 0, labelled: 0, listed: s.listed.has(label) }))
-      if (e.has) c.labelled += n
-      else c.fresh += n
+      if (!c) counts.set(label, (c = { label, fresh: 0, labelled: 0, added: 0, listed: s.listed.has(label) }))
+      if (!e.has) c.fresh += n
+      else {
+        c.labelled += n
+        c.added += e.adds ? e.adds[label] ?? 0 : n
+      }
     }
   }
   const y = s.yolo
@@ -758,7 +828,7 @@ function preview(s: Session): ImportPreview {
     kind: s.kind, source: s.source, name: path.basename(s.source), images: s.images, matched: s.entries.length,
     byName,
     base: s.base, missing: s.missing, ambiguous: s.ambiguous,
-    fresh, labelled, labelImg, blank, empty, unreadable, blocked, nothing: none,
+    fresh, labelled, labelImg, blank, empty, unchanged, unchangedLabelImg, unreadable, blocked, nothing: none,
     labels: [...counts.values()].sort((a, b) => b.fresh + b.labelled - a.fresh - a.labelled || a.label.localeCompare(b.label)),
     groups: groupsOf([...s.issues, ...s.rows]),
     ...(y ? {
@@ -869,18 +939,20 @@ function joined(parts: CocoShapes[]): { shapes: Shape[]; masks: (MaskBits | null
   return { shapes, masks }
 }
 
-// The shapes each image of a batch gets: COCO's from the worker, their masks' pixels made PNGs; YOLO's from its rows
-async function shapesFor(s: Session, batch: Entry[]): Promise<Map<string, Shape[]>> {
+// The shapes each image of a batch gets: COCO's from the worker, their masks' pixels made PNGs; YOLO's from its rows.
+// Comparing them with an image's own needs no PNGs where it has no masks: `encode` says where.
+async function shapesFor(s: Session, batch: Entry[], encode: (e: Entry) => boolean = () => true): Promise<Map<string, Shape[]>> {
   const out = new Map<string, Shape[]>()
   if (s.coco) {
     const read = new Map((await s.coco.shapes(batch.flatMap((e) => e.ids))).map((r) => [r.id, r]))
     for (const e of batch) {
       const { shapes, masks } = joined(e.ids.map((id) => read.get(id)).filter((r): r is CocoShapes => !!r))
       const ready: Shape[] = []
+      const png = encode(e)
       for (const [i, sh] of shapes.entries()) {
         const bits = masks[i]
         if (sh.shape_type !== 'mask') ready.push(sh)
-        else if (bits) ready.push({ ...sh, mask: await encodeMask(bits.data, bits.width, bits.height) })
+        else if (bits) ready.push(png ? { ...sh, mask: await encodeMask(bits.data, bits.width, bits.height) } : sh)
       }
       out.set(e.name, ready)
     }
@@ -895,6 +967,9 @@ async function shapesFor(s: Session, batch: Entry[]): Promise<Map<string, Shape[
   }
   return out
 }
+
+// What the report says of an image Add leaves as it is, as it has every shape already
+const hasAll = (name: string, shapes: number) => `${name} has ${shapes === 1 ? 'the imported shape' : `all ${plural(shapes, 'imported shape')}`} already, so it's left as it is`
 
 type Outcome = {
   written?: Shape[]; repeated?: number; trashed?: number; skip?: { why: string; message: string }
@@ -931,7 +1006,7 @@ function writeOne(s: Session, e: Entry, shapes: Shape[], policy: ImportPolicy): 
     if (!read) return { skip: { why: 'import-other-images', message: `${e.name}'s label file, ${old}, is a CreateML list of other images, so it's left as it is` } }
     if (policy === 'add') {
       const { added, repeated } = addShapes(read.doc.shapes, shapes)
-      if (!added.length) return { repeated, skip: { why: 'unchanged', message: `${e.name} has ${shapes.length === 1 ? 'the imported shape' : `all ${shapes.length} imported shapes`} already, so it's left as it is` } }
+      if (!added.length) return { repeated, skip: { why: 'unchanged', message: hasAll(e.name, shapes.length) } }
       const all = [...read.doc.shapes, ...added]
       try {
         return saved(found.format === 'labelme'
@@ -1001,6 +1076,7 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
     g.rows.push(text)
   }
   const todo: Entry[] = []
+  let repeated = 0
   for (const e of s.entries) {
     if (e.blocked) skip(e.blocked.code, e.blocked.message, e.blocked.severity)
     else if (s.kind === 'yolo' && !e.label) skip('import-no-label-file', `${e.name} has no label file in the dataset, so it's left as it is`, 'info')
@@ -1009,11 +1085,16 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
     else if (e.broken) skip('import-label-unreadable', `${e.has ? path.basename(e.has.file) : e.name} can't be read, so it's never touched: ${e.broken}`)
     else if (e.has && policy === 'skip') skip('labelled', `${e.name} has labels, so it's left as it is`)
     else if (e.has && !e.shapes) skip('no-shapes', `${e.name} gets no shapes from the dataset, so it's left as it is`)
-    else todo.push(e)
+    // Reading found it has every shape already, and the window said it's left as it is: it isn't
+    // looked at again, so the count and the progress are of the images Add writes
+    else if (e.has && policy === 'add' && hasEvery(e)) {
+      repeated += e.repeated
+      skip('unchanged', hasAll(e.name, e.repeated))
+    } else todo.push(e)
   }
   const names: string[] = []
   const labels = new Map<string, number>()
-  let written = 0, shapes = 0, repeated = 0, trashed = 0, done = 0, told = 0
+  let written = 0, shapes = 0, trashed = 0, done = 0, told = 0
   const total = todo.length
   progress({ phase: 'Writing label files', done: 0, total })
   const batches = writeBatches(todo)

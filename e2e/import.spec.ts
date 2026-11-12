@@ -146,15 +146,24 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await expect(filter('Done')).toContainText('4')
   await expect(page.locator('.class', { hasText: 'dog' })).toBeVisible()
 
-  // Add: the shapes a and b have already aren't added twice; c gets the dog; d becomes LabelMe JSON
+  // Add: a and b have every shape already, so they're left as they are and not counted; c gets the dog; d becomes LabelMe JSON
   await answer(app, coco)
   await menu(page, 'File', 'Import dataset…')
   await dialog.getByRole('button', { name: 'COCO file…' }).click()
   await expect(dialog).toContainText("4 images have labels already: they're left as they are.")
+  await expect(dialog.locator('.import-section h4', { hasText: 'Shapes to import' })).toHaveText('Shapes to import')
   await dialog.getByRole('radio', { name: 'Add shapes' }).click()
-  await expect(dialog).toContainText("4 images have labels already: the imported shapes go after theirs, and shapes they have already aren't added twice.")
+  await expect(dialog).toContainText("4 images have labels already: 2 get the imported shapes they don't have yet, after their own; 2 have every shape already, so they're left as they are.")
   await expect(dialog).toContainText('1 of them has Pascal VOC, YOLO or CreateML labels: it gets LabelMe JSON, which holds every shape type, with its boxes kept, and the old file goes to the trash.')
-  await dialog.getByRole('button', { name: 'Import 4 images' }).click()
+  await expect(dialog.locator('.import-section h4', { hasText: 'Shapes to import' })).toHaveText('Shapes to import · 2')
+  await expect(dialog.locator('.import-labels tr', { hasText: 'dog' })).toContainText('2')
+  await expect(dialog.locator('.import-sum')).toHaveText('2 images get a LabelMe JSON label file.')
+  // Replace writes all four, every shape the file has for them
+  await dialog.getByRole('radio', { name: 'Replace' }).click()
+  await expect(dialog.locator('.import-section h4', { hasText: 'Shapes to import' })).toHaveText('Shapes to import · 5')
+  await expect(dialog.getByRole('button', { name: 'Import 4 images' })).toBeVisible()
+  await dialog.getByRole('radio', { name: 'Add shapes' }).click()
+  await dialog.getByRole('button', { name: 'Import 2 images' }).click()
   await expect(dialog.locator('.import-result')).toHaveText('Wrote 2 label files with 2 shapes.')
   await expect(dialog).toContainText("3 shapes were there already, so they weren't added again.")
   await expect(dialog).toContainText('1 old label file went to the trash.')

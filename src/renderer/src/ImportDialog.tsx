@@ -90,8 +90,9 @@ function Labels({ rows, known, listing }: { rows: { label: string; shapes: numbe
   )
 }
 
-// How many images a choice writes, of those the preview found: labelled ones the dataset gives no shapes keep theirs
-const writes = (p: ImportPreview, policy: ImportPolicy) => p.fresh + (policy === 'skip' ? 0 : p.labelled - p.empty)
+// How many images a choice writes, of those the preview found: labelled ones the dataset gives no shapes keep
+// theirs, and Add leaves those that have every shape already as they are
+const writes = (p: ImportPreview, policy: ImportPolicy) => p.fresh + (policy === 'skip' ? 0 : p.labelled - p.empty - (policy === 'add' ? p.unchanged : 0))
 
 // What a choice does to the images that have labels
 function labelledText(p: ImportPreview, policy: ImportPolicy) {
@@ -100,10 +101,23 @@ function labelledText(p: ImportPreview, policy: ImportPolicy) {
   const left = (n: number) => `${n === 1 ? "it's" : "they're"} left as ${n === 1 ? 'it is' : 'they are'}`
   if (policy === 'skip') return `${have}: ${left(p.labelled)}.`
   if (p.empty === p.labelled) return `${have} and ${one ? 'gets' : 'get'} no shapes from it, so ${left(p.labelled)}.`
-  const what = policy === 'add'
-    ? `the imported shapes go after ${one ? 'its' : 'theirs'}, and shapes ${one ? 'it has' : 'they have'} already aren't added twice`
-    : `${one ? 'its label file goes' : 'their label files go'} to the trash, and the imported shapes take ${one ? 'its' : 'their'} place`
-  return `${have}: ${what}.${p.empty ? ` ${some(p.empty, 'of them gets', 'of them get')} no shapes from it, so ${left(p.empty)}.` : ''}`
+  if (policy === 'replace') {
+    return `${have}: ${one ? 'its label file goes' : 'their label files go'} to the trash, and the imported shapes take ${one ? 'its' : 'their'} place.` +
+      `${p.empty ? ` ${some(p.empty, 'of them gets', 'of them get')} no shapes from it, so ${left(p.empty)}.` : ''}`
+  }
+  // Add: those that get shapes, and those left as they are, as they have every shape already or get none
+  if (p.unchanged === p.labelled) return `${have}, with every shape from it, so ${left(p.labelled)}.`
+  const getting = p.labelled - p.empty - p.unchanged
+  const kept = [
+    p.unchanged && `${count(p.unchanged)} ${p.unchanged === 1 ? 'has' : 'have'} every shape already`,
+    p.empty && `${count(p.empty)} ${p.empty === 1 ? 'gets' : 'get'} no shapes from it`
+  ].filter(Boolean).join(', and ')
+  const stays = kept && `${kept}, so ${left(p.unchanged + p.empty)}`
+  if (!getting) return `${have}: ${stays}.`
+  const gets = getting === p.labelled
+    ? `the imported shapes ${one ? "it doesn't" : "they don't"} have yet go after ${one ? 'its' : 'their'} own`
+    : `${count(getting)} ${getting === 1 ? "gets the imported shapes it doesn't" : "get the imported shapes they don't"} have yet, after ${getting === 1 ? 'its' : 'their'} own`
+  return `${have}: ${gets}${stays ? `; ${stays}` : ''}.`
 }
 
 export default function ImportDialog({ root, format, labels, known, onClose, onImported }: Props) {
@@ -192,9 +206,12 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
   const p = preview
   const n = p ? writes(p, policy) : 0
   const asking = !!p?.task?.ask && !confirmed
-  const labelRows = p ? p.labels.map((l) => ({ label: l.label, shapes: l.fresh + (policy === 'skip' ? 0 : l.labelled) })).filter((l) => l.shapes) : []
   // The tasks the rows fit, the guess first, when they fit more than one
   const fits = p?.task?.others.length ? [p.task.guess, ...p.task.others] : []
+  const labelRows = p ? p.labels.map((l) => ({ label: l.label, shapes: l.fresh + (policy === 'skip' ? 0 : policy === 'add' ? l.added : l.labelled) }))
+    .filter((l) => l.shapes).sort((a, b) => b.shapes - a.shapes || a.label.localeCompare(b.label)) : []
+  // Of the labelled images in Pascal VOC, YOLO or CreateML, those the choice turns into LabelMe JSON
+  const converted = p ? p.labelImg - (policy === 'add' ? p.unchangedLabelImg : 0) : 0
   const shapes = labelRows.reduce((sum, l) => sum + l.shapes, 0)
   // With no label list, every label shows under Labels as found in the label files: that's nothing to say
   const unlisted = report && labels ? report.labels.filter((l) => !l.listed).map((l) => l.label) : []
@@ -296,8 +313,8 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
                       ))}
                     </div>
                     <p>{labelledText(p, policy)}</p>
-                    {policy !== 'skip' && p.labelImg > 0 && (
-                      <p className="muted">{some(p.labelImg, 'of them has', 'of them have')} Pascal VOC, YOLO or CreateML labels: {p.labelImg === 1 ? 'it gets' : 'they get'} LabelMe JSON, which holds every shape type, with {p.labelImg === 1 ? 'its' : 'their'} boxes{policy === 'replace' ? ' replaced' : ' kept'}, and the old {p.labelImg === 1 ? 'file goes' : 'files go'} to the trash.</p>
+                    {policy !== 'skip' && converted > 0 && (
+                      <p className="muted">{some(converted, 'of them has', 'of them have')} Pascal VOC, YOLO or CreateML labels: {converted === 1 ? 'it gets' : 'they get'} LabelMe JSON, which holds every shape type, with {converted === 1 ? 'its' : 'their'} boxes{policy === 'replace' ? ' replaced' : ' kept'}, and the old {converted === 1 ? 'file goes' : 'files go'} to the trash.</p>
                     )}
                   </>
                 )}
