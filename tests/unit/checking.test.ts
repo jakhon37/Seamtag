@@ -535,7 +535,7 @@ describe('statistics', () => {
     expect({ ...view, moreSizes: undefined }).toEqual({ ...whole, imageSizes: whole.imageSizes.slice(0, 10), moreSizes: undefined })
     expect(view.moreSizes).toBe(whole.imageSizes.length - 10)
     expect([...new Set(phases)]).toEqual(['read', 'count'])
-    expect(statsText(root)!.split('\r\n')[0]).toBe('label,objects,images,polygon,rectangle')
+    expect(statsText(root)!.split('\r\n')[0]).toBe('﻿label,objects,images,polygon,rectangle')
     // Another training size counts what was read last, without reading again
     write(root, { 'a.json': labelme('a.png', []) })
     phases.length = 0

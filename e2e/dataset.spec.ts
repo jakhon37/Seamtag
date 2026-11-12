@@ -273,7 +273,9 @@ test('Statistics count the folder, sort its labels, recount at a training size a
   // One image with no objects (only an AI proposal), four with one, one with two
   await expect(stats.locator('.stats-column')).toHaveText(['10', '41', '12'])
   const sizes = stats.locator('.stats-sizes tbody tr')
-  await expect(sizes).toHaveText(['Small under 32 × 32 px00', 'Medium 00', 'Large 96 × 96 px and over66'])
+  await expect(sizes).toHaveText(['Small under 32 × 32 px00', 'Medium 32 × 32 to 96 × 96 px00', 'Large 96 × 96 px and over66'])
+  // With no groups, objects are shapes, and there's nothing to explain
+  await expect(stats.getByText('Objects are counted as the exports count them')).toHaveCount(0)
   await expect(stats.locator('.stats-image-sizes')).toHaveText('400 × 300 8 images')
   await shot(page, 'stats-1500-dark.png')
   expect(await fits(page, '.dialog.stats')).toEqual({ inside: true, page: true, onScreen: true })
@@ -294,7 +296,8 @@ test('Statistics count the folder, sort its labels, recount at a training size a
 
   await stats.getByRole('button', { name: 'Save as CSV…' }).click()
   await expect(stats).toContainText('Saved as dataset-stats.csv')
-  expect(readFileSync(csv, 'utf8')).toBe('label,objects,images,polygon,rectangle\r\ncat,3,2,3,0\r\nCat,1,1,1,0\r\ndog,1,1,0,1\r\nzebra,1,1,1,0\r\n')
+  // A byte order mark first, so Excel reads it as UTF-8
+  expect(readFileSync(csv, 'utf8')).toBe('\ufefflabel,objects,images,polygon,rectangle\r\ncat,3,2,3,0\r\nCat,1,1,1,0\r\ndog,1,1,0,1\r\nzebra,1,1,1,0\r\n')
 
   await reopen(() => darkMode(page))
   await shot(page, 'stats-1500-light.png')
@@ -928,5 +931,61 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
   // With every severity hidden, the dock lists what is
   for (const severity of ['error', 'warning']) await dock.locator(`.problems-severities [data-severity="${severity}"]`).click()
   await expect(dock.locator('.problems-list')).toHaveText(/^Nothing shown: 1 error, [\d,]+ warnings and [\d,]+ notes are hidden\.$/)
+  await finish(app, errors)
+})
+
+test("Statistics count objects as the exports do: a label's shapes in one group are one, a pose's points none", async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const part = (label: string, x0: number, y0: number, x1: number, y1: number, group: number) => ({ ...square(label, x0, y0, x1, y1), group_id: group })
+  const point = (label: string, x: number, y: number, group: number) => ({ label, shape_type: 'point', group_id: group, description: '', points: [[x, y]], flags: {} })
+  const files: Record<string, string> = {
+    // A cat in two parts of 625 square pixels, small, that make a medium object; and a dog
+    a: doc('a', [part('cat', 10, 10, 35, 35, 1), part('cat', 80, 10, 105, 35, 1), square('dog', 200, 100, 300, 200)]),
+    // A person posed: a box and two keypoints
+    b: doc('b', [part('person', 50, 50, 250, 250, 2), point('nose', 150, 80, 2), point('left_eye', 140, 70, 2)]),
+    // 205 labels of a small box each: more than the table's first 200 rows
+    c: doc('c', Array.from({ length: 205 }, (_, k) => square(`kind${String(k).padStart(3, '0')}`, k, k % 50, k + 19, k % 50 + 19)))
+  }
+  const dir = await project('dataset-stats-objects', files)
+  await paint(dir, Object.keys(files))
+  const { app, page, errors } = await launch(dir)
+  const stats = page.getByRole('dialog', { name: 'Statistics' })
+  const open = async () => {
+    await menu(page, 'Dataset', 'Statistics…')
+    await expect(stats.locator('[data-tile="total"] b')).toHaveText('3')
+  }
+  await open()
+  const cells = (label: string) => stats.locator(`.stats-labels tbody tr[data-label="${label}"] td`)
+  await expect(stats.locator('.stats-labels thead th')).toHaveText(['Label', 'Objects', 'Images', 'Polygon', 'Point', ''])
+  await expect(cells('cat')).toHaveText(['cat', '1', '1', '2', '0', 'Rename…'])
+  await expect(stats.getByText('Objects are counted as the exports count them')).toBeVisible()
+  // The cat and the dog are two objects, the person and its keypoints one
+  await expect(stats.locator('.stats-column[title="1 image with 2 objects"]')).toHaveCount(1)
+  await expect(stats.locator('.stats-column[title="1 image with 1 object"]')).toHaveCount(1)
+  await expect(stats.locator('.stats-sizes tbody tr')).toHaveText(['Small under 32 × 32 px205205', 'Medium 32 × 32 to 96 × 96 px11', 'Large 96 × 96 px and over22'])
+  await expect(stats).not.toContainText('no area here')
+  // The labels with no objects come last, past the first 200 rows
+  await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(200)
+  await expect(stats.locator('.stats-table .problems-more')).toHaveText('Show the other 10')
+  await stats.locator('.stats-table .problems-more').click()
+  await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(210)
+  await expect(cells('person')).toHaveText(['person', '1', '1', '1', '0', 'Rename…'])
+  await expect(cells('nose')).toHaveText(['nose', '0', '1', '0', '1', 'Rename…'])
+
+  // The labels table takes no more than a third of a short window, so the counts under it show too
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [1000, 640], [960, 600]]) {
+      await resize(app, page, width, height)
+      const table = (await stats.locator('.stats-table').boundingBox())!
+      expect(table.height).toBeLessThanOrEqual(Math.min(300, 0.3 * (await page.evaluate(() => innerHeight))) + 1)
+      expect(await fits(page, '.dialog.stats')).toEqual({ inside: true, page: true, onScreen: true })
+      await shot(page, `stats-objects-${width}-${theme}.png`)
+    }
+    if (theme === 'dark') {
+      await stats.getByRole('button', { name: 'Close' }).click()
+      await darkMode(page)
+      await open()
+    }
+  }
   await finish(app, errors)
 })

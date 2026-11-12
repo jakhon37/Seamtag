@@ -2,12 +2,13 @@ import { ArrowDown, ArrowUp } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ShapeType } from '../../shared/labelfile'
 import { useModal } from './Modal'
-import { counted, number, StopButton } from './Problems'
+import { counted, number, showMore, StopButton } from './Problems'
 import { type LabelFormat, plainError, type Progress, type StatsView } from './types'
 
 // Dataset > Statistics: the folder's labels counted in the main process (src/main/checking.ts
 // over stats.ts) as the window's save format reads them: images by status, objects per label
-// and shape type, objects per image, object sizes as COCO ranges them, and image sizes.
+// as the exports count them and shapes per label by type, objects per image, object sizes as
+// COCO ranges them, and image sizes.
 
 const TYPE_NAMES: Record<ShapeType, string> = {
   polygon: 'Polygon', rectangle: 'Rectangle', oriented_rectangle: 'Rotated box', circle: 'Circle', line: 'Line', point: 'Point',
@@ -110,6 +111,8 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
     })
   }, [stats, sort])
   const most = Math.max(1, ...(stats?.labels.map((l) => l.objects) ?? []))
+  // Objects and shapes differ once a label's shapes share a group, or are a pose's points: the table says why
+  const grouped = !!stats?.labels.some((l) => Object.values(l.types).reduce((n, k) => n + (k ?? 0), 0) !== l.objects)
   const bars = stats ? histogram(stats.objectsPerImage) : []
   const tallest = Math.max(1, ...bars.map((b) => b.images))
 
@@ -134,7 +137,7 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
       </button>
     </th>
   )
-  const coco = [['small', 'Small', 'under 32 × 32 px'], ['medium', 'Medium', ''], ['large', 'Large', '96 × 96 px and over']] as const
+  const coco = [['small', 'Small', 'under 32 × 32 px'], ['medium', 'Medium', '32 × 32 to 96 × 96 px'], ['large', 'Large', '96 × 96 px and over']] as const
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
@@ -151,7 +154,7 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
               ))}
             </div>
 
-            <h4>Labels <span className="muted">accepted shapes; AI proposals count once accepted</span></h4>
+            <h4>Labels <span className="muted">AI proposals count once accepted</span></h4>
             {stats.labels.length ? (
               <div className="stats-table">
                 <table className="stats-labels">
@@ -180,10 +183,16 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
                   </tbody>
                 </table>
                 {rows.length > shown && (
-                  <button className="ghost problems-more" onClick={() => setShown((n) => n + ROWS)}>Show {number(Math.min(ROWS, rows.length - shown))} more of {number(rows.length - shown)}</button>
+                  <button className="ghost problems-more" onClick={() => setShown((n) => n + ROWS)}>{showMore(rows.length - shown, ROWS)}</button>
                 )}
               </div>
             ) : <p className="muted">No shapes yet.</p>}
+            {grouped && (
+              <p className="muted">
+                Objects are counted as the exports count them: shapes with one label and one group ID are one object, and points grouped
+                with a box are its keypoints, not objects. The columns by shape type count shapes.
+              </p>
+            )}
 
             <div className="stats-pair">
               <section aria-label="Objects per image">

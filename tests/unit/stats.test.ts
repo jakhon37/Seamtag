@@ -58,6 +58,55 @@ test("object sizes fall in COCO's ranges at full size and at the training size; 
   expect(datasetStats(FOLDER, { trainSize: 6000 }).sizes.train).toEqual({ small: 0, medium: 0, large: 4 })
 })
 
+test("shapes sharing a label and a group_id are one object, as the exports take them, and a pose's points are no objects", () => {
+  const part = (label: string, x0: number, y0: number, x1: number, y1: number, group: number) => box(label, x0, y0, x1, y1, { group_id: group })
+  const point = (label: string, x: number, y: number, group: number | null) => newShape(label, 'point', [[x, y]], { group_id: group })
+  const images = [
+    image('a', [
+      // A cat in two parts, another in one, and a dog sharing the first cat's group: three objects
+      part('cat', 0, 0, 10, 10, 1), part('cat', 20, 0, 30, 10, 1), box('cat', 50, 50, 60, 60), part('dog', 100, 100, 110, 110, 1),
+      // A pose: its box, and points that are its keypoints
+      part('person', 0, 100, 50, 200, 2), point('nose', 20, 120, 2), point('left_eye', 15, 115, 2),
+      // A point of no group is an object of its own
+      point('dot', 5, 5, null)
+    ]),
+    // Boxes of two labels in one group make no pose, so its point is an object
+    image('b', [part('car', 0, 0, 50, 50, 3), part('bus', 60, 0, 110, 50, 3), point('wheel', 10, 45, 3)])
+  ]
+  const stats = datasetStats(images)
+  expect(stats.labels).toEqual([
+    { label: 'cat', objects: 2, images: 1, types: { rectangle: 3 } },
+    { label: 'bus', objects: 1, images: 1, types: { rectangle: 1 } },
+    { label: 'car', objects: 1, images: 1, types: { rectangle: 1 } },
+    { label: 'dog', objects: 1, images: 1, types: { rectangle: 1 } },
+    { label: 'dot', objects: 1, images: 1, types: { point: 1 } },
+    { label: 'person', objects: 1, images: 1, types: { rectangle: 1 } },
+    { label: 'wheel', objects: 1, images: 1, types: { point: 1 } },
+    // Keypoints count as shapes of their labels, with no objects
+    { label: 'left_eye', objects: 0, images: 1, types: { point: 1 } },
+    { label: 'nose', objects: 0, images: 1, types: { point: 1 } }
+  ])
+  expect(stats.objectsPerImage).toEqual([{ objects: 3, images: 1 }, { objects: 5, images: 1 }])
+  // The dot and the wheel have no area
+  expect(stats.sizes.unsized).toBe(2)
+})
+
+test("an object of several shapes is ranged by its area as one, where they overlap counted once, as COCO's export merges them", () => {
+  const mask: MaskBits = { x: 0, y: 200, width: 40, height: 40, data: new Uint8Array(1600).fill(1) }
+  const images = [image('m', [
+    // Two 25 x 25 squares, one 5 px right of the other: 625 square pixels each, small; 750 as one, small, where adding them up would give 1,250, medium
+    box('a', 0, 0, 25, 25, { group_id: 1 }), box('a', 5, 0, 30, 25, { group_id: 1 }),
+    // Two 20 x 30 boxes apart: 600 each, small; 1,200 as one, medium
+    box('b', 100, 0, 120, 30, { group_id: 1 }), box('b', 200, 0, 220, 30, { group_id: 1 }),
+    // A mask of 1,600 pixels and a 20 x 20 box: 2,000 as one, medium
+    newShape('road', 'mask', [[0, 200], [39, 239]], { mask: 'png', group_id: 2 }), box('road', 100, 200, 120, 220, { group_id: 2 })
+  ], { masks: [null, null, null, null, mask, null] })]
+  const stats = datasetStats(images)
+  expect(stats.sizes.full).toEqual({ small: 1, medium: 2, large: 0 })
+  expect(stats.objectsPerImage).toEqual([{ objects: 3, images: 1 }])
+  expect(stats.labels.map((l) => [l.label, l.objects, l.types])).toEqual([['a', 1, { rectangle: 2 }], ['b', 1, { rectangle: 2 }], ['road', 1, { mask: 1, rectangle: 1 }]])
+})
+
 test("masks are measured by their pixels and circles by their radius", () => {
   const mask: MaskBits = { x: 0, y: 0, width: 40, height: 40, data: new Uint8Array(1600).fill(1) }
   const images = [image('m', [newShape('road', 'mask', [[0, 0], [39, 39]], { mask: 'png' }), newShape('ball', 'circle', [[100, 100], [100, 110]])], { masks: [mask, null] })]
@@ -80,9 +129,15 @@ test('image sizes are listed with how many images have each, the most common fir
 })
 
 test('the per-label table saves as CSV, quoting what needs it', () => {
-  expect(statsCsv(datasetStats(FOLDER))).toBe('label,objects,images,polygon,rectangle,point\r\ncar,4,3,0,4,0\r\nnose,1,1,0,0,1\r\nperson,1,1,1,0,0\r\n')
+  expect(statsCsv(datasetStats(FOLDER))).toBe('\ufefflabel,objects,images,polygon,rectangle,point\r\ncar,4,3,0,4,0\r\nnose,1,1,0,0,1\r\nperson,1,1,1,0,0\r\n')
   const odd = datasetStats([image('a', [box('a, "b"', 0, 0, 5, 5), box('a, "b"', 9, 0, 15, 5), box(' c', 0, 0, 5, 5)])])
-  expect(statsCsv(odd)).toBe('label,objects,images,rectangle\r\n"a, ""b""",2,1,2\r\n" c",1,1,1\r\n')
+  expect(statsCsv(odd)).toBe('\ufefflabel,objects,images,rectangle\r\n"a, ""b""",2,1,2\r\n" c",1,1,1\r\n')
+})
+
+test('the CSV starts with a byte order mark, so Excel reads labels beyond ASCII as UTF-8', () => {
+  const csv = statsCsv(datasetStats([image('a', [box('고양이', 0, 0, 5, 5), box('café', 9, 0, 15, 5)])]))
+  expect([...Buffer.from(csv, 'utf8').subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf])
+  expect(csv.slice(1)).toBe('label,objects,images,rectangle\r\ncafé,1,1,1\r\n고양이,1,1,1\r\n')
 })
 
 test('labels a spreadsheet would run as formulas are saved as text: a quote first, and quoted, as OWASP advises', () => {
