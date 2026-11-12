@@ -620,5 +620,5 @@ export function statsText(root: string): string | null {
   return c ? statsCsv(c.stats) : null
 }
 
-/** Where Save as CSV suggests: in the folder, named after it */
-export const statsFileName = (root: string) => path.join(root, `${path.basename(root)}-labels.csv`)
+/** Where Save as CSV suggests: beside the folder, as the keypoints file is, and named after it, so it's never taken for a label file */
+export const statsFileName = (root: string) => path.join(path.dirname(root), `${path.basename(root)}-statistics.csv`)

@@ -19,7 +19,7 @@ import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImp
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
 import {
   closeProject, hasLabelsIn, imagePath, labelsFile, loadLabels, openProject, type ProjectInfo, readLabelFile, rootsOpen, saveLabels,
-  saveProjectFile, type SaveRequest, setTrash, summarizeAll, trashImage, trashLabels
+  saveProjectFile, type SaveRequest, serial, setTrash, summarizeAll, trashImage, trashLabels, writeAtomic
 } from './project'
 
 const NAME = 'Seamtag'
@@ -77,6 +77,34 @@ function addRecent(target: string) {
 
 function send(channel: string, payload: unknown) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
+}
+
+// The jobs that write label files or an export, each with what stops it. Closing the window stops
+// them and waits for them: an import or a rename finishes the image it's on, so none is left
+// with its old labels in the trash and the new ones in a temporary file, and an export removes
+// what it wrote.
+const writing = new Map<Promise<unknown>, () => void>()
+function job<T>(work: Promise<T>, stop: () => void): Promise<T> {
+  writing.set(work, stop)
+  const done = () => void writing.delete(work)
+  work.then(done, done)
+  return work
+}
+/** Waits for work, or for ms, whichever ends first */
+async function within(work: Promise<unknown>, ms: number) {
+  let timer: NodeJS.Timeout | undefined
+  await Promise.race([work, new Promise((go) => (timer = setTimeout(go, ms)))])
+  clearTimeout(timer)
+}
+/** Stops the jobs that write and waits for them, and for the label files being saved, for ten seconds at most */
+async function stopWriting() {
+  const until = Date.now() + 10_000
+  // A job started while the others stop is stopped in turn
+  while (writing.size && Date.now() < until) {
+    for (const stop of writing.values()) stop()
+    await within(Promise.allSettled(writing.keys()), until - Date.now())
+  }
+  await within(serial(async () => {}), until - Date.now())
 }
 
 async function open(target: string, output: string | null) {
@@ -193,25 +221,29 @@ function registerIpc() {
   })
   ipcMain.handle('rename:plan', (_e, root: string, from: string, prefer: LabelFormat) =>
     renamePlan(root, from, prefer, (p) => send('rename:progress', { root, ...p })))
-  ipcMain.handle('rename:run', async (_e, root: string, from: string, to: string, prefer: LabelFormat) => {
+  ipcMain.handle('rename:run', (_e, root: string, from: string, to: string, prefer: LabelFormat) => job((async () => {
     const config = loaded?.config
     const done = await renameRun(root, from, to, prefer, config?.validate_label === 'exact' ? config.labels : null, (p) => send('rename:progress', { root, ...p }))
-    // The image list counts the changed images again and takes in the new label; the rename stands either way
+    // The image list counts the changed images again, read as they were renamed, and takes in the new label; the rename stands either way
     if (done.changed.length) {
-      await summarizeAll(root, (b) => send('project:summaries', b), config?.label_format, done.changed).catch((e) =>
+      await summarizeAll(root, (b) => send('project:summaries', b), prefer, done.changed).catch((e) =>
         send('app:error', `Some renamed label files couldn't be counted again: ${e.message}`))
     }
     return done
-  })
+  })(), () => stopJob(root, 'rename')))
   ipcMain.handle('rename:stop', (_e, root: string) => stopJob(root, 'rename'))
   ipcMain.handle('stats:read', (_e, root: string, req) => folderStats(root, req, (p) => send('stats:progress', { root, ...p })))
   ipcMain.handle('stats:stop', (_e, root: string) => stopJob(root, 'stats'))
   ipcMain.handle('stats:save', async (_e, root: string) => {
     const text = statsText(root)
     if (text === null) throw new Error('Count the folder first')
-    const r = await dialog.showSaveDialog(win!, { title: 'Save statistics as CSV', defaultPath: statsFileName(root), filters: [{ name: 'CSV files', extensions: ['csv'] }] })
+    // GTK's save dialog asks before replacing a file only when told to; the others always ask
+    const r = await dialog.showSaveDialog(win!, {
+      title: 'Save statistics as CSV', defaultPath: statsFileName(root), filters: [{ name: 'CSV files', extensions: ['csv'] }],
+      properties: ['showOverwriteConfirmation']
+    })
     if (r.canceled || !r.filePath) return null
-    await fs.writeFile(r.filePath, text)
+    await writeAtomic(r.filePath, text)
     return r.filePath
   })
 
@@ -259,11 +291,11 @@ function registerIpc() {
     keypointFiles.add(summary.file)
     return summary
   })
-  ipcMain.handle('export:run', async (_e, root: string, options: ExportOptions, out: string) => {
+  ipcMain.handle('export:run', (_e, root: string, options: ExportOptions, out: string) => job((async () => {
     const result = await runExport(root, exportOptions(options), out, exportJob())
     if (!result.stopped) exported = result.out
     return result
-  })
+  })(), () => exporting?.abort()))
   ipcMain.handle('export:stop', () => exporting?.abort())
   // The window closed: what its checks kept goes with it
   ipcMain.handle('export:close', () => {
@@ -278,7 +310,7 @@ function registerIpc() {
   ipcMain.handle('import:read', (_e, root: string, req: ImportRequest) => readImport(root, req, (p) => send('import:progress', p)))
   ipcMain.handle('import:rows', (_e, list: 'issues' | 'skipped', code: string, offset: number) => importRows(list, code, offset))
   ipcMain.handle('import:write', (_e, policy: ImportPolicy) =>
-    writeImport(policy, (p) => send('import:progress', p), (batch) => send('project:summaries', batch)))
+    job(writeImport(policy, (p) => send('import:progress', p), (batch) => send('project:summaries', batch)), stopImport))
   ipcMain.handle('import:stop', () => stopImport())
   ipcMain.handle('import:close', () => closeImport())
 }
@@ -304,21 +336,30 @@ function createWindow() {
   if (state.maximized) win.maximize()
   win.once('ready-to-show', () => win?.show())
   // Saves wait a moment after each change: the window flushes them, or asks about unsaved
-  // work when saving isn't automatic, before it closes
+  // work when saving isn't automatic, before it closes. Then jobs that write stop, and are
+  // waited for, as are the saves under way.
   let closing = false
+  // A close under way: another click while it is changes nothing, nor asks twice about unsaved work
+  let leaving = false
   win.on('close', (e) => {
     if (closing || !win) return
     e.preventDefault()
-    const finish = (ok: boolean) => {
-      if (!ok || closing || !win) return
+    if (leaving) return
+    leaving = true
+    ipcMain.once('app:flushed', async (_e, ok: boolean) => {
+      if (!ok || !win || win.isDestroyed()) {
+        leaving = false
+        return
+      }
+      await stopWriting()
+      if (win.isDestroyed()) return
       closing = true
       const s = readState()
       s.maximized = win.isMaximized()
       if (!s.maximized) s.bounds = win.getBounds()
       writeState(s)
       win.close()
-    }
-    ipcMain.once('app:flushed', (_e, ok: boolean) => finish(ok))
+    })
     send('app:flush', null)
   })
   win.webContents.setWindowOpenHandler(({ url }) => {

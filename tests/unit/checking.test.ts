@@ -5,7 +5,7 @@ import sharp from 'sharp'
 import { afterAll, beforeAll, describe, expect, test } from 'vitest'
 import {
   checkFolder, type CheckSummary, fixShapes, folderStats, forgetChecks, issuesOf, problemPage, type ProblemQuery, type Progress, renamePlan, renameRun,
-  statsText, stopJob, strayFile, together
+  statsFileName, statsText, stopJob, strayFile, together
 } from '../../src/main/checking'
 import { forgetDataset, readDataset } from '../../src/main/dataset'
 import { Stale } from '../../src/renderer/src/stale'
@@ -515,6 +515,10 @@ describe('statistics', () => {
     if ('stopped' in again) throw new Error('stopped')
     expect(again.sizes.trainSize).toBe(6400)
     expect(again.labels[0]).toEqual({ label: 'cat', objects: 3, images: 2, types: { rectangle: 2, polygon: 1 } })
+  })
+
+  test('Save as CSV suggests a file beside the folder, named after it', () => {
+    expect(statsFileName(path.join(tmpdir(), 'birds'))).toBe(path.join(tmpdir(), 'birds-statistics.csv'))
   })
 
   test("slices' statistics put together are the whole folder's", () => {
