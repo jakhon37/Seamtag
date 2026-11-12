@@ -344,12 +344,13 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
     const same = quick && sameImages(before!.images, images)
     let duplicates = same ? before!.duplicates : null
     if (!duplicates) {
-      report({ phase: 'compare', done: 0, total: images.length }, true)
+      // Counted in the files compared, which findDuplicateImages reports once it knows them
+      report({ phase: 'compare', done: 0, total: 0 }, true)
       duplicates = await findDuplicateImages(root, images, { signal, onProgress: (done, total) => report({ phase: 'compare', done, total }) })
     }
     let orphans = same ? before!.orphans : null
     if (!orphans) {
-      report({ phase: 'orphans', done: 0, total: images.length }, true)
+      report({ phase: 'orphans', done: 0, total: 0 }, true)
       orphans = await orphanLabels(root, images, { signal, onProgress: (done, total) => report({ phase: 'orphans', done, total }) })
     }
     // Which images share a label file hangs on nothing but where each one's labels are read from

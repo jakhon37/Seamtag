@@ -144,11 +144,12 @@ function partOf(image: DatasetImage, i: number, issues: Issue[] | null): Part | 
     if (!bits) return skip('warning', 'coco-mask-unreadable', "can't be read, so it's left out")
     // How many set pixels lie past the image, which COCO's mask can't hold
     let cut = 0
+    const data = bits.data
     for (let y = 0; y < bits.height; y++) {
       const iy = roundHalfEven(bits.y) + y
       for (let x = 0; x < bits.width; x++) {
         const ix = roundHalfEven(bits.x) + x
-        if (bits.data[y * bits.width + x] && (ix < 0 || iy < 0 || ix >= image.width || iy >= image.height)) cut++
+        if (data[y * bits.width + x] && (ix < 0 || iy < 0 || ix >= image.width || iy >= image.height)) cut++
       }
     }
     if (cut) issues?.push(issue('info', 'coco-outside', name, `${name}: ${what} has ${cut} ${cut === 1 ? 'pixel' : 'pixels'} past the image, so ${cut === 1 ? "it's" : "they're"} left out`, i))

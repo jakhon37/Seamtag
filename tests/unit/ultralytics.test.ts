@@ -283,7 +283,7 @@ describe('label rows written for each task', () => {
     ])
     expect(out.issues.map((i) => [i.severity, i.code, i.shape])).toEqual([['warning', 'yolo-not-pose', 6], ['warning', 'yolo-keypoint-outside', 5]])
     expect(verifyRows(out.text, 'pose', 2, [3, 3]).status).toBe('ok')
-    expect(() => labelRows(image([]), 'pose', ['person'])).toThrow(/keypoint file/)
+    expect(() => labelRows(image([]), 'pose', ['person'])).toThrow(/keypoints file/)
     // An object wholly outside the image is left out; one cut at the edge keeps its size within the image
     const edge = labelRows(image([rect('hand', [[-30, -20], [-10, -5]]), rect('person', [[90, 40], [130, 70]])]), 'pose', ['person', 'hand'], SCHEMA)
     expect(edge.text).toBe('0 0.950000 0.900000 0.100000 0.200000 0 0 0 0 0 0 0 0 0\n')
@@ -589,7 +589,7 @@ describe('which task a dataset is for', () => {
     const mixed = guess(['0 0.5 0.5 0.2 0.2\n0 0.1 0.1 0.3 0.1 0.3 0.4\n', '1 0.1 0.1 0.3 0.1 0.3 0.4 0.2 0.5\n'])
     expect(mixed).toMatchObject({ task: 'segment', others: ['detect'], ask: true })
     expect(mixed.stats.mixed).toBe(1)
-    expect(mixed.reason).toMatch(/1 files? mix both, which Ultralytics skips/)
+    expect(mixed.reason).toMatch(/1 file mixes both, which Ultralytics skips/)
   })
   test('rows of 4 corners are rotated boxes only when every one is a rectangle and some are turned; the window asks either way', () => {
     const turned = '0 0.2 0.1 0.5 0.3 0.4 0.45 0.1 0.25\n'
@@ -604,7 +604,7 @@ describe('which task a dataset is for', () => {
   })
   test("kpt_shape in data.yaml means pose; without it, rows whose every third value is 0, 1 or 2 look like keypoints", () => {
     expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n'], [2, 3])).toMatchObject({ task: 'pose', kptShape: [2, 3], ask: false })
-    expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n'], [17, 3]).reason).toMatch(/1 of the 1 rows don't have the 56 values/)
+    expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n'], [17, 3]).reason).toMatch(/1 of the 1 rows doesn't have the 56 values/)
     expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n', '0 0.3 0.3 0.1 0.1 0.3 0.3 1 0.32 0.31 2\n'])).toMatchObject({ task: 'pose', kptShape: [2, 3], others: ['segment'], ask: true })
     // One length of odd values: outlines, or keypoints without visibility
     expect(guess(['0 0.1 0.1 0.3 0.1 0.3 0.4\n', '1 0.2 0.2 0.4 0.2 0.4 0.5\n'])).toMatchObject({ task: 'segment', others: ['pose'], kptShape: [1, 2], ask: true })

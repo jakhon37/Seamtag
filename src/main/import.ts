@@ -239,7 +239,7 @@ const TITLES: Record<string, string> = {
   'import-no-annotations': 'Images without annotations',
   'import-two-files': 'Images with two label files',
   'import-keypoint-names': 'Keypoint names',
-  'import-keypoint-file': 'Keypoint file',
+  'import-keypoint-file': 'Keypoints file',
   // Why an image was left as it was, after writing
   labelled: 'Images that have labels, left as they are',
   unchanged: 'Images that have every shape already',
@@ -309,7 +309,7 @@ function checkRequest(req: ImportRequest) {
   if (!LABEL_FORMATS.includes(req.prefer)) throw new Error(`${req.prefer} isn't a label format`)
   if (!Array.isArray(req.labels) || !req.labels.every((l) => typeof l === 'string')) throw new Error('The label list must be names')
   if (req.task !== undefined && !YOLO_TASKS.includes(req.task)) throw new Error(`${req.task} isn't a YOLO task`)
-  if (req.keypoints != null && (typeof req.keypoints !== 'string' || !path.isAbsolute(req.keypoints))) throw new Error('Pick the keypoint file again: its path is incomplete')
+  if (req.keypoints != null && (typeof req.keypoints !== 'string' || !path.isAbsolute(req.keypoints))) throw new Error('Pick the keypoints file again: its path is incomplete')
 }
 
 /**
@@ -610,7 +610,7 @@ async function readLabelRows(s: Session, task: YoloTask, keypoints: string | nul
       try {
         // Read whole, here in the app: a file far larger than any keypoint file isn't
         const { size } = await fs.stat(keypoints)
-        if (size > KEYPOINT_FILE_BYTES) throw new Error(`it's ${(size / 2 ** 20).toFixed(1)} MB, more than the ${KEYPOINT_FILE_BYTES / 2 ** 20} MB a keypoint file may be`)
+        if (size > KEYPOINT_FILE_BYTES) throw new Error(`it's ${(size / 2 ** 20).toFixed(1)} MB, more than the ${KEYPOINT_FILE_BYTES / 2 ** 20} MB a keypoints file may be`)
         const schema = readPoseYaml(await fs.readFile(keypoints, 'utf8')).schema
         const mapped: Record<number, string[]> = {}
         ds.names.forEach((n, c) => {
@@ -628,7 +628,7 @@ async function readLabelRows(s: Session, task: YoloTask, keypoints: string | nul
       }
     }
     if (from === 'generated' && kptShape) {
-      issues.push(say('info', 'import-keypoint-names', null, `data.yaml has no kpt_names, so the keypoints are called kp0 to kp${kptShape[0] - 1}: pick a keypoint file to name them`))
+      issues.push(say('info', 'import-keypoint-names', null, `data.yaml has no kpt_names, so the keypoints are called kp0 to kp${kptShape[0] - 1}: pick a keypoints file to name them`))
     }
   }
   const live = s.entries.filter((e) => !e.blocked)

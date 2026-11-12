@@ -152,7 +152,7 @@ export function yamlString(s: string): string {
 export type PoseFile = { schema: KeypointSchema; hasVisible: boolean }
 
 function poseFail(message: string): never {
-  throw new Error(`The keypoint file ${message}`)
+  throw new Error(`The keypoints file ${message}`)
 }
 
 // PyYAML, which X-AnyLabeling reads pose files with, takes YAML 1.1's yes, no, on and off for true and false
@@ -273,7 +273,7 @@ export function flipIndex(schema: KeypointSchema): { flipIdx: number[] | null; i
   if (missing.length) {
     return {
       flipIdx: null,
-      issues: [issue('warning', 'pose-flip', null, `The keypoint file gives flip pairs for some classes but not ${missing.map(([c]) => c).join(', ')}, so data.yaml has no flip_idx and Ultralytics won't mirror images`)]
+      issues: [issue('warning', 'pose-flip', null, `The keypoints file gives flip pairs for some classes but not ${missing.map(([c]) => c).join(', ')}, so data.yaml has no flip_idx and Ultralytics won't mirror images`)]
     }
   }
   let first: number[] | null = null
@@ -291,7 +291,7 @@ export function flipIndex(schema: KeypointSchema): { flipIdx: number[] | null; i
     else if (index.some((v, i) => v !== first![i])) {
       return {
         flipIdx: null,
-        issues: [issue('warning', 'pose-flip', null, "The keypoint file's classes swap different keypoints when mirrored, and data.yaml has one flip_idx for all, so it's left out and Ultralytics won't mirror images")]
+        issues: [issue('warning', 'pose-flip', null, "The keypoints file's classes swap different keypoints when mirrored, and data.yaml has one flip_idx for all, so it's left out and Ultralytics won't mirror images")]
       }
     }
   }
@@ -303,9 +303,10 @@ export function flipIndex(schema: KeypointSchema): { flipIdx: number[] | null; i
 /** The box of a mask's pixels, each pixel spanning x to x + 1; null when it has none */
 export function pixelBox(m: MaskBits): [number, number, number, number] | null {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  const data = m.data
   for (let y = 0; y < m.height; y++) {
     for (let x = 0; x < m.width; x++) {
-      if (!m.data[y * m.width + x]) continue
+      if (!data[y * m.width + x]) continue
       if (x < x0) x0 = x
       if (x > x1) x1 = x
       if (y < y0) y0 = y
@@ -407,7 +408,7 @@ export function poseInstances(image: DatasetImage, schema: KeypointSchema): { in
       const p = image.shapes[i]
       const k = names.indexOf(p.label)
       if (k < 0) {
-        say('error', 'pose-unknown-keypoint', `point ${p.label} in group ${g} isn't one of ${label}'s keypoints in the keypoint file`, i)
+        say('error', 'pose-unknown-keypoint', `point ${p.label} in group ${g} isn't one of ${label}'s keypoints in the keypoints file`, i)
         continue
       }
       if (keypoints[k]) {

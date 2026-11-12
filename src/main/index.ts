@@ -224,8 +224,9 @@ function registerIpc() {
   ipcMain.handle('rename:run', (_e, root: string, from: string, to: string, prefer: LabelFormat) => job((async () => {
     const config = loaded?.config
     const done = await renameRun(root, from, to, prefer, config?.validate_label === 'exact' ? config.labels : null, (p) => send('rename:progress', { root, ...p }))
-    // The image list counts the changed images again, read as they were renamed, and takes in the new label; the rename stands either way
-    if (done.changed.length) {
+    // The image list counts the changed images again, read as they were renamed, and takes in the new label; the rename stands either way.
+    // A folder closed meanwhile has no image list to count them in.
+    if (done.changed.length && rootsOpen().includes(root)) {
       await summarizeAll(root, (b) => send('project:summaries', b), prefer, done.changed).catch((e) =>
         send('app:error', `Some renamed label files couldn't be counted again: ${e.message}`))
     }

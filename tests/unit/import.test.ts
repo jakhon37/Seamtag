@@ -854,7 +854,7 @@ describe('a YOLO dataset', () => {
     root = await open(bare)
     p = await read(root, { kind: 'yolo', path: path.join(bare, 'data.yaml') })
     expect(p.keypoints).toEqual({ from: 'generated', file: null, count: 3 })
-    expect(group(p, 'import-keypoint-names')!.rows).toEqual(["data.yaml has no kpt_names, so the keypoints are called kp0 to kp2: pick a keypoint file to name them"])
+    expect(group(p, 'import-keypoint-names')!.rows).toEqual(["data.yaml has no kpt_names, so the keypoints are called kp0 to kp2: pick a keypoints file to name them"])
     const keypoints = path.join(folder(), 'pose.yaml')
     writeFileSync(keypoints, writePoseYaml({ classes: { person: ['top', 'left', 'right'] } }))
     p = await read(root, { kind: 'yolo', path: path.join(bare, 'data.yaml'), keypoints })
@@ -963,7 +963,7 @@ describe('a YOLO dataset', () => {
     const keypoints = path.join(folder(), 'pose.yaml')
     writeFileSync(keypoints, `${writePoseYaml({ classes: { person: ['top', 'left', 'right'] } })}# ${'x'.repeat(5 * 2 ** 20)}\n`)
     const p = await read(root, { kind: 'yolo', path: path.join(bare, 'data.yaml'), keypoints })
-    expect([p.keypoints, group(p, 'import-keypoint-file')!.rows]).toEqual([{ from: 'generated', file: keypoints, count: 3 }, ["pose.yaml can't be used: it's 5.0 MB, more than the 4 MB a keypoint file may be"]])
+    expect([p.keypoints, group(p, 'import-keypoint-file')!.rows]).toEqual([{ from: 'generated', file: keypoints, count: 3 }, ["pose.yaml can't be used: it's 5.0 MB, more than the 4 MB a keypoints file may be"]])
   })
 
   test('an empty label file gives an image without labels an empty one; an image with labels keeps them, whatever the choice', async () => {

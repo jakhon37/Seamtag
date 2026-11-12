@@ -283,8 +283,8 @@ function dropStraight(ring: number[][]): number[][] {
 export function maskOutlines(m: MaskBits): { outer: number[][][]; holes: number } {
   const W = m.width + 2, H = m.height + 2
   // A row and column of background around it, so parts at the edge close too
-  const padded = new Uint8Array(W * H)
-  for (let y = 0; y < m.height; y++) for (let x = 0; x < m.width; x++) padded[(y + 1) * W + x + 1] = m.data[y * m.width + x] ? 1 : 0
+  const padded = new Uint8Array(W * H), data = m.data
+  for (let y = 0; y < m.height; y++) for (let x = 0; x < m.width; x++) padded[(y + 1) * W + x + 1] = data[y * m.width + x] ? 1 : 0
   const outer: number[][][] = []
   let holes = 0
   for (const contour of findContours({ data: padded, width: W, height: H })) {
@@ -300,10 +300,10 @@ export function maskOutlines(m: MaskBits): { outer: number[][][]; holes: number 
 
 /** The corners of a mask's pixels that a hull around them can touch: each row's outer two pixels' */
 function maskCorners(m: MaskBits): Point[] {
-  const out: Point[] = []
+  const out: Point[] = [], data = m.data
   for (let y = 0; y < m.height; y++) {
     let lo = -1, hi = -1
-    for (let x = 0; x < m.width; x++) if (m.data[y * m.width + x]) { if (lo < 0) lo = x; hi = x }
+    for (let x = 0; x < m.width; x++) if (data[y * m.width + x]) { if (lo < 0) lo = x; hi = x }
     if (lo >= 0) out.push([m.x + lo, m.y + y], [m.x + lo, m.y + y + 1], [m.x + hi + 1, m.y + y], [m.x + hi + 1, m.y + y + 1])
   }
   return out
@@ -474,7 +474,7 @@ export function joinOutlines(rings: number[][][]): number[][] {
  */
 export function labelRows(image: DatasetImage, task: YoloTask, classes: string[], schema?: KeypointSchema): Rows {
   if (task === 'pose') {
-    if (!schema) throw new Error('A YOLO pose export needs a keypoint file')
+    if (!schema) throw new Error('A YOLO pose export needs a keypoints file')
     const { instances, issues } = poseInstances(image, schema)
     const keypointNames = new Set(Object.values(schema.classes).flat())
     const used = new Set(instances.flatMap((p) => p.shapes))
@@ -483,7 +483,7 @@ export function labelRows(image: DatasetImage, task: YoloTask, classes: string[]
       if (used.has(i) || told.has(i)) return
       if (CLOSED_TYPES.has(s.shape_type) && Object.hasOwn(schema.classes, s.label)) return
       if (s.shape_type === 'point' && keypointNames.has(s.label)) return
-      issues.push(issue('warning', 'yolo-not-pose', image.name, `${image.name}: ${s.label} isn't a class or keypoint in the keypoint file, so it's left out`, i))
+      issues.push(issue('warning', 'yolo-not-pose', image.name, `${image.name}: ${s.label} isn't a class or keypoint in the keypoints file, so it's left out`, i))
     })
     const rows = poseRows(image, instances, classes, schema)
     return { ...rows, issues: [...issues, ...rows.issues] }
@@ -878,11 +878,13 @@ export function guessTask(stats: RowStats, kptShape: [number, number] | null = n
   const guess = (task: YoloTask, reason: string, others: YoloTask[] = [], kpt: [number, number] | null = null, ask = others.length > 0): TaskGuess =>
     ({ task, kptShape: kpt, others, ask, reason, stats })
   const count = (n: number) => stats.lengths[n] ?? 0
+  // A number with the words for one or for more
+  const amount = (v: number, one: string, many: string) => `${v.toLocaleString('en-GB')} ${v === 1 ? one : many}`
   const lengths = Object.keys(stats.lengths).map(Number).filter((n) => count(n)).sort((a, b) => a - b)
   if (kptShape) {
     const want = 5 + kptShape[0] * kptShape[1]
     const off = stats.rows - count(want)
-    return guess('pose', `data.yaml gives kpt_shape [${kptShape.join(', ')}]${off ? `, though ${off} of the ${stats.rows} rows don't have the ${want} values it needs` : ''}`, [], kptShape)
+    return guess('pose', `data.yaml gives kpt_shape [${kptShape.join(', ')}]${off ? `, though ${off.toLocaleString('en-GB')} of the ${stats.rows.toLocaleString('en-GB')} rows ${off === 1 ? "doesn't" : "don't"} have the ${want} values it needs` : ''}`, [], kptShape)
   }
   if (!lengths.length) {
     return guess('detect', stats.files ? 'The label files have no rows, so every image is a background' : 'No label files were found, so every image is a background', [], null, false)
@@ -893,20 +895,20 @@ export function guessTask(stats: RowStats, kptShape: [number, number] | null = n
     if (n === 5) return guess('detect', 'Every row is a box: a class and 4 numbers')
     if (n === 9) {
       const { upright, rotated, other } = stats.quads
-      if (!other && rotated) return guess('obb', `Every row is the 4 corners of a rectangle, and ${rotated} are turned, as rotated boxes are; they could also be 4-point outlines`, ['segment'])
-      return guess('segment', `Every row has 4 points${other ? `, and ${other} aren't rectangles` : upright ? ', all of them upright rectangles' : ''}, so they look like outlines; they could also be rotated boxes`, ['obb'])
+      if (!other && rotated) return guess('obb', `Every row is the 4 corners of a rectangle, and ${rotated.toLocaleString('en-GB')} ${rotated === 1 ? 'is' : 'are'} turned, as rotated boxes are; they could also be 4-point outlines`, ['segment'])
+      return guess('segment', `Every row has 4 points${other ? `, and ${other.toLocaleString('en-GB')} ${other === 1 ? "isn't a rectangle" : "aren't rectangles"}` : upright ? ', all of them upright rectangles' : ''}, so they look like outlines; they could also be rotated boxes`, ['obb'])
     }
     const k3 = (n - 5) / 3, k2 = (n - 5) / 2
     if (n > 5 && Number.isInteger(k3) && (stats.visible[n] ?? 0) === stats.rows) {
-      return guess('pose', `Every row is a box and ${k3} keypoints whose visibility is 0, 1 or 2`, n >= 7 && n % 2 === 1 ? ['segment'] : [], [k3, 3])
+      return guess('pose', `Every row is a box and ${amount(k3, 'keypoint', 'keypoints')} whose visibility is 0, 1 or 2`, n >= 7 && n % 2 === 1 ? ['segment'] : [], [k3, 3])
     }
-    if (n >= 7 && n % 2 === 1) return guess('segment', `Every row is an outline of ${(n - 1) / 2} points; they could also be boxes with ${k2} keypoints of x and y`, ['pose'], [k2, 2])
-    if (n > 5 && Number.isInteger(k3)) return guess('pose', `Every row has ${n} values, as a box and ${k3} keypoints have, though not every visibility is 0, 1 or 2`, [], [k3, 3], true)
+    if (n >= 7 && n % 2 === 1) return guess('segment', `Every row is an outline of ${(n - 1) / 2} points; they could also be boxes with ${k2 === 1 ? '1 keypoint' : `${k2} keypoints`} of x and y`, ['pose'], [k2, 2])
+    if (n > 5 && Number.isInteger(k3)) return guess('pose', `Every row has ${n} values, as a box and ${k3 === 1 ? '1 keypoint has' : `${k3} keypoints have`}, though not every visibility is 0, 1 or 2`, [], [k3, 3], true)
     return guess('detect', `Every row has ${n} values, which no task reads`, [], null, true)
   }
   if (lengths.some((n) => n >= 7 && n % 2 === 1)) {
     const boxes = count(5)
-    const note = boxes ? `, and ${boxes} box rows, which segment training can't take${stats.mixed ? `; ${stats.mixed} files mix both, which Ultralytics skips` : ''}` : ''
+    const note = boxes ? `, and ${amount(boxes, 'box row', 'box rows')}, which segment training can't take${stats.mixed ? `; ${amount(stats.mixed, 'file mixes', 'files mix')} both, which Ultralytics skips` : ''}` : ''
     return guess('segment', `Rows have ${values} values: outlines${note}`, boxes ? ['detect'] : [])
   }
   return guess('detect', `Rows have ${values} values, which only boxes of 5 fit`, [], null, true)

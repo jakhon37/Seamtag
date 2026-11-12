@@ -78,16 +78,16 @@ describe("X-AnyLabeling's pose file", () => {
     }
     const one = `classes:\n  person: [${names.join(', ')}]\n`
     expect(quick(one)).toEqual({ person: names })
-    expect(quick(`classes:\n  person: [${names.join(', ')}, k7]\n`)).toBe('The keypoint file names k7 twice in person')
+    expect(quick(`classes:\n  person: [${names.join(', ')}, k7]\n`)).toBe('The keypoints file names k7 twice in person')
     // Each alias is the whole list again at no cost in the file: 10 classes of 20,000 is past the 100,000 it may name
     const aliased = (n: number) => `classes:\n  c0: &L [${names.join(', ')}]\n${Array.from({ length: n - 1 }, (_, i) => `  c${i + 1}: *L\n`).join('')}`
     expect(Object.keys(quick(aliased(5)) as object)).toEqual(['c0', 'c1', 'c2', 'c3', 'c4'])
-    expect(quick(aliased(10))).toBe('The keypoint file names more than 100,000 keypoints in all, the most Seamtag reads')
+    expect(quick(aliased(10))).toBe('The keypoints file names more than 100,000 keypoints in all, the most Seamtag reads')
     // Pairs are counted too, and checked against a class's keypoints at once
     const pairs = (n: number) => `[${Array.from({ length: n }, (_, i) => `[k${i % 20000}, k${(i + 1) % 20000}]`).join(', ')}]`
     const skeleton = (n: number) => `${aliased(5)}skeleton:\n  c0: &P ${pairs(n)}\n${[1, 2, 3, 4].map((i) => `  c${i}: *P\n`).join('')}`
     expect(read(skeleton(20000))).toEqual(expect.objectContaining({ c4: names }))
-    expect(read(skeleton(20001))).toBe('The keypoint file gives more than 100,000 pairs under skeleton, the most Seamtag reads')
+    expect(read(skeleton(20001))).toBe('The keypoints file gives more than 100,000 pairs under skeleton, the most Seamtag reads')
   })
 
   test('a class named after what every object has is a class like any other', () => {
@@ -100,7 +100,7 @@ describe("X-AnyLabeling's pose file", () => {
 
   test('names from the file are quoted cut short in its messages', () => {
     const long = 'x'.repeat(100000)
-    expect(() => readPoseYaml(`classes:\n  dog: [${long}, ${long}]\n`)).toThrow(`The keypoint file names ${'x'.repeat(29)}…${'x'.repeat(30)} twice in dog`)
+    expect(() => readPoseYaml(`classes:\n  dog: [${long}, ${long}]\n`)).toThrow(`The keypoints file names ${'x'.repeat(29)}…${'x'.repeat(30)} twice in dog`)
   })
 })
 

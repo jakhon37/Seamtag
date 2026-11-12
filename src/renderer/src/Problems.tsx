@@ -31,8 +31,9 @@ export function progressText(p: Progress) {
   const of = `${number(p.done)} of ${number(p.total)}`
   switch (p.phase) {
     case 'read': return `Reading ${of} images`
-    case 'compare': return 'Comparing image files'
-    case 'orphans': return 'Looking for label files without images'
+    // Only images that share a byte size with another are read and compared
+    case 'compare': return p.total ? `Comparing ${of} image files` : 'Comparing image files'
+    case 'orphans': return p.total ? `Looking at ${of} label files for ones without images` : 'Looking for label files without images'
     case 'check': return `Checking ${of} images`
     case 'count': return `Counting ${of} images`
     case 'write': return `Writing ${of} label files`

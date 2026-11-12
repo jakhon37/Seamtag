@@ -285,12 +285,12 @@ function roundHalfEven(x: number) {
  * are cut off; returns how many set pixels were.
  */
 export function pasteMask(bits: MaskBits, mask: Uint8Array, h: number, w: number): number {
-  const x0 = roundHalfEven(bits.x), y0 = roundHalfEven(bits.y)
+  const x0 = roundHalfEven(bits.x), y0 = roundHalfEven(bits.y), data = bits.data
   let cut = 0
   for (let y = 0; y < bits.height; y++) {
     const iy = y0 + y
     for (let x = 0; x < bits.width; x++) {
-      if (!bits.data[y * bits.width + x]) continue
+      if (!data[y * bits.width + x]) continue
       const ix = x0 + x
       if (ix < 0 || iy < 0 || ix >= w || iy >= h) cut++
       else mask[ix * h + iy] = 1
@@ -312,12 +312,12 @@ export function rleFrMaskBits(bits: MaskBits, h: number, w: number): Rle {
     if (value !== p) { counts.push(c); c = 0; p = value }
     c += n
   }
-  const top = Math.min(h, Math.max(0, y0)), bottom = Math.max(top, Math.min(h, y0 + bits.height))
+  const top = Math.min(h, Math.max(0, y0)), bottom = Math.max(top, Math.min(h, y0 + bits.height)), data = bits.data
   for (let ix = 0; ix < w; ix++) {
     const x = ix - x0
     if (x < 0 || x >= bits.width || top === bottom) { run(0, h); continue }
     run(0, top)
-    for (let iy = top; iy < bottom; iy++) run(bits.data[(iy - y0) * bits.width + x] ? 1 : 0, 1)
+    for (let iy = top; iy < bottom; iy++) run(data[(iy - y0) * bits.width + x] ? 1 : 0, 1)
     run(0, h - bottom)
   }
   counts.push(c)
