@@ -92,6 +92,8 @@ type Props = {
   setProject: (p: ProjectInfo) => void
   setImages: (fn: (images: ImageItem[]) => ImageItem[]) => void
   discovered: string[]
+  /** A label no label file has any more, after a rename: it goes from those found in the files */
+  forgetLabel: (label: string) => void
   mac: boolean
   onError: (m: string) => void
   onOpenMenu: (x: number, y: number) => void
@@ -178,14 +180,16 @@ function maskCanvas(mask: string, color: string, onReady: () => void) {
 }
 
 const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
-  const { data, config, settings, setSettings, setProject, setImages, discovered, mac, onError, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
+  const { data, config, settings, setSettings, setProject, setImages, discovered, forgetLabel, mac, onError, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
   const { project, images, root } = data
   const [index, setIndex] = useState(() => Math.max(0, data.select ? images.findIndex((i) => i.name === data.select) : 0))
   const [query, setQuery] = useState(config.file_search ?? '')
   const [filter, setFilter] = useState<Filter>('all')
   const [sort, setSort] = useState<'name' | 'certainty'>('name')
   const [mode, setModeState] = useState<Mode>('polygon')
-  const [activeClass, setActiveClass] = useState<number | null>(0)
+  // The label new shapes get, by name, so it stays the same label when the list changes under it, as a
+  // rename changes it: null to be asked each time, undefined for the list's first
+  const [active, setActive] = useState<string | null | undefined>(undefined)
   const [shapes, setShapesState] = useState<Shape[]>([])
   const [selected, setSelectedState] = useState<number[]>([])
   const [imageFlags, setImageFlags] = useState<Record<string, boolean>>({})
@@ -311,6 +315,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     shapes.forEach((s) => add(s.label))
     return names.map((name, i) => ({ name, color: labelColor(name, i, config, project.classes.find((c) => c.name === name)?.color) }))
   }, [config, project.classes, discovered, shapes])
+  const activeAt = classes.findIndex((c) => c.name === active)
+  const activeClass = active === undefined ? 0 : activeAt < 0 ? null : activeAt
   const opts = useRef({ showShapes, settings, classes, mode, activeClass, brushSize, bc })
   opts.current = { showShapes, settings, classes, mode, activeClass, brushSize, bc }
   // labelme 7's allow_out_of_bounds_points: points may go past the image's edge
@@ -1139,8 +1145,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const next = [...shapesRef.current, ...list]
     setShapes(next)
     setSelected(list.map((_, k) => next.length - list.length + k))
-    const at = classes.findIndex((c) => c.name === label)
-    if (at >= 0) setActiveClass(at)
+    if (classes.some((c) => c.name === label)) setActive(label)
     // LabelImg's beginner mode: one shape, then back to editing
     if (!settingsRef.current.advanced) setMode('edit')
   }
@@ -1635,8 +1640,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       // Painting with a shape selected continues that shape's class
       const label = (only !== null && list[only]?.label) || currentLabel()
       if (!label) return setNotice('Pick a class in the Labels list to paint with.')
-      const at = classes.findIndex((c) => c.name === label)
-      if (at >= 0) setActiveClass(at)
+      if (classes.some((c) => c.name === label)) setActive(label)
       setSelected([])
       setShapes(paintShapes(list, region, label))
     } catch (err) {
@@ -1701,7 +1705,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     setShapes(shapesRef.current.map((s, k) => (which.includes(k) ? { ...accepted(s), label, flags: { ...flagsFor(label, config.label_flags, s.flags), ...accepted(s).flags } } : s)))
   }
   const chooseClass = (i: number) => {
-    setActiveClass(i)
+    setActive(classes[i].name)
     if (selectedRef.current.length) relabel(selectedRef.current, classes[i].name)
   }
 
@@ -2206,6 +2210,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (has(from) && !done.left && done.changed.length) {
       setProject({ ...project, classes: has(to) ? project.classes.filter((c) => c.name !== from) : project.classes.map((c) => (c.name === from ? { ...c, name: to } : c)) })
     }
+    // So do the labels found in the files, and the label new shapes get. The config's labels stay listed.
+    if (!done.left && done.changed.length) {
+      forgetLabel(from)
+      setActive((a) => ((a === undefined ? classes[0]?.name : a) === from ? to : a))
+    }
     if (done.changed.length) reloadImages(done.changed)
     setLabelsChanged((n) => n + 1)
     const told = [`${done.stopped ? 'Stopped after renaming' : 'Renamed'} ${counted(done.shapes, 'shape')} in ${counted(done.changed.length, 'image')} from “${from}” to “${to}”.`]
@@ -2228,7 +2237,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (config.validate_label === 'exact' && !config.labels?.includes(name)) return onError(`“${name}” isn't in the label list, and only listed labels are allowed.`)
     const color = labelColor(name, classes.length, config)
     setProject({ ...project, classes: [...classes.map((c) => ({ name: c.name, color: c.color })), { name, color }] })
-    setActiveClass(classes.length)
+    setActive(name)
     setNewClass('')
   }
   const recolor = (name: string, color: string) => {
@@ -2882,7 +2891,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
               <div className="classes">
                 {classes.map((c, i) => (
                   <div key={c.name} className={`class ${i === activeClass ? 'on' : ''}`} role="button" tabIndex={0}
-                    onClick={() => (i === activeClass && !selected.length ? setActiveClass(null) : chooseClass(i))}
+                    onClick={() => (i === activeClass && !selected.length ? setActive(null) : chooseClass(i))}
                     title={i === activeClass ? 'New shapes get this label. Click again to be asked each time.' : 'Label new shapes with this'}>
                     <label className="swatch" style={{ background: c.color }} onClick={(e) => e.stopPropagation()} title="Change colour">
                       <input type="color" value={c.color} onChange={(e) => recolor(c.name, e.target.value)} aria-label={`Colour of ${c.name}`} />

@@ -139,6 +139,8 @@ export default function App() {
       return fresh.length ? [...list, ...fresh] : list
     })
   }), [])
+  // A rename took a label out of every label file: it's no longer one found in them
+  const forgetLabel = useCallback((label: string) => setDiscovered((list) => list.filter((l) => l !== label)), [])
   // Closing the window: unsaved work is saved, or asked about, first
   useEffect(() => window.api.onFlush(async () => {
     const ok = labeler.current ? await labeler.current.canLeave() : true
@@ -334,7 +336,7 @@ export default function App() {
       ) : (
         <div className="page">
           <Labeler key={folder} ref={labeler} data={data} config={config} settings={settings} setSettings={setSettings} onChangeOutput={changeOutput} onNextToImages={nextToImages}
-            setProject={setProject} setImages={setImages} discovered={discovered} mac={mac} onError={showError}
+            setProject={setProject} setImages={setImages} discovered={discovered} forgetLabel={forgetLabel} mac={mac} onError={showError}
             onOpenMenu={(x, y) => setContext({ x, y })} onChange={() => setTick((t) => t + 1)} />
         </div>
       )}

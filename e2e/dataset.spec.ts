@@ -501,11 +501,54 @@ test('the label list follows a rename once no label file has the old name', asyn
   expect(classes()).toEqual([{ name: 'Cat', color: '#c71585' }])
   await expect(page.locator('.loading.notice')).toContainText('“Cat” stays in the label list while 1 image has it.')
   expect(shapesIn(dir, 'd')[0].label).toBe('Cat')
+  await expect(page.locator('section[aria-label="Labels"] .class .name', { hasText: /^Cat$/ })).toHaveCount(1)
   // Again, with the trash taking it: the label list's Cat becomes cat, its colour kept
   await renameCat()
   await expect(page.locator('.loading.notice')).toContainText('Renamed 1 shape in 1 image from “Cat” to “cat”.')
   expect(shapesIn(dir, 'd')[0].label).toBe('cat')
   await expect.poll(classes).toEqual([{ name: 'cat', color: '#c71585' }])
+  await expect(page.locator('section[aria-label="Labels"] .class .name', { hasText: /^Cat$/ })).toHaveCount(0)
+  await finish(app, errors)
+})
+
+test('after a rename the label list no longer offers the old name, and new shapes still get the label picked for them', async () => {
+  const dir = await project('dataset-label-list', {
+    a: doc('a', [square('dgo', 20, 20, 120, 120)]), b: doc('b', [square('dog', 30, 30, 90, 90)]), c: doc('c', [square('cow', 40, 40, 140, 140)])
+  }, [{ name: 'dgo', color: '#aa0000' }, { name: 'cow', color: '#00aa00' }, { name: 'dog', color: '#0000aa' }, { name: 'cat', color: '#aaaa00' }])
+  const { app, page, errors } = await launch(dir)
+  await fakeTrash(app, path.join(BASE, 'dataset-label-list-trash'))
+  const names = page.locator('section[aria-label="Labels"] .class .name')
+  const active = page.locator('section[aria-label="Labels"] .class.on .name')
+  const rename = async (from: string, to: string) => {
+    await menu(page, 'Dataset', 'Statistics…')
+    const stats = page.getByRole('dialog', { name: 'Statistics' })
+    await stats.locator(`.stats-labels tbody tr[data-label="${from}"]`).getByRole('button', { name: 'Rename…' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Rename a label' })
+    await expect(dialog).toContainText('Renames 1 shape in 1 image')
+    await dialog.getByLabel('New name').fill(to)
+    await dialog.getByRole('button', { name: 'Rename 1 shape' }).click()
+    await expect(dialog).toHaveCount(0)
+    await expect(stats.locator(`.stats-labels tbody tr[data-label="${from}"]`)).toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await expect(stats).toHaveCount(0)
+  }
+  await expect(names).toHaveText(['dgo', 'cow', 'dog', 'cat'])
+  // The typo is the label new shapes get, on key 1
+  await page.keyboard.press('1')
+  await expect(active).toHaveText('dgo')
+  await rename('dgo', 'dog')
+  await expect(page.locator('.loading.notice')).toContainText('Renamed 1 shape in 1 image from “dgo” to “dog”.')
+  // It's gone from the list and its number key, and new shapes get the name it was given
+  await expect(names).toHaveText(['cow', 'dog', 'cat'])
+  await expect(active).toHaveText('dog')
+  // A label above it in the list goes: new shapes still get dog, not the label that moves up into its place
+  await rename('cow', 'cat')
+  await expect(names).toHaveText(['dog', 'cat'])
+  await expect(active).toHaveText('dog')
+  await page.keyboard.press('2')
+  await expect(active).toHaveText('cat')
+  expect([shapesIn(dir, 'a')[0].label, shapesIn(dir, 'c')[0].label]).toEqual(['dog', 'cat'])
+  await expect.poll(() => JSON.parse(readFileSync(path.join(dir, '.myseg', 'project.json'), 'utf8')).classes.map((c: { name: string }) => c.name)).toEqual(['dog', 'cat'])
   await finish(app, errors)
 })
 
