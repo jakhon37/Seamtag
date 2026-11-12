@@ -33,6 +33,7 @@ const POLICIES: { policy: ImportPolicy; label: string }[] = [
 
 const count = (n: number) => n.toLocaleString('en-GB')
 const some = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`
+const listed = (words: string[]) => (words.length < 2 ? words.join('') : `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`)
 const ICONS = { error: CircleAlert, warning: TriangleAlert, info: Info }
 // As the Export window names them
 const SEVERITIES = { error: 'Error', warning: 'Warning', info: 'Note' }
@@ -192,6 +193,8 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
   const n = p ? writes(p, policy) : 0
   const asking = !!p?.task?.ask && !confirmed
   const labelRows = p ? p.labels.map((l) => ({ label: l.label, shapes: l.fresh + (policy === 'skip' ? 0 : l.labelled) })).filter((l) => l.shapes) : []
+  // The tasks the rows fit, the guess first, when they fit more than one
+  const fits = p?.task?.others.length ? [p.task.guess, ...p.task.others] : []
   const shapes = labelRows.reduce((sum, l) => sum + l.shapes, 0)
   // With no label list, every label shows under Labels as found in the label files: that's nothing to say
   const unlisted = report && labels ? report.labels.filter((l) => !l.listed).map((l) => l.label) : []
@@ -233,17 +236,22 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
                 <h4>Task</h4>
                 <div className={`import-seg ${asking ? 'ask' : ''}`} role="radiogroup" aria-label="Task">
                   {TASKS.map((t) => {
-                    // While the window asks, no task is chosen: the guess is only marked as one
+                    // While the window asks, no task is chosen: the guess is only marked as one, and
+                    // the tasks the rows fit stand out from those they don't
                     const on = !asking && p.task!.task === t.task
                     return (
-                      <button key={t.task} role="radio" aria-checked={on} className={on ? 'on' : ''} title={t.title} onClick={() => chooseTask(t.task)}>
+                      <button key={t.task} role="radio" aria-checked={on} className={on ? 'on' : asking && fits.includes(t.task) ? 'fits' : ''} title={t.title} onClick={() => chooseTask(t.task)}>
                         {t.label}{p.task!.guess === t.task ? ' (guess)' : ''}
                       </button>
                     )
                   })}
                 </div>
                 <p className="muted">{p.task.reason}.</p>
-                {asking && <p className="warn ask">These rows fit more than one task: click the one they were made for.</p>}
+                {asking && (
+                  <p className="warn ask">
+                    {fits.length ? `These rows fit ${listed(fits.map((task) => TASKS.find((t) => t.task === task)!.label))}: click the one they were made for.` : 'Click the task these rows were made for.'}
+                  </p>
+                )}
               </section>
             )}
             {p.keypoints && (

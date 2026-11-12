@@ -595,13 +595,16 @@ describe('which task a dataset is for', () => {
     expect(mixed.stats.mixed).toBe(1)
     expect(mixed.reason).toMatch(/1 file mixes both, which Ultralytics skips/)
   })
-  test('rows of 4 corners are rotated boxes only when every one is a rectangle and some are turned; the window asks either way', () => {
+  test('rows of 4 corners are rotated boxes only when every one is a rectangle and some are rotated; the window asks either way, naming the tasks as its buttons do', () => {
     const turned = '0 0.2 0.1 0.5 0.3 0.4 0.45 0.1 0.25\n'
     const upright = '0 0.1 0.1 0.3 0.1 0.3 0.4 0.1 0.4\n'
     const other = '0 0.1 0.1 0.3 0.1 0.35 0.4 0.1 0.4\n'
-    expect(guess([turned, upright])).toMatchObject({ task: 'obb', others: ['segment'], ask: true })
-    expect(guess([upright])).toMatchObject({ task: 'segment', others: ['obb'], ask: true })
-    expect(guess([turned, other])).toMatchObject({ task: 'segment', others: ['obb'] })
+    expect(guess([turned, upright, turned])).toMatchObject({
+      task: 'obb', others: ['segment'], ask: true, reason: 'Every row is the 4 corners of a rectangle, and 2 are rotated: boxes for OBB, or outlines of 4 points for Segment'
+    })
+    expect(guess([turned]).reason).toBe('Every row is the 4 corners of a rectangle, and 1 is rotated: boxes for OBB, or outlines of 4 points for Segment')
+    expect(guess([upright])).toMatchObject({ task: 'segment', others: ['obb'], ask: true, reason: 'Every row has 4 points, all of them upright rectangles: outlines for Segment, or boxes for OBB' })
+    expect(guess([turned, other])).toMatchObject({ task: 'segment', others: ['obb'], reason: "Every row has 4 points, and 1 isn't a rectangle: outlines for Segment, or boxes for OBB" })
     // In pixels, a skewed rectangle of shares is no rectangle
     expect(quadKind([[0.2, 0.1], [0.5, 0.3], [0.4, 0.45], [0.1, 0.25]])).toBe('rotated')
     expect(quadKind([[0.2, 0.1], [0.5, 0.3], [0.4, 0.45], [0.1, 0.25]], [100, 50])).toBe('other')
@@ -609,9 +612,16 @@ describe('which task a dataset is for', () => {
   test("kpt_shape in data.yaml means pose; without it, rows whose every third value is 0, 1 or 2 look like keypoints", () => {
     expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n'], [2, 3])).toMatchObject({ task: 'pose', kptShape: [2, 3], ask: false })
     expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n'], [17, 3]).reason).toMatch(/1 of the 1 rows doesn't have the 56 values/)
-    expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n', '0 0.3 0.3 0.1 0.1 0.3 0.3 1 0.32 0.31 2\n'])).toMatchObject({ task: 'pose', kptShape: [2, 3], others: ['segment'], ask: true })
+    expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0\n', '0 0.3 0.3 0.1 0.1 0.3 0.3 1 0.32 0.31 2\n'])).toMatchObject({
+      task: 'pose', kptShape: [2, 3], others: ['segment'], ask: true,
+      reason: 'Every row has 11 values: a box and 2 keypoints whose visibility is 0, 1 or 2, for Pose, or an outline of 5 points, for Segment'
+    })
+    // An even count of values is no outline: nothing to ask
+    expect(guess(['0 0.5 0.5 0.2 0.2 0.45 0.45 2\n'])).toMatchObject({ task: 'pose', kptShape: [1, 3], others: [], ask: false, reason: 'Every row is a box and 1 keypoint whose visibility is 0, 1 or 2' })
     // One length of odd values: outlines, or keypoints without visibility
-    expect(guess(['0 0.1 0.1 0.3 0.1 0.3 0.4\n', '1 0.2 0.2 0.4 0.2 0.4 0.5\n'])).toMatchObject({ task: 'segment', others: ['pose'], kptShape: [1, 2], ask: true })
+    expect(guess(['0 0.1 0.1 0.3 0.1 0.3 0.4\n', '1 0.2 0.2 0.4 0.2 0.4 0.5\n'])).toMatchObject({
+      task: 'segment', others: ['pose'], kptShape: [1, 2], ask: true, reason: 'Every row has 7 values: an outline of 3 points for Segment, or a box and 1 keypoint of x and y for Pose'
+    })
   })
   test('label files with no rows, or no label files at all, make every image a background, and there is nothing to ask', () => {
     expect(guess(['', '\n'])).toMatchObject({ task: 'detect', ask: false, reason: 'The label files have no rows, so every image is a background', stats: { files: 2, empty: 2, rows: 0 } })

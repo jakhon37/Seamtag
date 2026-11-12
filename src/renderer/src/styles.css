@@ -432,6 +432,8 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 /* The light theme's raised grey is hardly darker than the track: the chosen one is white, with an edge */
 :root[data-theme="light"] .import-seg button.on { background: var(--panel); box-shadow: 0 0 0 1px var(--line), 0 1px 2px #0002; }
 .import-seg.ask { box-shadow: 0 0 0 1px var(--warn-text); }
+/* While the task is asked, those the rows fit read in the text colour, the others stay muted */
+.import-seg.ask button.fits { color: var(--text); }
 .import-body .warn.ask { margin: 0; font-weight: 550; }
 .import-labels { max-height: 184px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; }
 .import-labels table { width: 100%; border-collapse: collapse; }

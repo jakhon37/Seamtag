@@ -869,10 +869,12 @@ export type TaskGuess = {
 /**
  * Which task a dataset is for, decided once for the whole dataset. data.yaml's kpt_shape means
  * pose. Otherwise the rows decide: all 5 values, boxes; all 9, rotated boxes when every one is a
- * rectangle and some are turned, else 4-point outlines, and the window asks either way; all one
+ * rectangle and some are rotated, else 4-point outlines, and the window asks either way; all one
  * length with every third value after the box 0, 1 or 2, keypoints with visibility, as
  * Ultralytics' _infer_ndjson_kpt_shape guesses (ultralytics/data/converter.py); odd lengths of 7
- * or more, outlines, which could also be keypoints without visibility.
+ * or more, outlines, which could also be keypoints without visibility. Where the rows fit more
+ * than one task, the reason ends with what they are for each, by the names the window gives the
+ * tasks: "boxes for OBB, or outlines of 4 points for Segment".
  */
 export function guessTask(stats: RowStats, kptShape: [number, number] | null = null): TaskGuess {
   const guess = (task: YoloTask, reason: string, others: YoloTask[] = [], kpt: [number, number] | null = null, ask = others.length > 0): TaskGuess =>
@@ -895,14 +897,16 @@ export function guessTask(stats: RowStats, kptShape: [number, number] | null = n
     if (n === 5) return guess('detect', 'Every row is a box: a class and 4 numbers')
     if (n === 9) {
       const { upright, rotated, other } = stats.quads
-      if (!other && rotated) return guess('obb', `Every row is the 4 corners of a rectangle, and ${rotated.toLocaleString('en-GB')} ${rotated === 1 ? 'is' : 'are'} turned, as rotated boxes are; they could also be 4-point outlines`, ['segment'])
-      return guess('segment', `Every row has 4 points${other ? `, and ${other.toLocaleString('en-GB')} ${other === 1 ? "isn't a rectangle" : "aren't rectangles"}` : upright ? ', all of them upright rectangles' : ''}, so they look like outlines; they could also be rotated boxes`, ['obb'])
+      if (!other && rotated) return guess('obb', `Every row is the 4 corners of a rectangle, and ${amount(rotated, 'is rotated', 'are rotated')}: boxes for OBB, or outlines of 4 points for Segment`, ['segment'])
+      return guess('segment', `Every row has 4 points${other ? `, and ${amount(other, "isn't a rectangle", "aren't rectangles")}` : upright ? ', all of them upright rectangles' : ''}: outlines for Segment, or boxes for OBB`, ['obb'])
     }
     const k3 = (n - 5) / 3, k2 = (n - 5) / 2
     if (n > 5 && Number.isInteger(k3) && (stats.visible[n] ?? 0) === stats.rows) {
-      return guess('pose', `Every row is a box and ${amount(k3, 'keypoint', 'keypoints')} whose visibility is 0, 1 or 2`, n >= 7 && n % 2 === 1 ? ['segment'] : [], [k3, 3])
+      const posed = `a box and ${amount(k3, 'keypoint', 'keypoints')} whose visibility is 0, 1 or 2`
+      if (n % 2 === 0) return guess('pose', `Every row is ${posed}`, [], [k3, 3])
+      return guess('pose', `Every row has ${n} values: ${posed}, for Pose, or an outline of ${(n - 1) / 2} points, for Segment`, ['segment'], [k3, 3])
     }
-    if (n >= 7 && n % 2 === 1) return guess('segment', `Every row is an outline of ${(n - 1) / 2} points; they could also be boxes with ${k2 === 1 ? '1 keypoint' : `${k2} keypoints`} of x and y`, ['pose'], [k2, 2])
+    if (n >= 7 && n % 2 === 1) return guess('segment', `Every row has ${n} values: an outline of ${(n - 1) / 2} points for Segment, or a box and ${amount(k2, 'keypoint', 'keypoints')} of x and y for Pose`, ['pose'], [k2, 2])
     if (n > 5 && Number.isInteger(k3)) return guess('pose', `Every row has ${n} values, as a box and ${k3 === 1 ? '1 keypoint has' : `${k3} keypoints have`}, though not every visibility is 0, 1 or 2`, [], [k3, 3], true)
     return guess('detect', `Every row has ${n} values, which no task reads`, [], null, true)
   }

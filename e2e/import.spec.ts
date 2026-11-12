@@ -189,7 +189,10 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await dialog.getByRole('button', { name: 'YOLO dataset folder…' }).click()
   await expect(dialog.locator('.import-source')).toContainText('import-yolo')
   await expect(dialog).toContainText('All 3 of its images are in this folder: 3 by file name alone.')
-  await expect(dialog).toContainText('These rows fit more than one task: click the one they were made for.')
+  await expect(dialog).toContainText('Every row is the 4 corners of a rectangle, and 2 are rotated: boxes for OBB, or outlines of 4 points for Segment.')
+  await expect(dialog).toContainText('These rows fit OBB and Segment: click the one they were made for.')
+  // The two the rows fit stand out from the two they don't
+  await expect(dialog.getByRole('radiogroup', { name: 'Task' }).locator('.fits')).toHaveText(['Segment', 'OBB (guess)'])
   // No task is chosen while the window asks: the guess is only marked as one
   const tasks = dialog.getByRole('radiogroup', { name: 'Task' })
   await expect(tasks.getByRole('radio', { checked: true })).toHaveCount(0)
@@ -210,10 +213,11 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await answer(app, yolo)
   await menu(page, 'File', 'Import dataset…')
   await dialog.getByRole('button', { name: 'YOLO dataset folder…' }).click()
-  await expect(dialog).toContainText('These rows fit more than one task: click the one they were made for.')
+  await expect(dialog).toContainText('These rows fit OBB and Segment: click the one they were made for.')
   await dialog.getByRole('radio', { name: 'OBB (guess)' }).click()
   await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'true')
-  await expect(dialog).not.toContainText('These rows fit more than one task')
+  await expect(dialog).not.toContainText('These rows fit')
+  await expect(dialog.locator('.import-seg .fits')).toHaveCount(0)
   await dialog.getByRole('radio', { name: 'Replace' }).click()
   // b gets no shapes from its empty label file, so Replace leaves it as it is
   await expect(dialog).toContainText("3 images have labels already: their label files go to the trash, and the imported shapes take their place. 1 of them gets no shapes from it, so it's left as it is.")
