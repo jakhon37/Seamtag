@@ -4,8 +4,9 @@ import path from 'path'
 import sharp from 'sharp'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
-  findDuplicateImages, forgetDataset, labelFileClashes, orphanLabels, readDataset, rewriteLabels, setFoldsCase
+  findDuplicateImages, forgetDataset, labelFileClashes, orphanLabels, readDataset, rewriteLabels
 } from '../../src/main/dataset'
+import { setFolding } from '../../src/main/names'
 import { setCacheDir } from '../../src/main/images'
 import { encodeMask } from '../../src/main/masks'
 import { openProject, setTrash } from '../../src/main/project'
@@ -350,8 +351,8 @@ describe('output folders and files', () => {
 })
 
 describe('names that differ only in case', () => {
-  beforeAll(() => setFoldsCase(true))
-  afterAll(() => setFoldsCase())
+  beforeAll(() => setFolding('case'))
+  afterAll(() => setFolding())
 
   test('are one file on Windows and macOS: label files are matched to images, and shared, by name in any case', async () => {
     const root = folder()
@@ -366,6 +367,24 @@ describe('names that differ only in case', () => {
     expect(labelFileClashes(found)).toEqual([{ file: path.join(root, 'a.json'), images: ['a.jpg', 'A.png'] }])
     expect(await orphanLabels(root, images)).toEqual([])
     await expect(rewriteLabels(root, 'a.jpg', renaming('car', 'bus'), null, of(images, 'a.jpg'))).rejects.toThrow("a.json holds the labels of other images too, so it's left unchanged")
+  })
+
+  test("on macOS also in Unicode form: a label file naming its image in NFC is the image's own when the file's name is in NFD", async () => {
+    setFolding('case-and-form')
+    try {
+      const root = folder()
+      const nfd = 'cafe\u0301.png', nfc = 'caf\u00e9.png'
+      await png(path.join(root, nfd))
+      write(root, { ['cafe\u0301.json']: labelme(nfc, [shape('cup', 'rectangle', [[1, 1], [9, 9]])]) })
+      await openProject(root, null)
+      const images = await readDataset(root)
+      expect(of(images, nfd).labelImage).toBe(nfd)
+      setFolding('case')
+      forgetDataset(root)
+      expect(of(await readDataset(root), nfd).labelImage).toBe(nfc)
+    } finally {
+      setFolding('case')
+    }
   })
 })
 

@@ -14,6 +14,7 @@ import { LabelFileError, parseLabelFile, serializeLabelFile, type Shape } from '
 import { summarize } from '../shared/labels'
 import { imageSize } from './images'
 import { decodeMask } from './masks'
+import { nameKey } from './names'
 import {
   findLabels, folderOf, type Found, type ImageItem, imagePath, labelPath, type Labels, readLabels, readText, sendToTrash, serial, writeAtomic
 } from './project'
@@ -32,14 +33,9 @@ const shown = (root: string, file: string) => {
 }
 const digest = (text: string) => createHash('sha1').update(text).digest('hex')
 
-// Windows and macOS find a.PNG by the name a.png, and IMG_1.json for img_1.jpg
-const SYSTEM_FOLDS = process.platform === 'win32' || process.platform === 'darwin'
-let foldsCase = SYSTEM_FOLDS
-/** File names compared as Windows and macOS compare them, or as this system does when left out: for tests */
-export function setFoldsCase(on = SYSTEM_FOLDS) {
-  foldsCase = on
-}
-const fold = (p: string) => (foldsCase ? p.toLowerCase() : p)
+// Windows and macOS find a.PNG by the name a.png, and IMG_1.json for img_1.jpg; macOS also finds a
+// name in either Unicode form
+const fold = nameKey
 
 export type ReadOptions = {
   /** The format read first when an image has label files in two, as the window's format picker sets it */
