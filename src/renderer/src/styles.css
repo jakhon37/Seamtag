@@ -16,6 +16,10 @@
 /* Muted words on a chosen row: the muted grey falls under 4.5:1 on the selection's blue */
 :root { --muted-on-selected: #b4bac4; }
 :root[data-theme="light"] { --muted-on-selected: #4b5563; }
+/* Words on the page's grey and the raised grey, as under the pointer: the muted grey, the blue and the red fall just
+   under 4.5:1 there, the light theme's all three and the dark theme's blue */
+:root { --muted-on-grey: var(--muted); --accent-text: #5591ff; --danger-text: var(--danger); }
+:root[data-theme="light"] { --muted-on-grey: #5d6573; --accent-text: #1f5fd6; --danger-text: #c42f2f; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body, #root { height: 100%; margin: 0; }
@@ -219,12 +223,16 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .status .verify.verified { color: var(--ok); }
 .topbar select.format { width: auto; padding: 3px 6px; font-size: 12px; }
 
-/* Dataset > Check labels: the Problems dock under the Shapes list, sharing the column's height with it */
-.panel.right section.problems { flex: 3 1 0; min-height: 170px; max-height: max-content; border-top: 1px solid var(--line); padding-top: 8px; }
-/* With the dock open, the Shapes list keeps two fifths of what's left, and a few rows at the smallest; what
-   either needn't, the other takes, so a short list of shapes leaves the problems room at 960 x 600 */
-.panel.right:has(> section.problems:not(.folded)) > section.grow { flex: 2 1 0; max-height: max-content; }
+/* Dataset > Check labels: the Problems dock under the Shapes list, sharing the column's height with it and the Labels list */
+.panel.right section.problems { flex: 2 1 0; min-height: 170px; max-height: max-content; border-top: 1px solid var(--line); padding-top: 8px; }
+/* With the dock open, the problems take half the column, and the Labels and Shapes lists a quarter each, down to
+   two rows at the smallest; what one needn't, the others take, so a short list leaves the problems room at 960 x 600 */
+.panel.right:has(> section.problems:not(.folded)) > section.grow,
+.panel.right:has(> section.problems:not(.folded)) > section[aria-label="Labels"]:has(> .classes > .class + .class) { flex: 1 1 0; max-height: max-content; }
 .panel.right section.problems.folded { flex: none; min-height: 0; }
+/* While it lists what a check found, the dock keeps its share whatever it shows, so hiding some of the problems, or
+   showing one image's, moves nothing under the pointer; with nothing found in the folder, it's as tall as its words */
+.panel.right section.problems:has(> .problems-list):not(.clean) { max-height: none; }
 .problems-head { margin: 0; gap: 6px; }
 .problems-fold { display: flex; align-items: center; gap: 4px; min-height: 24px; margin: -3px 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; }
 .problems-badge { color: var(--text); background: var(--raised); border-radius: 8px; padding: 0 6px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
@@ -234,8 +242,9 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 /* The time of the check, or that it's out of date, in the dock's title row */
 .problems-head .problems-status { flex: 1; min-width: 0; text-align: right; font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.problems-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
-.seg.small.problems-severities button { flex: none; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+/* This image only has a line of its own, so it stays under the pointer whatever counts the buttons above it show */
+.problems-bar { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.seg.small.problems-severities button { flex: none; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted-on-grey); }
 .seg.small.problems-severities button.on { color: var(--text); }
 .seg.small.problems-severities button:not(.on) svg { opacity: .55; }
 .warn-text { color: var(--warn-text); }
@@ -253,35 +262,41 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .problems-title svg { flex: none; margin-top: 2px; }
 .problems-title span { flex: 1; min-width: 0; }
 .problems-title b { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.problems-title:hover b { color: var(--muted-on-grey); }
 .problem { position: relative; display: flex; flex-direction: column; gap: 1px; padding: 4px 6px 5px 22px; border-radius: 6px; font-size: 12px; flex: none;
   content-visibility: auto; contain-intrinsic-size: auto 48px; }
 .problem.opens { cursor: pointer; }
 .problem.opens:hover { background: var(--raised); }
+.problem.opens:not(.picked):hover .problem-what { color: var(--muted-on-grey); }
 /* A row saved or changed since the check keeps its words as they are, with a clock in its margin */
 .problem-late { position: absolute; left: 5px; top: 10px; color: var(--warn-text); }
-/* The image's name takes what the shape's number and the buttons leave, cut short in the middle */
-.problem-where { display: flex; align-items: center; gap: 6px; min-width: 0; }
+/* The image's name takes what the buttons leave, cut short in the middle; the buttons keep to its first line */
+.problem-where { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .problem-where .name { flex: 0 1 auto; display: flex; font-weight: 550; }
 .cut-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cut-tail { flex: none; white-space: nowrap; }
 .problem-open { padding: 0; text-align: left; color: inherit; font: inherit; font-weight: 550; }
-.problem-shape { flex: none; white-space: nowrap; }
 .problem-what { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
-/* The row clicked last, or holding the focus, shows its whole message; on the picked row's colour, in the text's colour */
+/* The row clicked last, or holding the focus, shows its whole message, and its image's whole name, as the name's tooltip
+   does to the mouse; on the picked row's colour, in the text's colour */
 .problem.picked { background: var(--selected); }
 .problem.picked .problem-what, .problem:focus-within .problem-what { display: block; overflow: visible; }
-.problem.picked .problem-what, .problem.picked .problem-shape { color: var(--text); }
+.problem.picked .problem-where .name, .problem:focus-within .problem-where .name { display: block; white-space: normal; overflow-wrap: anywhere; }
+.problem.picked .name > span, .problem:focus-within .name > span { white-space: normal; }
+.problem.picked .problem-what { color: var(--text); }
 /* On its own background, so the accent keeps its contrast on a picked row */
 .problem-act { flex: none; margin-left: auto; padding: 0 6px; font-size: 11px; line-height: 18px; border: 1px solid var(--line); border-radius: 5px; color: var(--accent);
   background: var(--panel); }
 .problem-where .problem-act { line-height: 22px; }
 .problem-act + .problem-act { margin-left: 0; }
-.problem-act:hover { background: var(--raised); }
+.problem-act:hover { background: var(--raised); color: var(--accent-text); }
 .problems-more { margin: 2px 0 4px 22px; padding: 2px 8px; font-size: 12px; align-self: flex-start; }
 /* The Files dock's five filters, with Problems, share its width: each as wide as it needs, with room for
    four-digit counts in all five, and past that a name is cut short rather than the row leaving the dock */
 .seg.small.filters button { flex: 1 1 auto; min-width: 0; overflow: hidden; padding-left: 1px; padding-right: 1px; }
 .seg.small.filters button > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Problems filter before the first check: off, its dash for a count saying so, and as plain to see as the others */
+.seg.small.filters button:disabled { opacity: 1; }
 
 /* Renaming a label across the folder */
 .dialog.rename { width: 420px; }
@@ -292,20 +307,25 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .dialog.rename .batch { flex: 1; }
 
 /* Dataset > Statistics */
-.dialog.stats { width: 780px; top: 5vh; max-height: 90vh; overflow-y: auto; gap: 10px; }
+.dialog.stats { width: 780px; top: 5vh; max-height: 90vh; overflow-y: auto; gap: 8px; }
 .dialog.stats h3 { margin: 0; justify-content: flex-start; gap: 10px; flex-wrap: wrap; }
 .dialog.stats h4 { margin: 6px 0 0; font-size: 12px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .dialog.stats h4 .muted { font-weight: 400; }
 .dialog.stats p { margin: 0; font-size: 12px; }
-.stats-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+/* The eight tiles in one row, each as wide as its name needs at the least, to leave the labels table the height */
+.stats-tiles { display: grid; grid-template-columns: repeat(8, minmax(min-content, 1fr)); gap: 6px; }
 .stats-tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; min-width: 0; }
 .stats-tile b { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.stats-tile span { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.stats-tile.bad-tile b { color: var(--danger); }
+.stats-tile span { color: var(--muted-on-grey); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stats-tile.bad-tile b { color: var(--danger-text); }
 .stats-table { overflow-x: auto; max-height: min(300px, 30vh); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; flex: none; }
+/* On a shorter window a long table gives way first, down to three rows, so the window itself needn't scroll as well */
+.stats-table:has(tbody > tr:nth-child(4)) { flex: 0 1 auto; min-height: 117px; }
 .stats-table .problems-more { margin: 6px 8px; }
 .stats-labels, .stats-sizes { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
-.stats-labels th, .stats-sizes th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-weight: 500; text-align: right; padding: 0; white-space: nowrap; z-index: 1; }
+.stats-labels th, .stats-sizes th { background: var(--panel); color: var(--muted); font-weight: 500; text-align: right; padding: 0; white-space: nowrap; }
+/* The labels table scrolls on its own, under its header */
+.stats-labels th { position: sticky; top: 0; z-index: 1; }
 .stats-labels th button { display: inline-flex; align-items: center; gap: 3px; padding: 5px 8px; color: inherit; font: inherit; width: 100%; justify-content: flex-end; }
 .stats-labels th.left button { justify-content: flex-start; }
 .stats-labels th[aria-sort="ascending"], .stats-labels th[aria-sort="descending"] { color: var(--text); }
@@ -323,8 +343,10 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .stats-pair section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .stats-histogram { display: flex; align-items: flex-end; gap: 3px; height: 130px; padding: 4px 0 0; border-bottom: 1px solid var(--line); }
 .stats-column { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 2px; font-size: 11px; font-variant-numeric: tabular-nums; }
-.stats-column i { width: 100%; max-width: 34px; min-height: 1px; background: var(--accent); border-radius: 3px 3px 0 0; opacity: .8; }
-.stats-column span { white-space: nowrap; overflow: hidden; max-width: 100%; }
+/* A bar's share of the height its count above it and its name below leave, so neither is squeezed by the tallest */
+.stats-column i { flex: none; width: 100%; max-width: 34px; height: calc((100% - 2lh - 4px) * var(--share)); min-height: 1px; background: var(--accent);
+  border-radius: 3px 3px 0 0; opacity: .8; }
+.stats-column span { flex: none; white-space: nowrap; overflow: hidden; max-width: 100%; }
 .stats-column > span:last-child { color: var(--muted); }
 .stats-sizes th, .stats-sizes td { padding: 4px 8px; text-align: right; }
 .stats-sizes td { border-top: 1px solid var(--line); }
@@ -335,7 +357,8 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .stats-train input { width: 72px; padding: 2px 4px; text-align: right; }
 .stats-train input.invalid { border-color: var(--danger); }
 .stats-image-sizes { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; font-variant-numeric: tabular-nums; }
-.dialog.stats .actions { align-items: center; position: sticky; bottom: -12px; background: var(--panel); padding: 10px 0 0; margin-top: 0; border-top: 1px solid var(--line); }
+/* Over the labels table's header, which sticks as it scrolls under the buttons */
+.dialog.stats .actions { align-items: center; position: sticky; bottom: -12px; z-index: 2; background: var(--panel); padding: 10px 0 0; margin-top: 0; border-top: 1px solid var(--line); }
 .stats-saved { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 
 /* File > Export dataset…: options on the left, what the export holds on the right, between a title and

@@ -84,8 +84,8 @@ export type RenameDone = {
   shapes: number
   /** Images whose label files were rewritten */
   changed: string[]
-  /** Label files left alone: unreadable, or shared by several images */
-  skipped: number
+  /** Label files left alone: those that can't be read, and those several images share; `file` names the one, when there's one */
+  skipped: { unreadable: number; shared: number; file?: string }
   failed: { name: string; reason: string }[]
   /** Images whose labels have the old name still: their file is shared, failed, or wasn't reached before a stop */
   left: number
@@ -493,12 +493,19 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
   if (allowed && !allowed.includes(name)) throw new Error(`“${name}” isn't in the label list, and only listed labels are allowed.`)
   const signal = begin(root, 'rename')
   const report = reporter(send)
-  const done: RenameDone = { stopped: false, shapes: 0, changed: [], skipped: 0, failed: [], left: 0 }
+  const done: RenameDone = { stopped: false, shapes: 0, changed: [], skipped: { unreadable: 0, shared: 0 }, failed: [], left: 0 }
   try {
     const images = await readDataset(root, { prefer, signal, onProgress: (n, total) => report({ phase: 'read', done: n, total }) })
     const plan = renameLabel(images, from, name, labelFileClashes(images))
-    done.skipped = plan.skipped.length
     const byName = new Map(images.map((i) => [i.name, i]))
+    // The label files left alone, each counted once, and why: one that can't be read is left whatever it holds, so the
+    // window says so rather than seem to say it had the label
+    const sharing = plan.skipped.filter((s) => !byName.get(s.name)?.broken).map((s) => s.name)
+    const fileOf = (name: string) => byName.get(name)?.file ?? name
+    const unreadable = new Set(plan.skipped.filter((s) => byName.get(s.name)?.broken).map((s) => fileOf(s.name)))
+    const shared = new Set(sharing.map(fileOf))
+    done.skipped = { unreadable: unreadable.size, shared: shared.size }
+    if (unreadable.size + shared.size === 1) done.skipped.file = path.basename([...unreadable, ...shared][0])
     // The images of one CreateML list go together, by its path; any other image's file is its own
     const batches = new Map<string, RenamePlan['images']>()
     for (const image of plan.images) {
@@ -530,8 +537,7 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
     }
     done.stopped = signal.aborted
     // A file that can't be read is left alone too, but what it holds isn't known
-    const shared = plan.skipped.filter((s) => !byName.get(s.name)?.broken).length
-    done.left = shared + plan.images.length - done.changed.length
+    done.left = sharing.length + plan.images.length - done.changed.length
     return done
   } catch (e) {
     if (signal.aborted) return { ...done, stopped: true }

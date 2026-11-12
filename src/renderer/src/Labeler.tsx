@@ -2218,7 +2218,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (done.changed.length) reloadImages(done.changed)
     setLabelsChanged((n) => n + 1)
     const told = [`${done.stopped ? 'Stopped after renaming' : 'Renamed'} ${counted(done.shapes, 'shape')} in ${counted(done.changed.length, 'image')} from “${from}” to “${to}”.`]
-    if (done.skipped) told.push(`${counted(done.skipped, 'label file was', 'label files were')} left alone.`)
+    // Why files were left alone: one that can't be read is left whatever it holds, and isn't to be taken for one with the label
+    const { unreadable, shared, file } = done.skipped
+    if (unreadable) {
+      told.push(file ? `${file} can't be read, so it was left alone.` : `${counted(unreadable, "label file that can't be read was", "label files that can't be read were")} left alone.`)
+    }
+    if (shared) {
+      told.push(file ? `${file} holds the labels of several images, so it was left alone.`
+        : `${counted(shared, 'label file that several images share was', 'label files that several images share were')} left alone.`)
+    }
     if (has(from) && done.left) told.push(`“${from}” stays in the label list while ${counted(done.left, 'image has', 'images have')} it.`)
     setNotice(told.join(' '))
     if (done.failed.length) {

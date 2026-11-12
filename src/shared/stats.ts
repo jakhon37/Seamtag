@@ -43,8 +43,8 @@ export type DatasetStats = {
   /**
    * Objects by COCO's area ranges, at the image's own size and scaled as training at
    * `trainSize` scales it; an object of several shapes by their area together. Lines, points,
-   * masks that don't decode and objects in images of unknown size have no area here: `unsized`
-   * counts them.
+   * masks that don't decode, shapes with the wrong number of points and objects in images of
+   * unknown size have no area here: `unsized` counts them.
    */
   sizes: { trainSize: number; full: SizeCounts; train: SizeCounts; unsized: number }
   /** Each size of image there is, the most common first */

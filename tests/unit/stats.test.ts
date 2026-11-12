@@ -58,6 +58,11 @@ test("object sizes fall in COCO's ranges at full size and at the training size; 
   expect(datasetStats(FOLDER, { trainSize: 6000 }).sizes.train).toEqual({ small: 0, medium: 0, large: 4 })
 })
 
+test("masks whose pixels can't be read and shapes with the wrong number of points have no area either, as Statistics says", () => {
+  const images = [image('a', [newShape('cat', 'mask', [[0, 0], [10, 10]]), newShape('dog', 'polygon', [[0, 0], [10, 0]]), box('car', 0, 0, 10, 10)])]
+  expect(datasetStats(images).sizes).toEqual({ trainSize: 640, full: { small: 1, medium: 0, large: 0 }, train: { small: 1, medium: 0, large: 0 }, unsized: 2 })
+})
+
 test("shapes sharing a label and a group_id are one object, as the exports take them, and a pose's points are no objects", () => {
   const part = (label: string, x0: number, y0: number, x1: number, y1: number, group: number) => box(label, x0, y0, x1, y1, { group_id: group })
   const point = (label: string, x: number, y: number, group: number | null) => newShape(label, 'point', [[x, y]], { group_id: group })

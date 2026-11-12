@@ -204,7 +204,7 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
                     {bars.map((b) => (
                       <div key={b.name} className="stats-column" title={`${counted(b.images, 'image')} with ${b.name} ${b.name === '1' ? 'object' : 'objects'}`}>
                         <span className="muted">{b.images ? number(b.images) : ''}</span>
-                        <i style={{ height: `${(b.images / tallest) * 100}%` }} />
+                        <i style={{ '--share': b.images / tallest } as React.CSSProperties} />
                         <span>{b.name}</span>
                       </div>
                     ))}
@@ -237,7 +237,8 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
                 </table>
                 <p className="muted">
                   Training scales each image so its longer side is {number(stats.sizes.trainSize)} px, as Ultralytics does.
-                  {stats.sizes.unsized > 0 && ` ${counted(stats.sizes.unsized, 'object has', 'objects have')} no area here: lines, points, and shapes in images that can't be read.`}
+                  {stats.sizes.unsized > 0 && ` ${counted(stats.sizes.unsized, 'object has', 'objects have')} no area here: lines, points, masks that can't be read, ` +
+                    "shapes with the wrong number of points, and shapes in images that can't be read."}
                 </p>
               </section>
             </div>

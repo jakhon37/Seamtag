@@ -102,9 +102,12 @@ test('Check labels lists the problems; rows open their shape, fixes undo, saves 
   const dock = page.getByRole('region', { name: 'Problems' })
   const group = (code: string) => dock.locator(`.problems-group[data-code="${code}"]`)
   const filter = page.locator('.filters button', { hasText: 'Problems' })
-  // Until a check has run, the Problems filter says why it's off
+  // Until a check has run, the Problems filter says why it's off, a dash for its count, and reads as plainly as the others
   await expect(filter).toBeDisabled()
   await expect(filter).toHaveAttribute('title', /Dataset > Check labels/)
+  await expect(filter.locator('b')).toHaveText('–')
+  const other = page.locator('.filters button', { hasText: 'Label' }).locator('span')
+  expect(Math.abs((await contrast(filter.locator('span'))) - (await contrast(other)))).toBeLessThan(0.01)
 
   await menu(page, 'Dataset', 'Check labels')
   await expect(dock).toBeVisible()
@@ -205,7 +208,8 @@ test('Check labels lists the problems; rows open their shape, fixes undo, saves 
   await expect(rename.getByRole('alert')).toHaveCount(0)
   await rename.getByRole('button', { name: 'Rename 1 shape' }).click()
   await expect(rename).toHaveCount(0)
-  await expect(page.locator('.loading.notice')).toContainText('Renamed 1 shape in 1 image from “Cat” to “cat”. 1 label file was left alone.')
+  // The file left alone is named, with why: f.json can't be read, so it's left alone whatever label it holds
+  await expect(page.locator('.loading.notice')).toContainText("Renamed 1 shape in 1 image from “Cat” to “cat”. f.json can't be read, so it was left alone.")
   expect(shapesIn(dir, 'd')[0].label).toBe('cat')
   expect(await trashed()).toEqual([path.join(dir, 'd.json')])
   expect(existsSync(path.join(BASE, 'dataset-trash', '0-d.json'))).toBe(true)
@@ -317,7 +321,9 @@ test("a label list that allows only its labels refuses another name in a rename"
   await page.keyboard.press('Escape')
   await expect(rename).toHaveCount(0)
   expect(JSON.parse(readFileSync(path.join(dir, 'e.json'), 'utf8')).shapes[0].label).toBe('zebra')
-  // The dock closes, and View > Problems opens it again with the check kept
+  // The dock closes, and View > Problems opens it again with the check kept; its buttons call it as the menu does
+  await expect(dock.locator('.problems-fold')).toHaveAttribute('title', 'Fold the problems')
+  await expect(dock.getByRole('button', { name: 'Close Problems' })).toHaveAttribute('title', 'Close Problems (View > Problems opens it)')
   await dock.getByRole('button', { name: 'Close Problems' }).click()
   await expect(dock).toHaveCount(0)
   await page.getByRole('menuitem', { name: 'View', exact: true }).click()
@@ -404,7 +410,7 @@ test('saving by hand, a fixed problem stays out of date until the image is saved
     for (const [width, height] of [[1500, 940], [1000, 640], [960, 600]]) {
       await resize(app, page, width, height)
       await late.scrollIntoViewIfNeeded()
-      for (const words of [late.locator('.problem-open'), late.locator('.problem-what'), late.locator('.problem-shape'), dock.locator('.problems-status')]) {
+      for (const words of [late.locator('.problem-open'), late.locator('.problem-what'), dock.locator('.problems-status')]) {
         expect(await contrast(words)).toBeGreaterThanOrEqual(4.5)
       }
       await shot(page, `dock-not-saved-${width}-${theme}.png`)
@@ -718,6 +724,51 @@ test('Tab moves through the Problems dock, and skips to an AI shape only from th
   await finish(app, errors)
 })
 
+test('a fix or a rename from the keyboard leaves the focus in the list once the check takes its row away', async () => {
+  const dir = await project('dataset-keep-focus', {
+    a: doc('a', [square('cat', 20, 20, 120, 120), square('cat', 20, 20, 120, 120)]),
+    b: doc('b', [square('dog', 40, 40, 140, 140), square('dog', 40, 40, 140, 140)]),
+    d: doc('d', [square('Cat', 60, 60, 160, 160)]),
+    e: doc('e', [square('zebra', 60, 60, 160, 160)])
+  })
+  await paint(dir, ['a', 'b', 'd', 'e'])
+  const { app, page, errors } = await launch(dir, ['--labels', 'cat,dog'])
+  await fakeTrash(app, path.join(BASE, 'dataset-keep-focus-trash'))
+  await menu(page, 'Dataset', 'Check labels')
+  const dock = page.getByRole('region', { name: 'Problems' })
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  const group = (code: string) => dock.locator(`.problems-group[data-code="${code}"]`)
+  const copies = group('duplicate-shape')
+  await expect(copies.locator('.problem-open')).toHaveText(['a.png', 'b.png'])
+  // a.png's Fix: once it's saved and checked again, b.png's row is in its place, and so is the focus, on its Fix
+  await copies.getByRole('button', { name: 'Fix', exact: true }).first().focus()
+  await page.keyboard.press('Enter')
+  await expect(copies.locator('.problem-open')).toHaveText(['b.png'])
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  const fix = copies.getByRole('button', { name: 'Fix', exact: true })
+  await expect(fix).toBeFocused()
+  expect(await fix.evaluate((el) => el.matches(':focus-visible'))).toBe(true)
+  // Its own Fix takes the group away: the focus goes to the group now in its place
+  await page.keyboard.press('Enter')
+  await expect(copies).toHaveCount(0)
+  await expect(group('unknown-label').locator('.problems-title')).toBeFocused()
+  expect(shapesIn(dir, 'a')).toHaveLength(1)
+  expect(shapesIn(dir, 'b')).toHaveLength(1)
+  // A rename started from a row: the focus goes back to its Rename…, and once the check takes the last group away, to the one before
+  await group('label-variants').getByRole('button', { name: 'Rename…', exact: true }).focus()
+  await page.keyboard.press('Enter')
+  const rename = page.getByRole('dialog', { name: 'Rename a label' })
+  await expect(rename.getByLabel('New name')).toBeFocused()
+  await expect(rename.getByRole('button', { name: 'Rename 1 shape' })).toBeEnabled()
+  await page.keyboard.press('Enter')
+  await expect(rename).toHaveCount(0)
+  await expect(group('label-variants')).toHaveCount(0)
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  await expect(group('unknown-label').locator('.problems-title')).toBeFocused()
+  expect(shapesIn(dir, 'd')[0].label).toBe('cat')
+  await finish(app, errors)
+})
+
 test("Space+drag pans the image after a click on a problem's image name, which leaves the focus in the dock", async () => {
   const dir = await project('dataset-pan', {
     a: doc('a', [square('cat', 150, 100, 250, 200)]),
@@ -761,7 +812,7 @@ const VOC = '__ignore__,_background_,aeroplane,bicycle,bird,boat,bottle,bus,car,
 /**
  * The Shapes section over the Problems dock: whether any of it lies past its own bottom or over the
  * dock, how many of its rows show, whether they and Delete shape take a click where they show, how
- * tall the Labels list is, and whether the column has to scroll
+ * tall the Labels list and the list of problems are, and whether the column has to scroll
  */
 const shapesColumn = (page: Page) => page.evaluate(() => {
   const section = document.querySelector('section[aria-label="Shapes"]')!, list = section.querySelector('.shapes')!
@@ -783,6 +834,7 @@ const shapesColumn = (page: Page) => page.evaluate(() => {
     rowsTake: rows.every((row) => takes(row, view.top, view.bottom)),
     remove: remove && takes(remove, -Infinity, Infinity),
     labels: document.querySelector('.panel.right .classes')!.clientHeight,
+    problems: document.querySelector('.problems-list')?.clientHeight ?? 0,
     scrolls: panel.scrollHeight > panel.clientHeight + 1
   }
 })
@@ -792,7 +844,9 @@ test('on a short window the Shapes list keeps off the Problems dock, open or fol
   const files: Record<string, string | null> = {
     a: doc('a', ['person', 'dog', 'cat', 'car', 'chair', 'sofa', 'bus'].map((l, k) => square(l, 10 + k * 30, 10 + k * 20, 80 + k * 30, 80 + k * 20))),
     b: doc('b', [square('zebra', 60, 60, 160, 160)]), c: doc('c', [square('Cat', 60, 60, 160, 160)]),
-    d: doc('d', [square('dog', 100, 100, 200, 200, 0.4)]), e: doc('e', [rect('bus', 300, 200, 430, 330)]), f: '{"shapes": [', g: null
+    d: doc('d', [square('dog', 100, 100, 200, 200, 0.4)]), e: doc('e', [rect('bus', 300, 200, 430, 330)]), f: '{"shapes": [', g: null,
+    // 205 copies of a shape: hundreds of problems
+    many: doc('many', Array.from({ length: 206 }, () => square('dog', 50, 50, 90, 90)))
   }
   const dir = await project('dataset-column', files)
   await paint(dir, Object.keys(files))
@@ -813,17 +867,20 @@ test('on a short window the Shapes list keeps off the Problems dock, open or fol
       await dock.locator('.problems-fold').click()
     }]
   ]
+  // The problems get a fair share of the column: their list was 80 px high at 960 x 600 and 1000 x 640, and 118 px at 1280 x 800
+  const least: Record<number, number> = { 960: 110, 1000: 150, 1280: 240, 1500: 300 }
   for (const theme of ['dark', 'light']) {
     for (const [state, make] of states) {
       await resize(app, page, 1500, 940)
       await make()
-      for (const [width, height] of [[960, 600], [1000, 640], [1500, 940]]) {
+      for (const [width, height] of [[960, 600], [1000, 640], [1280, 800], [1500, 940]]) {
         await resize(app, page, width, height)
-        const { rows, labels, ...column } = await shapesColumn(page)
+        const { rows, labels, problems, ...column } = await shapesColumn(page)
         expect(column).toEqual({ spills: false, overDock: false, rowsTake: true, remove: state === 'picked' ? true : null, scrolls: false })
         // Two rows of shapes at the least, and of labels too
         expect(rows).toBeGreaterThanOrEqual(2)
         expect(labels).toBeGreaterThanOrEqual(58)
+        if (state !== 'folded') expect(problems).toBeGreaterThanOrEqual(least[width])
         await shot(page, `column-${state}-${width}-${theme}.png`)
       }
     }
@@ -881,12 +938,14 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
   const dock = page.getByRole('region', { name: 'Problems' })
   await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
   const row = (image: string) => dock.locator('.problem', { hasText: image }).first()
-  /** A row's name: its width, and whether its end shows; each of its buttons: inside the row, taking a click, and 24 px high */
+  /** A row's name: its width, whether its end shows, and whether it shows whole; each of its buttons: inside the row, taking a click, and 24 px high */
   const measure = (target: Locator) => target.evaluate((el) => {
     const box = el.getBoundingClientRect(), name = el.querySelector('.name')!.getBoundingClientRect(), tail = el.querySelector('.cut-tail')
+    const head = el.querySelector('.cut-head')!
     return {
       name: name.width,
-      end: tail ? tail.getBoundingClientRect().right <= name.right + 0.5 : el.querySelector('.cut-head')!.scrollWidth <= Math.ceil(name.width),
+      end: tail ? tail.getBoundingClientRect().right <= name.right + 0.5 : head.scrollWidth <= Math.ceil(name.width),
+      whole: head.scrollWidth <= head.clientWidth + 0.5,
       buttons: [...el.querySelectorAll('.problem-act')].map((b) => {
         const r = b.getBoundingClientRect()
         return r.right <= box.right + 0.5 && b.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) && r.height >= 24
@@ -899,13 +958,15 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
       await row(image).scrollIntoViewIfNeeded()
       await expect(row(image).locator('.problem-open')).toHaveAttribute('title', image)
       await expect(row(image).locator('.problem-open')).toHaveAccessibleName(image)
-      const { name, end, buttons } = await measure(row(image))
+      const { name, end, whole, buttons } = await measure(row(image))
       expect(name).toBeGreaterThanOrEqual(60)
       expect([end, buttons]).toEqual([true, [true]])
+      // The name has its line to itself but for the button: one of 20 characters or fewer isn't cut at all
+      if (image.length <= 20) expect(whole).toBe(true)
     }
-    // Names that differ only at the end still tell apart
-    await expect(row('frame_000363').locator('.cut-tail')).toHaveText('0363.png')
-    await expect(row('frame_000403').locator('.cut-tail')).toHaveText('0403.png')
+    // Names that differ only at the end still tell apart: the last word is kept whole
+    await expect(row('frame_000363').locator('.cut-tail')).toHaveText('000363.png')
+    await expect(row('frame_000403').locator('.cut-tail')).toHaveText('000403.png')
     expect(await fits(page, '.panel.right')).toEqual({ inside: true, page: true, onScreen: true })
   }
   await check()
@@ -926,7 +987,15 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
     await expect(rename).toHaveCount(0)
     await expect(forklift).toBeFocused()
   }
-  await row('frame_000403').locator('.problem-open').focus()
+  // A row holding the focus shows its image's whole name, which the tooltip shows only to the mouse
+  const camera = row('frame_000403').locator('.problem-open')
+  await camera.focus()
+  const { cut, lines } = await camera.evaluate((el) => {
+    const head = el.querySelector('.cut-head')!
+    return { cut: head.scrollWidth > head.clientWidth + 0.5, lines: Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)) }
+  })
+  expect(cut).toBe(false)
+  expect(lines).toBeGreaterThanOrEqual(2)
   await page.keyboard.press('Enter')
   await expect(page.locator('.file.on')).toContainText('camera_north_gate_2024_06_01_frame_000403.png')
   await row('frame_000363').locator('.problem-open').focus()
@@ -935,11 +1004,16 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
   await page.waitForTimeout(300)
   await expect(page.locator('.status')).not.toContainText('Verified')
   expect(read(dir, 'camera_north_gate_2024_06_01_frame_000363').verified).toBeUndefined()
+  // This image only stays where it was, though its image's counts are fewer than the folder's, and so does the list
   const only = dock.getByLabel('This image only')
+  const where = async () => [await only.boundingBox(), (await dock.locator('.problems-list').boundingBox())!.y]
+  const before = await where()
   await only.focus()
   await page.keyboard.press('Space')
   await expect(only).toBeChecked()
   await expect(dock.locator('.problems-group')).toHaveCount(1)
+  await expect(dock.locator('.problems-severities [data-severity="warning"]')).toHaveAccessibleName('1 warning')
+  expect(await where()).toEqual(before)
   await page.keyboard.press('Space')
   await expect(only).not.toBeChecked()
 
@@ -959,9 +1033,20 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
       await resize(app, page, width, height)
       await check()
       await row('crossing_000077.png').scrollIntoViewIfNeeded()
-      for (const part of ['.problem-open', '.problem-shape', '.problem-act', '.problem-what']) {
+      for (const part of ['.problem-open', '.problem-act', '.problem-what']) {
         expect(await contrast(row('crossing_000077.png').locator(part))).toBeGreaterThanOrEqual(4.5)
       }
+      // So do the words of a row, its button and a group's count under the pointer, and the counts of severities hidden
+      const sofa = row('cats_on_sofa.png')
+      await sofa.locator('.problem-what').hover()
+      expect(await contrast(sofa.locator('.problem-what'))).toBeGreaterThanOrEqual(4.5)
+      await sofa.locator('.problem-act').hover()
+      expect(await contrast(sofa.locator('.problem-act'))).toBeGreaterThanOrEqual(4.5)
+      const title = dock.locator('.problems-group[data-code="unknown-label"] .problems-title')
+      await title.hover()
+      expect(await contrast(title.locator('b'))).toBeGreaterThanOrEqual(4.5)
+      expect(await contrast(dock.locator('.problems-severities [data-severity="info"]'))).toBeGreaterThanOrEqual(4.5)
+      await page.mouse.move(0, 0)
       await shot(page, `rows-${width}-${theme}.png`)
     }
     if (theme === 'dark') await darkMode(page)
@@ -1022,6 +1107,83 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
       expect(table.height).toBeLessThanOrEqual(Math.min(300, 0.3 * (await page.evaluate(() => innerHeight))) + 1)
       expect(await fits(page, '.dialog.stats')).toEqual({ inside: true, page: true, onScreen: true })
       await shot(page, `stats-objects-${width}-${theme}.png`)
+    }
+    if (theme === 'dark') {
+      await stats.getByRole('button', { name: 'Close' }).click()
+      await darkMode(page)
+      await open()
+    }
+  }
+  await finish(app, errors)
+})
+
+test("Statistics keeps its buttons clear and its bars' numbers whole, and scrolls once where its table can make room", async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const one = (label: string, shape_type: string, points: number[][]) => ({ label, shape_type, group_id: null, description: '', points, flags: {} })
+  const files: Record<string, string | null> = {
+    a: doc('a', [square('cat', 10, 10, 60, 60), square('dog', 100, 10, 160, 60), square('person', 200, 10, 260, 60)]),
+    b: doc('b', [square('car', 20, 20, 120, 120)]),
+    c: doc('c', ['bus', 'boat', 'bird', 'sofa', 'train'].map((l, k) => square(l, 10 + k * 70, 150, 60 + k * 70, 200))),
+    // A line and a point: objects with no area
+    d: doc('d', [one('cow', 'line', [[10, 10], [200, 120]]), one('horse', 'point', [[50, 60]]), square('sheep', 50, 50, 150, 150)]),
+    e: '{"shapes": [',
+    f: null
+  }
+  const dir = await project('dataset-stats-layout', files)
+  await paint(dir, Object.keys(files))
+  const { app, page, errors } = await launch(dir, ['--labels', VOC])
+  const stats = page.getByRole('dialog', { name: 'Statistics' })
+  const open = async () => {
+    await menu(page, 'Dataset', 'Statistics…')
+    await expect(stats.locator('[data-tile="total"] b')).toHaveText('6')
+  }
+  await open()
+  // Two images with 3 objects make the tallest bar
+  await expect(stats.locator('.stats-column')).toHaveText(['0', '11', '2', '23', '4', '15'])
+  await expect(stats.locator('.stats-sizes + p')).toHaveText('Training scales each image so its longer side is 640 px, as Ultralytics does. 2 objects have no area ' +
+    "here: lines, points, masks that can't be read, shapes with the wrong number of points, and shapes in images that can't be read.")
+  /**
+   * Whether the window scrolls, and its table; whether Save as CSV… and Close take a click along their top edges, with
+   * the window scrolled to its top and to its end, and whether their bar is above everything else laid over the window,
+   * as the labels table's header is, which sticks as the table scrolls; the heights of the bars' numbers, and where their
+   * names end
+   */
+  const layout = () => stats.evaluate((dialog) => {
+    const table = dialog.querySelector('.stats-table')!, bar = dialog.querySelector('.actions')!
+    const clear = () => [...bar.querySelectorAll('button')].every((b) => {
+      const r = b.getBoundingClientRect()
+      return [r.top + 1, r.top + r.height / 2].every((y) => b.contains(document.elementFromPoint(r.left + r.width / 2, y)))
+    })
+    const buttons = [clear()]
+    dialog.scrollTop = dialog.scrollHeight
+    buttons.push(clear())
+    dialog.scrollTop = 0
+    const z = (el: Element) => Number(getComputedStyle(el).zIndex) || 0
+    buttons.push([...dialog.querySelectorAll('*')].every((el) => bar.contains(el) || getComputedStyle(el).position === 'static' || z(el) < z(bar)))
+    const columns = [...dialog.querySelectorAll('.stats-column')]
+    return {
+      scrolls: dialog.scrollHeight > dialog.clientHeight + 1, tableScrolls: table.scrollHeight > table.clientHeight + 1, buttons,
+      numbers: [...new Set(columns.flatMap((c) => [...c.querySelectorAll('span')].filter((s) => s.textContent).map((s) => Math.round(s.getBoundingClientRect().height))))],
+      ends: [...new Set(columns.map((c) => Math.round(c.querySelector('span:last-child')!.getBoundingClientRect().bottom)))].length
+    }
+  })
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [1280, 800], [1000, 640], [960, 600]]) {
+      await resize(app, page, width, height)
+      const { scrolls, tableScrolls, buttons, numbers, ends } = await layout()
+      expect(buttons).toEqual([true, true, true])
+      // Every bar's count and name a line high, the names in one line under the bars
+      expect(numbers).toHaveLength(1)
+      expect(ends).toBe(1)
+      // The labels table makes the room it can: from 1280 x 800 up, only it scrolls
+      expect(tableScrolls).toBe(true)
+      if (height >= 800) expect(scrolls).toBe(false)
+      if (theme === 'light') {
+        for (const words of [stats.locator('.stats-tile span').first(), stats.locator('[data-tile="broken"] b')]) {
+          expect(await contrast(words)).toBeGreaterThanOrEqual(4.5)
+        }
+      }
+      await shot(page, `stats-layout-${width}-${theme}.png`)
     }
     if (theme === 'dark') {
       await stats.getByRole('button', { name: 'Close' }).click()

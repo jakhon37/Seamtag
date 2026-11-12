@@ -394,7 +394,8 @@ describe('renaming a label across the folder', () => {
     expect(read(root, 'd.json')).toContain('"Cat"')
     trashed = []
     const done = await renameRun(root, 'Cat', 'cat', 'labelme', null, () => {})
-    expect(done).toEqual({ stopped: false, shapes: 2, changed: ['d.png', 'v.png'], skipped: 1, failed: [], left: 0 })
+    // f.json is left alone whatever it holds: the window names it, and says why
+    expect(done).toEqual({ stopped: false, shapes: 2, changed: ['d.png', 'v.png'], skipped: { unreadable: 1, shared: 0, file: 'f.json' }, failed: [], left: 0 })
     expect(JSON.parse(read(root, 'd.json')).shapes[0].label).toBe('cat')
     // VOC is changed where its objects are: the pose and the exact numbers stay
     expect(read(root, 'v.xml')).toContain('<name>cat</name><pose>Left</pose>')
@@ -446,8 +447,16 @@ describe('renaming: the new name and what keeps the old one', () => {
     write(root, { 'k.json': labelme('k.png', [box('Cat', 1, 1, 5, 5)]) })
     await openProject(root, null)
     const done = await renameRun(root, 'Cat', 'cat', 'labelme', null, () => {})
-    expect(done).toMatchObject({ changed: ['d.png'], failed: [], left: 2 })
+    // Both images keep the old name; their one file is left alone, and so is f.json, which can't be read
+    expect(done).toMatchObject({ changed: ['d.png'], failed: [], left: 2, skipped: { unreadable: 1, shared: 1 } })
+    expect(done.skipped.file).toBeUndefined()
     expect(read(root, 'k.json')).toContain('"Cat"')
+    // With f.json gone, k.json is the one file left alone, and the window can name it
+    rmSync(path.join(root, 'f.json'))
+    write(root, { 'm.json': labelme('m.png', [box('Cat', 1, 1, 5, 5)]) })
+    await png(path.join(root, 'm.png'))
+    await openProject(root, null)
+    expect((await renameRun(root, 'Cat', 'cat', 'labelme', null, () => {})).skipped).toEqual({ unreadable: 0, shared: 1, file: 'k.json' })
   })
 
   test("the images of one CreateML list, as Roboflow's _annotations.createml.json holds them, are renamed in one rewrite of it", async () => {
@@ -460,7 +469,7 @@ describe('renaming: the new name and what keeps the old one', () => {
     trashed = []
     const progress: Progress[] = []
     const done = await renameRun(root, 'Cat', 'cat', 'createml', null, (p) => progress.push(p))
-    expect(done).toEqual({ stopped: false, shapes: 3, changed: names, skipped: 0, failed: [], left: 0 })
+    expect(done).toEqual({ stopped: false, shapes: 3, changed: names, skipped: { unreadable: 0, shared: 0 }, failed: [], left: 0 })
     // One copy of the list in the trash, as it was, not one an image
     expect(trashed).toEqual([list])
     expect(JSON.parse(readFileSync(list, 'utf8')).map((e: { annotations: { label: string }[] }) => e.annotations[0].label)).toEqual(['cat', 'cat', 'cat'])
@@ -488,7 +497,7 @@ describe('renaming: the new name and what keeps the old one', () => {
         if (p.phase === 'read' && p.done === p.total) folderRead = true
       })
       expect(opened).toBe(2)
-      expect(done).toEqual({ stopped: true, shapes: 0, changed: [], skipped: 0, failed: [], left: 3 })
+      expect(done).toEqual({ stopped: true, shapes: 0, changed: [], skipped: { unreadable: 0, shared: 0 }, failed: [], left: 3 })
     } finally {
       vi.restoreAllMocks()
     }

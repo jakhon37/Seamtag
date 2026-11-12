@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, CircleAlert, Clock, Info, RefreshCw, TriangleAlert, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Severity } from '../../shared/dataset'
 import { useModal } from './Modal'
 import type { CheckSummary, LabelFormat, ProblemPage, ProblemRow, Progress, RenameDone, RenamePlanView } from './types'
@@ -79,6 +79,31 @@ type Props = {
 /** A row, the same from one page to the next */
 const keyOf = (row: ProblemRow) => JSON.stringify([row.code, row.image, row.shape ?? null, row.message])
 
+/** Where the focus is in the list: its control, the group and row it's in (a group's Show more counts as the row after its last), and which of the row's controls */
+type Held = { el: HTMLElement; group: number; code: string; row: number; part: string }
+
+/**
+ * The control that takes the focus once the one holding it has left the list, as a fix or a
+ * rename checked again takes its row away: the same control of the row now in its place, or
+ * that row's first; past a group's last row, its Show more, else the next group's title, else
+ * the row before; a group gone, the group now in its place, else the last; with none, the list,
+ * which takes the focus only then, to say there's nothing left.
+ */
+function handOn(list: HTMLElement, at: Held): HTMLElement {
+  const groups = [...list.querySelectorAll<HTMLElement>(':scope > .problems-group')]
+  const first = (row: HTMLElement) => (row.tabIndex >= 0 ? row : row.querySelector<HTMLElement>('button') ?? row)
+  const group = groups.find((g) => g.dataset.code === at.code)
+  if (group && at.row >= 0) {
+    const rows = [...group.querySelectorAll<HTMLElement>(':scope > .problem')]
+    const row = rows[at.row]
+    if (row) return row.querySelector<HTMLElement>(`[data-part="${at.part}"]`) ?? first(row)
+    const after = group.querySelector<HTMLElement>(':scope > .problems-more') ?? groups[groups.indexOf(group) + 1]?.querySelector<HTMLElement>('.problems-title')
+    return after ?? (rows.length ? first(rows[rows.length - 1]) : group.querySelector<HTMLElement>('.problems-title')!)
+  }
+  const instead = group ?? groups[Math.min(at.group, groups.length - 1)]
+  return instead?.querySelector<HTMLElement>('.problems-title') ?? list
+}
+
 export default function Problems({
   root, current, summary, running, stale, unsaved, folded, onFold, onClose, onCheck, onStop, onShow, onFix, onRename, onReveal
 }: Props) {
@@ -101,6 +126,52 @@ export default function Problems({
     return () => { live = false }
   }, [root, summary, shown, image, shut, more])
 
+  // A keyboard user who fixed or renamed from a row keeps their place: once the check takes the row
+  // away, the focus goes to what's now there, rather than back to the top of the window. The focus is
+  // followed by the page's own events, as React's miss those of a window giving it back as it closes.
+  const dock = useRef<HTMLElement>(null)
+  const listBox = useRef<HTMLDivElement>(null)
+  const held = useRef<Held | null>(null)
+  useEffect(() => {
+    const box = dock.current!
+    const hold = (e: FocusEvent) => {
+      const el = e.target as HTMLElement
+      const group = listBox.current?.contains(el) ? el.closest<HTMLElement>('.problems-group') : null
+      if (!group || !listBox.current) return void (held.current = null)
+      const rows = [...group.querySelectorAll(':scope > .problem')]
+      const row = el.closest('.problem')
+      held.current = {
+        el, code: group.dataset.code ?? '', group: [...listBox.current.querySelectorAll(':scope > .problems-group')].indexOf(group),
+        row: row ? rows.indexOf(row) : el.matches('.problems-more') ? rows.length : -1, part: el.dataset.part ?? ''
+      }
+    }
+    const letGo = (e: FocusEvent) => {
+      const el = e.target as HTMLElement
+      if (e.relatedTarget) {
+        // Moved elsewhere by the user: it stays there
+        if (!listBox.current?.contains(e.relatedTarget as Node)) held.current = null
+        return
+      }
+      // A click on nothing that takes the focus lets it go too; a row taken away, or the window losing the focus, doesn't
+      requestAnimationFrame(() => {
+        if (held.current?.el === el && el.isConnected && document.activeElement !== el) held.current = null
+      })
+    }
+    box.addEventListener('focusin', hold)
+    box.addEventListener('focusout', letGo)
+    return () => {
+      box.removeEventListener('focusin', hold)
+      box.removeEventListener('focusout', letGo)
+    }
+  }, [])
+  useLayoutEffect(() => {
+    const at = held.current
+    if (!at || at.el.isConnected || !listBox.current) return
+    held.current = null
+    const now = document.activeElement
+    if (!now || now === document.body) handOn(listBox.current, at).focus()
+  }, [page])
+
   const toggle = (severity: Severity) => setShown((list) => (list.includes(severity) ? list.filter((s) => s !== severity) : [...list, severity]))
   const time = summary ? new Date(summary.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''
   const counts = page?.counts ?? summary?.counts
@@ -113,11 +184,13 @@ export default function Problems({
   const hidden = counts ? SEVERITIES.filter((s) => counts[s.key] && !shown.includes(s.key)) : []
   const hiddenCount = counts ? hidden.reduce((n, s) => n + counts[s.key], 0) : 0
   const lateOf = (row: ProblemRow) => (!row.image ? null : stale.has(row.image) ? 'saved' : row.image === unsaved ? 'unsaved' : null)
+  // Nothing found in the whole folder: the dock is no taller than its words
+  const clean = !!summary && !(summary.counts.error + summary.counts.warning + summary.counts.info)
 
   return (
-    <section className={`problems${folded ? ' folded' : ''}`} aria-label="Problems">
+    <section className={`problems${folded ? ' folded' : ''}${clean ? ' clean' : ''}`} aria-label="Problems" ref={dock}>
       <h3 className="problems-head">
-        <button className="problems-fold" onClick={onFold} aria-expanded={!folded} title={folded ? 'Show the problems' : 'Fold the dock'}>
+        <button className="problems-fold" onClick={onFold} aria-expanded={!folded} title={folded ? 'Show the problems' : 'Fold the problems'}>
           {folded ? <ChevronRight size={14} /> : <ChevronDown size={14} />} Problems
           {folded && summary && <span className="problems-badge">{number(summary.counts.error + summary.counts.warning)}</span>}
         </button>
@@ -132,7 +205,7 @@ export default function Problems({
             </button>
           </>
         )}
-        <button className="icon" onClick={onClose} title="Close the Problems dock (View > Problems opens it)" aria-label="Close Problems"><X size={14} /></button>
+        <button className="icon" onClick={onClose} title="Close Problems (View > Problems opens it)" aria-label="Close Problems"><X size={14} /></button>
       </h3>
       {!folded && (
         <>
@@ -163,10 +236,12 @@ export default function Problems({
             </div>
           )}
           {summary && counts && (
-            <div className="problems-list" role="list" aria-label="Problems found">
+            <div className="problems-list" role="list" aria-label="Problems found" ref={listBox} tabIndex={page && !page.groups.length ? -1 : undefined}>
               {page?.groups.map((g) => {
                 const Icon = ICON[g.severity]
                 const open = !shut[g.code]
+                // Each row keeps its own element from one page to the next, and with it the focus; two alike go by their order
+                const seen = new Map<string, number>()
                 return (
                   <div key={g.code} className="problems-group" role="listitem" data-code={g.code}>
                     <button className="problems-title" aria-expanded={open} onClick={() => setShut((s) => ({ ...s, [g.code]: open }))}>
@@ -175,10 +250,14 @@ export default function Problems({
                       <span>{g.title}</span>
                       <b>{number(g.count)}</b>
                     </button>
-                    {open && g.rows.map((row, k) => (
-                      <Row key={k} row={row} late={lateOf(row)} picked={picked === keyOf(row)} onPick={() => setPicked(keyOf(row))}
-                        onShow={onShow} onFix={onFix} onRename={onRename} onReveal={onReveal} />
-                    ))}
+                    {open && g.rows.map((row) => {
+                      const key = keyOf(row), n = seen.get(key) ?? 0
+                      seen.set(key, n + 1)
+                      return (
+                        <Row key={n ? `${key}#${n}` : key} row={row} late={lateOf(row)} picked={picked === key} onPick={() => setPicked(key)}
+                          onShow={onShow} onFix={onFix} onRename={onRename} onReveal={onReveal} />
+                      )
+                    })}
                     {open && g.rows.length < g.count && (
                       <button className="ghost problems-more" onClick={() => setMore((m) => ({ ...m, [g.code]: g.rows.length + PAGE }))}>
                         {showMore(g.count - g.rows.length, PAGE)}
@@ -204,8 +283,16 @@ export default function Problems({
 /** A label a rename can start from: one written another way, or one not in the label list */
 const RENAMES = new Set(['label-variants', 'unknown-label'])
 const LATE = { saved: 'Saved since the check: this is checked again in a moment.', unsaved: "Changed since the check: this is checked again once it's saved." }
-// Characters a name cut short keeps at its end, so names that differ only there, as frame numbers do, still tell apart
+// Characters a name cut short keeps at its end, so names that differ only there, as frame numbers do, still tell apart:
+// at least TAIL, and up to LONGEST to keep its last word whole, as frame_000025.jpg's 000025.jpg
 const TAIL = 8
+const LONGEST = 16
+
+/** How many characters of a name its cut keeps at the end: from the start of its last word, when that's short enough */
+function tailLength(chars: string[]) {
+  for (let k = chars.length - TAIL; k >= Math.max(1, chars.length - LONGEST); k--) if (/[\s_-]/.test(chars[k - 1])) return chars.length - k
+  return TAIL
+}
 
 /**
  * A name cut short in the middle when the row is too narrow for it, its end always shown. A
@@ -213,8 +300,9 @@ const TAIL = 8
  */
 function MiddleCut({ text }: { text: string }) {
   const chars = [...text]
-  if (chars.length <= TAIL + 2) return <span className="cut-head">{text}</span>
-  return <><span className="cut-head">{chars.slice(0, -TAIL).join('')}</span><span className="cut-tail">{chars.slice(-TAIL).join('')}</span></>
+  const tail = tailLength(chars)
+  if (chars.length <= tail + 2) return <span className="cut-head">{text}</span>
+  return <><span className="cut-head">{chars.slice(0, -tail).join('')}</span><span className="cut-tail">{chars.slice(-tail).join('')}</span></>
 }
 
 type RowProps = {
@@ -234,7 +322,7 @@ function Row({ row, late, picked, onPick, onShow, onFix, onRename, onReveal }: R
   }
   // The whole row opens its image to the mouse; its name is the button to the keyboard. A row
   // with no button takes the focus itself, so its message can be read in full from the keyboard.
-  // The message names the shape's label, so the name gets the room beside the shape's number.
+  // The message says which shape, or which label, so the image's name has the line to itself but for the buttons.
   return (
     <div className={`problem${opens ? ' opens' : ''}${late ? ' stale' : ''}${picked ? ' picked' : ''}`} tabIndex={opens || row.file ? undefined : 0}
       title={late ? `${row.message}\n\n${LATE[late]}` : row.message} onClick={() => {
@@ -244,16 +332,15 @@ function Row({ row, late, picked, onPick, onShow, onFix, onRename, onReveal }: R
       {late && <Clock size={12} className="problem-late" aria-label="Out of date" />}
       <div className="problem-where">
         {opens ? (
-          <button className="name problem-open" title={row.image!} aria-label={row.image!} onClick={act(() => { onPick(); onShow(row) })}>
+          <button className="name problem-open" data-part="name" title={row.image!} aria-label={row.image!} onClick={act(() => { onPick(); onShow(row) })}>
             <MiddleCut text={row.image!} />
           </button>
         ) : <span className="name" title={row.file}><MiddleCut text={row.file ?? 'The folder'} /></span>}
-        {row.shape !== undefined && <span className="muted problem-shape">shape {row.shape + 1}</span>}
-        {row.fix && <button className="problem-act" onClick={act(() => onFix(row))} title="Fix it in the image: an edit that can be undone">Fix</button>}
+        {row.fix && <button className="problem-act" data-part="fix" onClick={act(() => onFix(row))} title="Fix it in the image: an edit that can be undone">Fix</button>}
         {RENAMES.has(row.code) && row.label !== undefined && (
-          <button className="problem-act" onClick={act(() => onRename(row))} title={`Rename “${row.label}” in every label file of the folder`}>Rename…</button>
+          <button className="problem-act" data-part="rename" onClick={act(() => onRename(row))} title={`Rename “${row.label}” in every label file of the folder`}>Rename…</button>
         )}
-        {row.file && <button className="problem-act" onClick={act(() => onReveal(row.file!))} title="Show the file in its folder">Show</button>}
+        {row.file && <button className="problem-act" data-part="show" onClick={act(() => onReveal(row.file!))} title="Show the file in its folder">Show</button>}
       </div>
       <div className="problem-what">{row.message}</div>
     </div>
