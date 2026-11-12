@@ -19,6 +19,9 @@ const shape = (label: string, shape_type: string, points: number[][], extra: Rec
 const MASK = { x: 40, y: 40, width: 40, height: 30, data: new Uint8Array(40 * 30) }
 for (let y = 0; y < 30; y++) for (let x = 0; x < 40; x++) MASK.data[y * 40 + x] = (y < 10 && x < 10) || (y >= 15 && x >= 20) ? 1 : 0
 const DOG_GROUP = [[[200, 50], [260, 50], [230, 100]], [[280, 60], [340, 60], [310, 110]]]
+// One object with a part past the image's right edge: kept inside the image, its closest point to the other part is
+// another one, so the row is joined as Ultralytics would join the parts COCO's export keeps
+const CAR_GROUP = [[[300, 160], [360, 160], [330, 205]], [[480, 151], [390, 109], [395, 280]]]
 const NAMES = ['cat', 'dog', 'car', 'ball', 'person']
 
 async function makeFolder() {
@@ -35,7 +38,8 @@ async function makeFolder() {
     'train/sub/b.png': [
       shape('cat', 'mask', [[40, 40], [79, 69]], { mask }),
       shape('dog', 'polygon', DOG_GROUP[0], { group_id: 3 }), shape('dog', 'polygon', DOG_GROUP[1], { group_id: 3 }),
-      shape('cat', 'line', [[10, 280], [100, 280]])
+      shape('cat', 'line', [[10, 280], [100, 280]]),
+      shape('car', 'polygon', CAR_GROUP[0], { group_id: 5 }), shape('car', 'polygon', CAR_GROUP[1], { group_id: 5 })
     ],
     'val/c.png': [
       shape('person', 'rectangle', [[100, 50], [200, 250]], { group_id: 1 }), shape('nose', 'point', [[150, 80]], { group_id: 1 }),
@@ -164,7 +168,7 @@ test('export every format through the window, with a check of what goes in befor
   await expect(dialog.locator('.bad')).toHaveText("That's inside the image folder: choose a new or empty folder outside it")
   await expect(dialog.getByRole('button', { name: 'Export', exact: true })).toBeDisabled()
   const coco = await exportTo(app, dialog, 'coco')
-  await expect(dialog.locator('.export-lead')).toContainText('Exported 5 images and 14 objects')
+  await expect(dialog.locator('.export-lead')).toContainText('Exported 5 images and 15 objects')
   await page.screenshot({ path: `${SHOTS}/export-done-dark-1500.png` })
   await dialog.getByRole('button', { name: 'Show in folder' }).click()
   await expect.poll(() => app.evaluate(() => (globalThis as any).revealed)).toEqual([coco])
@@ -176,10 +180,11 @@ test('export every format through the window, with a check of what goes in befor
   const train = json(coco, 'annotations/instances_train.json')
   expect(train.categories.map((c: any) => c.name)).toEqual(NAMES)
   expect(train.images.map((i: any) => i.file_name)).toEqual(['images/train/a.png', 'images/train/sub/b.png'])
-  expect(train.annotations.map((a: any) => train.categories[a.category_id - 1].name)).toEqual(['cat', 'dog', 'car', 'ball', 'car', 'ball', 'cat', 'dog'])
-  // The two polygons of group 3 are one object of two parts, and the mask one of its own
+  expect(train.annotations.map((a: any) => train.categories[a.category_id - 1].name)).toEqual(['cat', 'dog', 'car', 'ball', 'car', 'ball', 'cat', 'dog', 'car'])
+  // The two polygons of group 3 are one object of two parts, and the mask one of its own; group 5's part past the edge is kept inside the image
   expect(train.annotations[7].segmentation.length).toBe(2)
   expect(typeof train.annotations[6].segmentation.counts).toBe('string')
+  expect(train.annotations[8].segmentation[1]).toEqual([400, 151, 390, 109, 395, 280])
   expect(json(coco, 'annotations/instances_test.json').annotations.length).toBe(4)
   expect(existsSync(path.join(DIR, 'inside'))).toBe(false)
 
@@ -204,7 +209,7 @@ test('export every format through the window, with a check of what goes in befor
   await page.getByRole('menuitemcheckbox', { name: 'Dark mode' }).click()
   dialog = await openExport(page)
   await choose(dialog, 'YOLO segment')
-  await expect(dialog.locator('.export-group', { hasText: 'Objects of several parts joined' })).toContainText('2')
+  await expect(dialog.locator('.export-group', { hasText: 'Objects of several parts joined' })).toContainText('3')
   await dialog.locator('.export-group-head').first().click()
   await page.screenshot({ path: `${SHOTS}/export-check-light-1500.png` })
   const segment = await exportTo(app, dialog, 'yolo-segment')
@@ -214,10 +219,10 @@ test('export every format through the window, with a check of what goes in befor
     'data.yaml', 'labels/test/f.txt', 'labels/train/a.txt', 'labels/train/sub/b.txt', 'labels/val/c.txt', 'labels/val/d.txt'
   ])
   expect(readFileSync(path.join(segment, 'data.yaml'), 'utf8')).toContain('train: images/train\nval: images/val\ntest: images/test\n')
-  expect(rows(segment, 'labels/train/sub/b.txt').map((r) => r.split(' ')[0])).toEqual(['0', '1'])
+  expect(rows(segment, 'labels/train/sub/b.txt').map((r) => r.split(' ')[0])).toEqual(['0', '1', '2'])
   expect(rows(segment, 'labels/val/d.txt')).toEqual([])
   expectYolo(segment, 'segment', NAMES, {}, {
-    'images/train/sub/b.png': [{ class: 0, parts: maskOutlines(MASK).outer }, { class: 1, parts: DOG_GROUP }]
+    'images/train/sub/b.png': [{ class: 0, parts: maskOutlines(MASK).outer }, { class: 1, parts: DOG_GROUP }, { class: 2, parts: CAR_GROUP }]
   })
 
   // YOLO detect in a small window, still light
@@ -234,7 +239,9 @@ test('export every format through the window, with a check of what goes in befor
   await fits(page)
   await closeDialog(dialog)
   expect(rows(detect, 'labels/train/a.txt').length).toBe(6)
-  expect(rows(detect, 'labels/train/sub/b.txt')).toEqual(['0 0.150000 0.183333 0.100000 0.100000', '1 0.675000 0.266667 0.350000 0.200000'])
+  expect(rows(detect, 'labels/train/sub/b.txt')).toEqual([
+    '0 0.150000 0.183333 0.100000 0.100000', '1 0.675000 0.266667 0.350000 0.200000', '2 0.875000 0.648333 0.250000 0.570000'
+  ])
   expectYolo(detect, 'detect', NAMES)
 
   // YOLO OBB, dark again

@@ -97,11 +97,13 @@ def fail(message):
 
 
 def joined_row(cls, parts, width, height):
-    """An object's parts joined by merge_multi_segment, as convert_coco joins them, then written as Seamtag
-    writes a row: each point a share of the image with '%.6f', within 0 to 1, a point that repeats the one
-    before it or the first point at the end left out"""
-    points = np.concatenate(merge_multi_segment([[v for p in part for v in p] for part in parts]), axis=0)
-    shares = [("%.6f" % (min(max(x, 0), width) / width), "%.6f" % (min(max(y, 0), height) / height)) for x, y in points.tolist()]
+    """An object's parts, each kept within the image as Seamtag's COCO export keeps them (its points past an
+    edge moved onto it), so as convert_coco would read them, joined by merge_multi_segment as convert_coco
+    joins them, then written as Seamtag writes a row: each point a share of the image with '%.6f', a point
+    that repeats the one before it or the first point at the end left out"""
+    inside = [[v for x, y in part for v in (min(max(x, 0), width), min(max(y, 0), height))] for part in parts]
+    points = np.concatenate(merge_multi_segment(inside), axis=0)
+    shares = [("%.6f" % (x / width), "%.6f" % (y / height)) for x, y in points.tolist()]
     kept = [p for i, p in enumerate(shares) if i == 0 or p != shares[i - 1]]
     while len(kept) > 1 and kept[0] == kept[-1]:
         kept.pop()

@@ -776,7 +776,8 @@ describe.skipIf(!PARITY)("datasets for Ultralytics' own checks", () => {
     classes: { person: ['nose', 'left_eye', 'right_eye'], yes: ['x', 'left', 'right'] },
     flip: { person: [['left_eye', 'right_eye']], yes: [['left', 'right']] }
   }
-  // Every kind of shape, some past the edges, a mask with a hole and two parts, and two polygons that are one object
+  // Every kind of shape, some past the edges, a mask with a hole and two parts, and two objects of two polygons each,
+  // one with a part past the image's edge: kept inside it, that part's closest point to the other is another one
   const MASK = bitmap(2, 2, ['1111100', '1001100', '1111100', '0000000', '0000011', '0000011'])
   const sample = (size: [number, number], name: string, labels: string[]): DatasetImage => {
     const [w, h] = size
@@ -789,14 +790,17 @@ describe.skipIf(!PARITY)("datasets for Ultralytics' own checks", () => {
       rect(labels[5 % labels.length], [[-3, h * 0.8], [w * 0.1, h + 4]]),
       newShape(labels[0], 'line', [[1, 1], [5, 5]]),
       newShape(labels[0], 'polygon', [[w * 0.55, h * 0.65], [w * 0.65, h * 0.66], [w * 0.6, h * 0.75]], { group_id: 3 }),
-      newShape(labels[0], 'polygon', [[w * 0.7, h * 0.85], [w * 0.75, h * 0.86], [w * 0.72, h * 0.95], [w * 0.69, h * 0.9]], { group_id: 3 })
+      newShape(labels[0], 'polygon', [[w * 0.7, h * 0.85], [w * 0.75, h * 0.86], [w * 0.72, h * 0.95], [w * 0.69, h * 0.9]], { group_id: 3 }),
+      newShape(labels[1 % labels.length], 'polygon', [[w * 0.75, h * 0.2], [w * 0.9, h * 0.2], [w * 0.825, h * 0.35]], { group_id: 4 }),
+      newShape(labels[1 % labels.length], 'polygon', [[w * 1.2, h * 0.17], [w * 0.975, h * 0.03], [w * 0.9875, h * 0.6]], { group_id: 4 })
     ]
     return image(shapes, [null, null, null, null, MASK], size, name)
   }
   // The objects written as outlines joined from several parts, with the parts in pixels, so the parity script can join them with Ultralytics' own code
   const joined = (img: DatasetImage, names: string[]) => [
     { class: names.indexOf(img.shapes[4].label), parts: maskOutlines(MASK).outer },
-    { class: names.indexOf(img.shapes[7].label), parts: [img.shapes[7].points, img.shapes[8].points] }
+    { class: names.indexOf(img.shapes[7].label), parts: [img.shapes[7].points, img.shapes[8].points] },
+    { class: names.indexOf(img.shapes[9].label), parts: [img.shapes[9].points, img.shapes[10].points] }
   ]
   const poseSample = (size: [number, number], name: string): DatasetImage => {
     const [w, h] = size
