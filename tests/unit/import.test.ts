@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { cpSync, existsSync, promises as fsp, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
@@ -7,7 +7,7 @@ import { addShapes, closeImport, type ImportPolicy, type ImportPreview, type Imp
 import { CocoSession, readTop, shapesOf, startFolder } from '../../src/main/importWorker'
 import { setCacheDir } from '../../src/main/images'
 import { decodeMask } from '../../src/main/masks'
-import { openProject, setTrash } from '../../src/main/project'
+import { openProject, serial, setTrash } from '../../src/main/project'
 import { type CocoEntry, readCoco, writeCoco } from '../../src/shared/coco'
 import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, parseLabelFile, type Shape } from '../../src/shared/labelfile'
@@ -24,15 +24,17 @@ vi.mock('v8', async (original) => {
 
 // File > Import dataset, read and written in temporary folders of real images made by sharp, from
 // COCO files writeCoco writes and YOLO datasets labelRows and writeDataYaml write, and the
-// fixtures in tests/fixtures/ultralytics. The trash is a folder of the test's own, as in
-// project.test.ts, and records the order things went into it.
+// fixtures in tests/fixtures/coco and tests/fixtures/ultralytics. The trash is a folder of the
+// test's own, as in project.test.ts, and records the order things went into it.
 const bin = mkdtempSync(path.join(tmpdir(), 'seamtag-trash-'))
 let trashed: string[] = []
 let onTrash: (file: string) => void = () => {}
+let afterTrash: (file: string) => void = () => {}
 setTrash(async (file) => {
   onTrash(file)
   renameSync(file, path.join(bin, `${trashed.length}-${path.basename(file)}`))
   trashed.push(file)
+  afterTrash(file)
 })
 const cache = mkdtempSync(path.join(tmpdir(), 'seamtag-cache-'))
 setCacheDir(cache)
@@ -46,6 +48,8 @@ const folder = () => {
 afterEach(() => {
   closeImport()
   onTrash = () => {}
+  afterTrash = () => {}
+  vi.restoreAllMocks()
 })
 afterAll(() => {
   for (const dir of made) {
@@ -288,6 +292,92 @@ describe('a COCO file', () => {
     await expect(readImport(root, { kind: 'coco', path: 'relative.json', prefer: 'labelme', labels: [] }, () => {})).rejects.toThrow('Pick the dataset again')
     await expect(readImport(folder(), { kind: 'coco', path: path.join(dir, 'x.json'), prefer: 'labelme', labels: [] }, () => {})).rejects.toThrow('That folder is not open')
   })
+  test("an image the file lists without annotations is left as it is, labelled or not, whatever the choice", async () => {
+    const dir = folder()
+    for (const n of ['a.png', 'b.png', 'c.png']) await png(path.join(dir, n))
+    write(dir, { 'a.json': labelme('a.png', [newShape('cat', 'polygon', [[1, 1], [9, 1], [5, 8]])]) })
+    const before = text(dir, 'a.json')
+    // A keypoints file lists every image, those without people too
+    const file = cocoFile(path.join(folder(), 'person_keypoints.json'), [entry('a.png', []), entry('b.png', []), entry('c.png', [newShape('dog', 'rectangle', [[1, 1], [9, 9]])])], ['dog'])
+    const root = await open(dir)
+    trashed = []
+    const p = await read(root, { kind: 'coco', path: file })
+    expect([p.matched, p.fresh, p.blank, p.labelled, p.empty, p.nothing]).toEqual([3, 1, 0, 0, 0, 2])
+    expect(group(p, 'import-no-annotations')!.rows).toEqual([
+      "a.png has no annotations in person_keypoints.json, so it's left as it is", "b.png has no annotations in person_keypoints.json, so it's left as it is"
+    ])
+    const r = await save('replace')
+    expect([r.names, r.written, r.trashed, trashed]).toEqual([['c.png'], 1, 0, []])
+    expect([text(dir, 'a.json'), existsSync(path.join(dir, 'b.json'))]).toEqual([before, false])
+    expect(group(r, 'import-no-annotations')!.count).toBe(2)
+  })
+
+  test("labelme 7.9.1's labelme2coco file comes in: its polygons as they were, objects' parts in one group, masks pixel for pixel", async () => {
+    // tests/fixtures/coco/make_labelme2coco.py ran labelme2coco on these LabelMe files
+    const fx = JSON.parse(readFileSync(path.join(__dirname, '../fixtures/coco/labelme2coco.json'), 'utf8'))
+    const dir = folder()
+    for (const im of fx.coco.images) {
+      mkdirSync(path.join(dir, path.dirname(im.file_name)), { recursive: true })
+      await sharp({ create: { width: im.width, height: im.height, channels: 3, background: '#808080' } }).jpeg().toFile(path.join(dir, im.file_name))
+    }
+    const file = path.join(folder(), 'annotations.json')
+    writeFileSync(file, JSON.stringify(fx.coco))
+    const root = await open(dir)
+    const p = await read(root, { kind: 'coco', path: file })
+    expect([p.images, p.matched, p.byName, p.fresh, p.blocked, p.groups]).toEqual([2, 2, 0, 2, 0, []])
+    const r = await save()
+    expect([r.written, r.shapes]).toEqual([2, 13])
+    const a = doc(dir, 'JPEGImages/a.json').shapes, b = doc(dir, 'JPEGImages/b.json').shapes
+    // Without Seamtag's attributes, a shape is what its segmentation is: rectangles, circles and rotated boxes come in as polygons
+    expect(a.map((s) => [s.label, s.shape_type])).toEqual([
+      ['cat', 'polygon'], ['dog', 'polygon'], ['ball', 'polygon'], ['plate', 'polygon'], ['dog', 'polygon'], ['dog', 'polygon'], ['cat', 'polygon'], ['blob', 'mask']
+    ])
+    expect(b.map((s) => [s.label, s.shape_type])).toEqual([['ball', 'polygon'], ['blob', 'mask'], ['ball', 'polygon'], ['plate', 'polygon'], ['plate', 'polygon']])
+    expect(a[0].points).toEqual(fx.files['a.json'].shapes[0].points)
+    // labelme2coco makes one object of a label's shapes in a group: its polygons share a group here
+    expect([a[4].group_id, a[4].group_id === a[5].group_id, a[6].group_id === a[4].group_id, b[3].group_id === b[4].group_id]).toEqual([expect.any(Number), true, false, true])
+    // A mask on its own is labelme's own pixels, in its own box
+    const blob = fx.files['a.json'].shapes[7]
+    const pixels = await decodeMask(a[7].mask!)
+    expect([a[7].points, pixels.width, pixels.height]).toEqual([blob.points, 10, 8])
+    expect(Array.from({ length: 8 }, (_, y) => Array.from(pixels.data.slice(y * 10, y * 10 + 10)).join(''))).toEqual(fx.masks['a.json']['7'])
+  })
+
+  test("pycocotools' masks come in pixel for pixel, as compressed counts or as runs", async () => {
+    // What pycocotools 2.0.11 makes of them: tests/fixtures/coco/make_rle_cases.py
+    const ref = JSON.parse(readFileSync(path.join(__dirname, '../fixtures/coco/rle_cases.json'), 'utf8'))
+    type Case = { name: string; h: number; w: number; counts: string; runs?: number[]; rows?: string[] }
+    const cases = [...ref.masks, ...ref.runs].filter((c: Case) => c.rows).map((c: Case) => ({ ...c, segmentation: { size: [c.h, c.w], counts: c.runs ?? c.counts } }))
+    expect(cases.length).toBeGreaterThan(20)
+    const dir = folder()
+    for (const [k, c] of cases.entries()) await png(path.join(dir, `m${k}.png`), c.w, c.h)
+    const file = path.join(folder(), 'masks.json')
+    writeFileSync(file, JSON.stringify({
+      images: cases.map((c, k) => ({ id: k + 1, file_name: `m${k}.png`, width: c.w, height: c.h })),
+      annotations: cases.map((c, k) => ({ id: k + 1, image_id: k + 1, category_id: 1, iscrowd: 0, area: 1, bbox: [0, 0, 1, 1], segmentation: c.segmentation })),
+      categories: [{ id: 1, name: 'blob' }]
+    }))
+    const root = await open(dir)
+    await read(root, { kind: 'coco', path: file })
+    const r = await save()
+    const set = cases.filter((c) => c.rows!.join('').includes('1'))
+    expect(r.written).toBe(set.length)
+    for (const [k, c] of cases.entries()) {
+      const json = path.join(dir, `m${k}.json`)
+      // A mask without pixels is no shape, so the image gets nothing
+      if (!set.includes(c)) {
+        expect(existsSync(json), c.name).toBe(false)
+        continue
+      }
+      const [shape] = parseLabelFile(readFileSync(json, 'utf8')).shapes
+      const pixels = await decodeMask(shape.mask!)
+      // labelme's mask: its box's corners, both inside it, and the pixels in that box
+      const [[x0, y0], [x1, y1]] = shape.points
+      expect([pixels.width, pixels.height], c.name).toEqual([x1 - x0 + 1, y1 - y0 + 1])
+      const at = (x: number, y: number) => x >= x0 && x <= x1 && y >= y0 && y <= y1 && pixels.data[(y - y0) * pixels.width + x - x0] ? '1' : '0'
+      expect(Array.from({ length: c.h }, (_, y) => Array.from({ length: c.w }, (_, x) => at(x, y)).join('')), c.name).toEqual(c.rows)
+    }
+  })
 })
 
 describe('images that have labels', () => {
@@ -330,20 +420,85 @@ describe('images that have labels', () => {
     expect(group(again, 'unchanged')!.count).toBe(2)
   })
 
-  test('Replace sends the old file to the trash first, and the imported shapes take its place', async () => {
+  test('Replace writes the new file beside the old one, sends the old one to the trash, then gives the new one its name', async () => {
     const { dir, file, root } = await setUp()
     const before = text(dir, 'a.json')
     trashed = []
-    // When the old file goes, the new one isn't written yet
-    let seen: boolean | null = null
-    onTrash = (f) => { seen = existsSync(f) && text(dir, 'a.json') === before }
+    // When the old file goes, the new one is written beside it, under another name
+    let seen: unknown = null
+    onTrash = (f) => {
+      const beside = readdirSync(dir).filter((n) => /^a\.json\.\d+\.\d+\.tmp$/.test(n))
+      seen = [existsSync(f) && text(dir, 'a.json') === before, beside.length, beside.length && brief(doc(dir, beside[0]).shapes)]
+    }
     await read(root, { kind: 'coco', path: file })
     const r = await save('replace')
-    expect([r.written, r.trashed, seen]).toEqual([2, 1, true])
+    expect([r.written, r.trashed, seen]).toEqual([2, 1, [true, 1, brief(imported())]])
     expect(trashed).toEqual([path.join(dir, 'a.json')])
     expect(readFileSync(path.join(bin, `0-a.json`), 'utf8')).toBe(before)
     expect(brief(doc(dir, 'a.json').shapes)).toEqual(brief(imported()))
-    expect(doc(dir, 'a.json').other.verified).toBeUndefined()
+    expect([doc(dir, 'a.json').other.verified, doc(dir, 'a.json').imagePath, doc(dir, 'a.json').imageData]).toEqual([undefined, 'a.png', 'aGVsbG8='])
+    expect(readdirSync(dir).filter((n) => n.endsWith('.tmp'))).toEqual([])
+  })
+
+  test("when Replace's new file can't take the old one's name, the report says where each is, and the image is counted again", async () => {
+    const { dir, file, root } = await setUp()
+    await read(root, { kind: 'coco', path: file })
+    // Something takes a.json's name as soon as the old file is in the trash
+    afterTrash = (f) => mkdirSync(f)
+    const r = await save('replace')
+    expect([r.written, r.trashed, r.names.sort()]).toEqual([1, 1, ['a.png', 'n.png']])
+    const failed = group(r, 'failed')!
+    expect(failed.rows).toEqual([expect.stringMatching(/^a\.json went to the trash, but a\.png's new labels couldn't take its name: they're in a\.json\.\d+\.\d+\.tmp \(/)])
+    expect(brief(doc(dir, /(a\.json\.\d+\.\d+\.tmp)/.exec(failed.rows[0])![1]).shapes)).toEqual(brief(imported()))
+    // Its labels are gone from where the image list read them, so it counts them again
+    expect(counted()).toEqual(['a.png', 'n.png'])
+  })
+
+  test("each image is looked at and written in one turn of the label files' queue, so labels written meanwhile aren't lost", async () => {
+    for (const policy of ['skip', 'add'] as const) {
+      const dir = folder()
+      for (const n of ['a.png', 'b.png']) await png(path.join(dir, n))
+      write(dir, { 'b.json': labelme('b.png', own()) })
+      const file = cocoFile(path.join(folder(), 'c.json'), ['a.png', 'b.png'].map((n) => entry(n, imported())), ['dog', 'person'])
+      const root = await open(dir)
+      await read(root, { kind: 'coco', path: file })
+      // A pre-labelling batch's turn, taken as the import starts, writes both images' labels a moment later
+      const kite = [newShape('kite', 'rectangle', [[30, 2], [38, 9]], { flags: { ai: true }, other: { score: 0.9 } })]
+      const writing = save(policy)
+      const meanwhile = serial(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        write(dir, { 'a.json': labelme('a.png', kite), 'b.json': labelme('b.png', [...own(), ...kite]) })
+      })
+      await Promise.all([writing, meanwhile])
+      // The import's turns come after it: the image it labelled has labels when the import looks
+      expect(brief(doc(dir, 'a.json').shapes), policy).toEqual(brief(policy === 'skip' ? kite : [...kite, ...imported()]))
+      expect(brief(doc(dir, 'b.json').shapes), policy).toEqual(brief(policy === 'skip' ? [...own(), ...kite] : [...own(), ...kite, imported()[0], { ...imported()[1], group_id: 2 }]))
+      closeImport()
+    }
+  })
+
+  test('an image with labels in its VOC file and in a LabelMe file is left alone when VOC is the format read', async () => {
+    const dir = folder()
+    await png(path.join(dir, 'c.png'))
+    const box = '<annotation><size><width>40</width><height>30</height><depth>3</depth></size><object><name>cat</name><difficult>0</difficult>' +
+      '<bndbox><xmin>2</xmin><ymin>3</ymin><xmax>20</xmax><ymax>15</ymax></bndbox></object></annotation>'
+    write(dir, { 'c.xml': box, 'c.json': labelme('c.png', own()) })
+    const before = text(dir, 'c.json')
+    const file = cocoFile(path.join(folder(), 'c.json'), [entry('c.png', imported())], ['dog', 'person'])
+    const root = await open(dir)
+    trashed = []
+    const p = await read(root, { kind: 'coco', path: file, prefer: 'voc' })
+    expect([p.labelled, p.labelImg, p.blocked]).toEqual([0, 0, 1])
+    expect(group(p, 'import-two-files')!.rows).toEqual(['c.png has labels in c.xml and in c.json, so nothing is imported into it: keep one of them first'])
+    for (const policy of ['add', 'replace'] as const) {
+      await read(root, { kind: 'coco', path: file, prefer: 'voc' })
+      const r = await save(policy)
+      expect([r.written, group(r, 'import-two-files')!.count, trashed, text(dir, 'c.xml'), text(dir, 'c.json')]).toEqual([0, 1, [], box, before])
+    }
+    // Read as LabelMe JSON, the LabelMe file takes them
+    await read(root, { kind: 'coco', path: file, prefer: 'labelme' })
+    expect((await save('add')).written).toBe(1)
+    expect(brief(doc(dir, 'c.json').shapes)).toEqual(brief([...own(), imported()[0], { ...imported()[1], group_id: 2 }]))
   })
 
   test("importing an export's instances file, then its keypoints file, adds the keypoints to the outline's group without doubling it", async () => {
@@ -424,6 +579,14 @@ describe('images that have labels', () => {
     expect([existsSync(path.join(dir, 'a.json')), existsSync(path.join(dir, 'sub/c.json'))]).toEqual([false, false])
     expect(doc(out, 'sub/c.json').imagePath).toBe(path.relative(path.join(out, 'sub'), path.join(dir, 'sub/c.png')).split(path.sep).join('/'))
     expect(brief(doc(out, 'a.json').shapes)).toEqual([['cat', 'rectangle', null, [[1, 1], [5, 5]]]])
+    // Replace writes where the old file is: sub/c.png's labels straight in the output folder, as labelme keeps them
+    renameSync(path.join(out, 'sub/c.json'), path.join(out, 'c.json'))
+    const again = cocoFile(path.join(folder(), 'd.json'), [entry('sub/c.png', [newShape('dog', 'rectangle', [[2, 2], [8, 8]])])], ['dog'])
+    trashed = []
+    await read(root, { kind: 'coco', path: again })
+    expect((await save('replace')).written).toBe(1)
+    expect([trashed, existsSync(path.join(out, 'sub/c.json')), readdirSync(out).filter((n) => n.endsWith('.tmp'))]).toEqual([[path.join(out, 'c.json')], false, []])
+    expect([brief(doc(out, 'c.json').shapes), doc(out, 'c.json').imagePath]).toEqual([[['dog', 'rectangle', null, [[2, 2], [8, 8]]]], path.relative(out, path.join(dir, 'sub/c.png')).split(path.sep).join('/')])
   })
 
   test('Stop: writing stops after the image it is on, keeps what it wrote, and only that is counted again', async () => {
@@ -579,6 +742,46 @@ describe('a YOLO dataset', () => {
     near(out[1].points, [[22, 2], [38, 2], [38, 28], [22, 28]])
   })
 
+  test('an empty label file gives an image without labels an empty one; an image with labels keeps them, whatever the choice', async () => {
+    const ds = await dataset({ 'a.png': '', 'b.png': '', 'c.png': '0 0.5 0.5 0.5 0.5\n' }, { 0: 'cat' })
+    const dir = folder()
+    for (const n of ['a.png', 'b.png', 'c.png']) await png(path.join(dir, n))
+    write(dir, { 'b.json': labelme('b.png', [newShape('dog', 'rectangle', [[1, 1], [9, 9]])]), 'c.json': labelme('c.png', []) })
+    const before = text(dir, 'b.json')
+    const root = await open(dir)
+    trashed = []
+    const p = await read(root, { kind: 'yolo', path: ds })
+    expect([p.fresh, p.blank, p.labelled, p.empty, p.nothing]).toEqual([1, 1, 2, 1, 0])
+    const r = await save('replace')
+    expect([r.names.sort(), r.trashed, trashed]).toEqual([['a.png', 'c.png'], 1, [path.join(dir, 'c.json')]])
+    expect([doc(dir, 'a.json').shapes, text(dir, 'b.json'), brief(doc(dir, 'c.json').shapes)]).toEqual([[], before, [['cat', 'rectangle', null, [[10, 7.5], [30, 22.5]]]]])
+    expect(group(r, 'no-shapes')!.rows).toEqual(["b.png gets no shapes from the dataset, so it's left as it is"])
+  })
+
+  test("Stop answers at once while the dataset's files are still being found, and what they find is dropped", async () => {
+    const ds = await dataset({ 'a.png': '0 0.5 0.5 0.5 0.5\n' }, { 0: 'cat' })
+    const dir = folder()
+    await png(path.join(dir, 'a.png'))
+    const root = await open(dir)
+    // data.yaml can't be read until the test lets it, as if the dataset were on a slow disk
+    let release = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const real = fsp.readFile
+    vi.spyOn(fsp, 'readFile').mockImplementation((async (...args: Parameters<typeof real>) => {
+      if (String(args[0]).endsWith('data.yaml')) await held
+      return real(...args)
+    }) as typeof real)
+    try {
+      const reading = readImport(root, { kind: 'yolo', path: path.join(ds, 'data.yaml'), prefer: 'labelme', labels: [] }, (at) => {
+        if (at.phase === 'Reading data.yaml') setTimeout(stopImport, 20)
+      })
+      expect(await Promise.race([reading, new Promise((resolve) => setTimeout(() => resolve('still reading'), 2000))])).toBeNull()
+    } finally {
+      release()
+    }
+    await expect(save()).rejects.toThrow('Read the dataset again first')
+  })
+
   test('images not in the folder, and names that match two of its images, are listed and left out', async () => {
     const ds = await dataset({ 'a.png': '0 0.5 0.5 0.5 0.5\n', 'q.png': '0 0.5 0.5 0.5 0.5\n' }, { 0: 'cat' })
     const dir = folder()
@@ -590,7 +793,7 @@ describe('a YOLO dataset', () => {
     expect(group(p, 'import-image-missing')!.rows).toEqual(["images/train/q.png isn't in the folder, so its labels are left out"])
   })
 
-  test('a thousand label files are read a few at a time, and messages come a page at a time', async () => {
+  test('a thousand label files are read 16 at a time, and messages come a page at a time', async () => {
     const ds = folder(), dir = folder()
     const names = Array.from({ length: 1000 }, (_, i) => `f${i}.png`)
     const tiny = await sharp({ create: { width: W, height: H, channels: 3, background: '#405060' } }).png().toBuffer()
@@ -602,9 +805,22 @@ describe('a YOLO dataset', () => {
     }
     write(ds, { 'data.yaml': 'train: images/train\nval: images/train\nnames: [cat]\n' })
     const root = await open(dir)
+    // The label files open at once while their rows are read
+    const real = fsp.readFile
+    let reading = false, now = 0, most = 0
+    vi.spyOn(fsp, 'readFile').mockImplementation((async (...args: Parameters<typeof real>) => {
+      if (!reading || !String(args[0]).endsWith('.txt')) return real(...args)
+      most = Math.max(most, ++now)
+      try {
+        return await real(...args)
+      } finally {
+        now--
+      }
+    }) as typeof real)
     const started = Date.now()
-    const p = await read(root, { kind: 'yolo', path: ds })
+    const p = (await readImport(root, { kind: 'yolo', path: ds, prefer: 'labelme', labels: [] }, (at) => { reading = at.phase === 'Reading the label files' }))!
     expect(Date.now() - started).toBeLessThan(20000)
+    expect(most).toBe(16)
     expect([p.matched, p.fresh]).toEqual([1000, 1000])
     // Each file's repeated row is a note: 1000 of them, 20 sent, the rest a page at a time
     const repeated = group(p, 'yolo-repeated')!

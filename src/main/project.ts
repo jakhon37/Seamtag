@@ -47,6 +47,8 @@ export function serial<T>(fn: () => Promise<T>) {
   writes = result.catch(() => {})
   return result
 }
+/** Runs fn at once: for work already in serial()'s turn, which would wait for itself there */
+export const inTurn = <T>(fn: () => Promise<T>) => fn()
 
 const posix = (p: string) => p.split(path.sep).join('/')
 export const meta = (root: string, ...p: string[]) => path.join(root, '.myseg', ...p)
@@ -455,14 +457,15 @@ const unreadable = (file: string, e: unknown, as = '') =>
 /**
  * Saves in the image's format. labelme's own is merged into what the file holds so unknown
  * keys survive; LabelImg's are written whole, as LabelImg writes them. A file that can't be
- * read in its format is never written over.
+ * read in its format is never written over. `queue` is inTurn for a caller that reads and
+ * writes an image's labels in one serial() turn of its own.
  */
-export async function saveLabels(dir: string, name: string, req: SaveRequest, fromImage: FromImage = {}): Promise<Saved> {
+export async function saveLabels(dir: string, name: string, req: SaveRequest, fromImage: FromImage = {}, queue: typeof serial = serial): Promise<Saved> {
   const r = getRoot(dir)
   const embedded = r.embedded.has(name)
   // An image kept inside its label file can only be saved there
   const format: LabelFormat = embedded ? 'labelme' : req.format ?? 'labelme'
-  return serial(async () => {
+  return queue(async () => {
     const file = req.target ? path.resolve(req.target) : labelPath(dir, name, format)
     const image = imagePath(dir, name)
     const verified = !!req.verified

@@ -81,9 +81,21 @@ function Labels({ rows }: { rows: { label: string; shapes: number; listed: boole
   )
 }
 
-// How many images a choice writes, of those the preview found
-const writes = (p: ImportPreview, policy: ImportPolicy) =>
-  p.fresh + (policy === 'skip' ? 0 : policy === 'add' ? p.labelled - p.emptyAdd : p.labelled)
+// How many images a choice writes, of those the preview found: labelled ones the dataset gives no shapes keep theirs
+const writes = (p: ImportPreview, policy: ImportPolicy) => p.fresh + (policy === 'skip' ? 0 : p.labelled - p.empty)
+
+// What a choice does to the images that have labels
+function labelledText(p: ImportPreview, policy: ImportPolicy) {
+  const one = p.labelled === 1
+  const have = `${some(p.labelled, 'image has', 'images have')} labels already`
+  const left = (n: number) => `${n === 1 ? "it's" : "they're"} left as ${n === 1 ? 'it is' : 'they are'}`
+  if (policy === 'skip') return `${have}: ${left(p.labelled)}.`
+  if (p.empty === p.labelled) return `${have} and ${one ? 'gets' : 'get'} no shapes from it, so ${left(p.labelled)}.`
+  const what = policy === 'add'
+    ? `the imported shapes go after ${one ? 'its' : 'theirs'}, and shapes ${one ? 'it has' : 'they have'} already aren't added twice`
+    : `${one ? 'its label file goes' : 'their label files go'} to the trash, and the imported shapes take ${one ? 'its' : 'their'} place`
+  return `${have}: ${what}.${p.empty ? ` ${some(p.empty, 'of them gets', 'of them get')} no shapes from it, so ${left(p.empty)}.` : ''}`
+}
 
 export default function ImportDialog({ root, format, labels, onClose, onImported }: Props) {
   const [stage, setStage] = useState<'start' | 'busy' | 'preview' | 'report'>('start')
@@ -242,6 +254,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
               )}
               {p.blocked > 0 && <p className="muted">{some(p.blocked, "image can't", "images can't")} take its labels, as listed below.</p>}
               {p.nothing > 0 && <p className="muted">{some(p.nothing, 'image gets', 'images get')} nothing from it, so {p.nothing === 1 ? "it's" : "they're"} left as {p.nothing === 1 ? 'it is' : 'they are'}.</p>}
+              {p.blank > 0 && <p className="muted">{some(p.blank, 'image without labels has an empty label file', 'images without labels have empty label files')} in the dataset, so {p.blank === 1 ? 'it gets' : 'they get'} an empty one here and {p.blank === 1 ? 'counts' : 'count'} as labelled.</p>}
             </section>
             {(p.labelled > 0 || p.unreadable > 0) && (
               <section className="import-section">
@@ -253,11 +266,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
                         <button key={o.policy} role="radio" aria-checked={policy === o.policy} className={policy === o.policy ? 'on' : ''} onClick={() => setPolicy(o.policy)}>{o.label}</button>
                       ))}
                     </div>
-                    <p>
-                      {policy === 'skip' ? `${some(p.labelled, 'image has', 'images have')} labels already: ${p.labelled === 1 ? "it's" : "they're"} left as ${p.labelled === 1 ? 'it is' : 'they are'}.`
-                        : policy === 'add' ? `${some(p.labelled, 'image has', 'images have')} labels already: the imported shapes go after ${p.labelled === 1 ? 'its' : 'theirs'}, and shapes ${p.labelled === 1 ? 'it has' : 'they have'} already aren't added twice.${p.emptyAdd ? ` ${some(p.emptyAdd, 'gets', 'get')} no shapes, so ${p.emptyAdd === 1 ? "it's" : "they're"} left as ${p.emptyAdd === 1 ? 'it is' : 'they are'}.` : ''}`
-                          : `${some(p.labelled, 'image has', 'images have')} labels already: ${p.labelled === 1 ? 'its label file goes' : 'their label files go'} to the trash, and the imported shapes take ${p.labelled === 1 ? 'its' : 'their'} place.`}
-                    </p>
+                    <p>{labelledText(p, policy)}</p>
                     {policy !== 'skip' && p.labelImg > 0 && (
                       <p className="muted">{some(p.labelImg, 'of them has', 'of them have')} Pascal VOC, YOLO or CreateML labels: {p.labelImg === 1 ? 'it gets' : 'they get'} LabelMe JSON, which holds every shape type, with {p.labelImg === 1 ? 'its' : 'their'} boxes{policy === 'replace' ? ' replaced' : ' kept'}, and the old {p.labelImg === 1 ? 'file goes' : 'files go'} to the trash.</p>
                     )}

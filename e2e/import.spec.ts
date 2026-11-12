@@ -62,7 +62,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   // d has LabelImg's Pascal VOC labels
   writeFileSync(path.join(dir, 'd.xml'), '<annotation><folder>import</folder><filename>d.png</filename><size><width>400</width><height>300</height><depth>3</depth></size>' +
     '<object><name>cat</name><difficult>0</difficult><bndbox><xmin>10</xmin><ymin>10</ymin><xmax>60</xmax><ymax>50</ymax></bndbox></object></annotation>')
-  // A COCO file outside the folder: e is turned the other way, other/g.png could be either g.png, z.png isn't here
+  // A COCO file outside the folder: e is turned the other way, f has no annotations, other/g.png could be either g.png, z.png isn't here
   const src = path.join(BASE, 'import-src')
   rmSync(src, { recursive: true, force: true })
   mkdirSync(src, { recursive: true })
@@ -72,7 +72,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   const counts = [3020, ...Array(9).fill([10, 290]).flat(), 10, 114270]
   const coco = path.join(src, 'instances.json')
   writeFileSync(coco, JSON.stringify({
-    images: [image(1, 'a.png'), image(2, 'b.png'), image(3, 'c.png'), image(4, 'd.png'), image(5, 'e.png', H, W), image(6, 'other/g.png'), image(7, 'z.png')],
+    images: [image(1, 'a.png'), image(2, 'b.png'), image(3, 'c.png'), image(4, 'd.png'), image(5, 'e.png', H, W), image(6, 'other/g.png'), image(7, 'z.png'), image(8, 'f.png')],
     categories: [{ id: 1, name: 'cat', supercategory: '' }, { id: 2, name: 'dog', supercategory: '' }],
     annotations: [
       polygon(1, 1, 2, [[50, 50], [150, 60], [120, 150]]), { ...polygon(2, 1, 9, [[1, 1], [9, 1], [5, 9]]) },
@@ -96,13 +96,14 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await expect(dialog).toContainText('Nothing is written until you choose Import')
   await dialog.getByRole('button', { name: 'COCO file…' }).click()
   await expect(dialog.locator('.import-source')).toContainText('instances.json')
-  await expect(dialog).toContainText('5 of its 7 images are in this folder: 5 by their path.')
+  await expect(dialog).toContainText('6 of its 8 images are in this folder: 6 by their path.')
   await expect(dialog).toContainText("1 isn't here, and 1 has a name that matches more than one image: nothing is imported for them, as listed below.")
   await expect(dialog).toContainText("1 image can't take its labels, as listed below.")
+  await expect(dialog).toContainText("1 image gets nothing from it, so it's left as it is.")
   await expect(dialog).toContainText("2 images have labels already: they're left as they are.")
   await expect(dialog.locator('.import-labels tr', { hasText: 'dog' })).toContainText('2')
   await expect(dialog.locator('.import-labels tr', { hasText: 'dog' }).locator('.tag.new')).toBeVisible()
-  for (const [code, n] of [['import-size', '1'], ['coco-image-missing', '1'], ['coco-image-ambiguous', '1'], ['coco-unknown-category', '1'], ['coco-box-only', '1']]) {
+  for (const [code, n] of [['import-size', '1'], ['coco-image-missing', '1'], ['coco-image-ambiguous', '1'], ['coco-unknown-category', '1'], ['coco-box-only', '1'], ['import-no-annotations', '1']]) {
     await expect(dialog.locator(`.import-group[data-code="${code}"] .count`)).toHaveText(n)
   }
   await dialog.locator('.import-group[data-code="import-size"] > button').click()
@@ -134,7 +135,8 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   expect([mask.info.width, mask.info.height, mask.data.every((v) => v > 0)]).toEqual([10, 10, true])
   expect([read(dir, 'a').imageWidth, read(dir, 'a').imageHeight, read(dir, 'a').imagePath]).toEqual([W, H, 'a.png'])
   expect(shapesIn(dir, 'c')).toHaveLength(1)
-  expect([existsSync(path.join(dir, 'd.xml')), existsSync(path.join(dir, 'd.json')), existsSync(path.join(dir, 'e.json'))]).toEqual([true, false, false])
+  // f is listed without annotations: it isn't given an empty label file
+  expect(['d.xml', 'd.json', 'e.json', 'f.json'].map((f) => existsSync(path.join(dir, f)))).toEqual([true, false, false, false])
   await dialog.getByRole('button', { name: 'Close' }).click()
   await expect(dialog).toHaveCount(0)
   await expect(filter('Done')).toContainText('4')
@@ -162,7 +164,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await expect(page.locator('.shape')).toHaveCount(2)
   await expect(page.locator('.shape', { hasText: 'dog' })).toBeVisible()
 
-  // A YOLO dataset of rotated boxes: the rows fit two tasks, so the window asks
+  // A YOLO dataset of rotated boxes: the rows fit two tasks, so the window asks. b's label file is empty
   const yolo = path.join(BASE, 'import-yolo')
   rmSync(yolo, { recursive: true, force: true })
   const turned = (cx: number, cy: number, hw: number, hh: number) => {
@@ -170,7 +172,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
     return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) => [cx + x * Math.cos(t) - y * Math.sin(t), cy + x * Math.sin(t) + y * Math.cos(t)])
   }
   const row = (cls: number, corners: number[][]) => `${cls} ${corners.map(([x, y]) => `${(x / W).toFixed(6)} ${(y / H).toFixed(6)}`).join(' ')}\n`
-  for (const [name, text] of [['a', row(0, turned(100, 100, 40, 20))], ['c', row(1, turned(250, 150, 60, 30))]]) {
+  for (const [name, text] of [['a', row(0, turned(100, 100, 40, 20))], ['b', ''], ['c', row(1, turned(250, 150, 60, 30))]]) {
     await png(path.join(yolo, 'images', 'train', `${name}.png`))
     mkdirSync(path.join(yolo, 'labels', 'train'), { recursive: true })
     writeFileSync(path.join(yolo, 'labels', 'train', `${name}.txt`), text)
@@ -182,7 +184,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await menu(page, 'File', 'Import dataset…')
   await dialog.getByRole('button', { name: 'YOLO dataset folder…' }).click()
   await expect(dialog.locator('.import-source')).toContainText('import-yolo')
-  await expect(dialog).toContainText('Both its images are in this folder: 2 by file name alone.')
+  await expect(dialog).toContainText('All 3 of its images are in this folder: 3 by file name alone.')
   await expect(dialog).toContainText('These rows fit more than one task: click the one they were made for.')
   await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'true')
   // Both have labels now, which Skip leaves alone; and the task comes first
@@ -195,10 +197,12 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await size(app, page, 1500, 940)
   await dialog.getByRole('radio', { name: 'OBB (guess)' }).click()
   await dialog.getByRole('radio', { name: 'Replace' }).click()
-  await expect(dialog).toContainText('2 images have labels already: their label files go to the trash, and the imported shapes take their place.')
+  // b gets no shapes from its empty label file, so Replace leaves it as it is
+  await expect(dialog).toContainText("3 images have labels already: their label files go to the trash, and the imported shapes take their place. 1 of them gets no shapes from it, so it's left as it is.")
   await dialog.getByRole('button', { name: 'Import 2 images' }).click()
   await expect(dialog.locator('.import-result')).toHaveText('Wrote 2 label files with 2 shapes.')
   await expect(dialog).toContainText('2 old label files went to the trash.')
+  await expect(dialog.locator('.import-group[data-code="no-shapes"] .count')).toHaveText('1')
   await page.screenshot({ path: `${SHOTS}/import-report-light-1500.png` })
   await size(app, page, 1000, 640)
   await page.screenshot({ path: `${SHOTS}/import-report-light-1000.png` })
@@ -210,6 +214,7 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
     expect(Math.abs(x - ex) + Math.abs(y - ey)).toBeLessThan(0.01)
   })
   expect(shapesIn(dir, 'a').map((s: any) => s.shape_type)).toEqual(['oriented_rectangle'])
+  expect(shapesIn(dir, 'b').map((s: any) => [s.label, s.shape_type])).toEqual([['cat', 'rectangle'], ['dog', 'mask']])
   expect(await trashed()).toEqual(['d.xml', 'a.json', 'c.json'].map((f) => path.join(dir, f)))
   // The old c.json went to the trash whole: its cat and dog
   expect(JSON.parse(readFileSync(path.join(BASE, 'import-trash', '2-c.json'), 'utf8')).shapes).toHaveLength(2)

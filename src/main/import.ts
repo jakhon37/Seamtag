@@ -2,9 +2,10 @@
 // File > Import dataset: a COCO file or an Ultralytics YOLO dataset written into the open folder's
 // label files. Reading writes nothing: it matches the dataset's images to the folder's, measures
 // them, looks at the labels they have and counts what each would get. Writing goes through
-// saveLabels an image at a time, as LabelMe JSON, which holds every shape type. COCO and YOLO are
-// converted in, never edited in place: each image's own label file stays the working copy.
-import { promises as fs } from 'fs'
+// saveLabels an image at a time, as LabelMe JSON, which holds every shape type, each image in one
+// turn of the label files' queue. COCO and YOLO are converted in, never edited in place: each
+// image's own label file stays the working copy.
+import { existsSync, promises as fs } from 'fs'
 import path from 'path'
 import type { Worker } from 'worker_threads'
 import type { Issue, MaskBits, Severity } from '../shared/dataset'
@@ -15,7 +16,9 @@ import { countRows, labelText, newRowStats, readRows, YOLO_TASKS, type YoloTask 
 import { imageSize } from './images'
 import { type CocoAnswer, type CocoAsk, type CocoFound, type CocoProgress, CocoSession, type CocoShapes, tooBig } from './importWorker'
 import { encodeMask } from './masks'
-import { findLabels, folderOf, readLabels, saveLabels, sendToTrash, summarizeAll } from './project'
+import {
+  type Found, findLabels, folderOf, inTurn, labelPath, readLabels, type Saved, saveLabels, type SaveRequest, sendToTrash, serial, summarizeAll
+} from './project'
 import { readYoloDataset, type YoloDataset } from './ultralytics'
 
 /** What to import: a COCO file, or a YOLO dataset's data.yaml or folder */
@@ -58,17 +61,19 @@ export type ImportPreview = {
   base: string | null
   missing: number
   ambiguous: number
-  /** Matched images by what they have: no label file (every choice writes them), labels, labels in LabelImg's formats */
+  /** Matched images by what they have: no label file (every choice writes them), labels, labels in LabelImg's formats that Add and Replace convert */
   fresh: number
   labelled: number
   labelImg: number
-  /** Labelled images the dataset gives no shapes, which Add leaves alone */
-  emptyAdd: number
+  /** Images without labels that get an empty label file, their YOLO label file being empty */
+  blank: number
+  /** Labelled images the dataset gives no shapes (an empty YOLO label file): every choice leaves them alone */
+  empty: number
   /** Label files that can't be read: never touched */
   unreadable: number
   /** Images that can't take labels from it: sizes differ, label file shared, image unreadable */
   blocked: number
-  /** Images it has nothing for: no label file in a YOLO dataset, or nothing that could be read */
+  /** Images it has nothing for: no label file in a YOLO dataset, no annotations in a COCO file, or nothing that could be read */
   nothing: number
   labels: LabelCount[]
   groups: IssueGroup[]
@@ -93,7 +98,7 @@ export type ImportReport = {
   trashed: number
   /** Images left as they were, by why */
   skipped: IssueGroup[]
-  /** The images written, for the window to read again */
+  /** The images whose label files changed, for the window to read again: those written, and any whose old file went to the trash before writing failed */
   names: string[]
 }
 
@@ -217,17 +222,20 @@ const TITLES: Record<string, string> = {
   'import-label-unreadable': "Label files that can't be read",
   'import-nothing': 'Nothing that could be read',
   'import-no-label-file': 'Images without a label file',
+  'import-no-annotations': 'Images without annotations',
+  'import-two-files': 'Images with two label files',
   'import-keypoint-names': 'Keypoint names',
   'import-keypoint-file': 'Keypoint file',
   // Why an image was left as it was, after writing
   labelled: 'Images that have labels, left as they are',
   unchanged: 'Images that have every shape already',
+  'no-shapes': 'Images that have labels and get no shapes',
   failed: "Images that couldn't be written",
   kept: "Old label files that couldn't go to the trash"
 }
 const titleOf = (code: string) => TITLES[code] ?? code.replace(/^[a-z]+-/, '').replace(/-/g, ' ').replace(/^./, (c) => c.toUpperCase())
 const RANK: Record<Severity, number> = { error: 0, warning: 1, info: 2 }
-const SEVERE: Record<string, Severity> = { labelled: 'info', unchanged: 'info', failed: 'error', kept: 'warning' }
+const SEVERE: Record<string, Severity> = { labelled: 'info', unchanged: 'info', 'no-shapes': 'info', failed: 'error', kept: 'warning' }
 
 let session: Session | null = null
 let job: AbortController | null = null
@@ -271,6 +279,16 @@ async function pool<T>(items: T[], n: number, fn: (item: T) => Promise<void>, ti
       }
     }
   }))
+}
+
+// What work gives, or null as soon as the signal stops it: for work that can't be stopped itself, whose answer is then dropped
+function unlessStopped<T>(work: Promise<T>, signal: AbortSignal): Promise<T | null> {
+  if (signal.aborted) return Promise.resolve(null)
+  return new Promise<T | null>((resolve, reject) => {
+    const stop = () => resolve(null)
+    signal.addEventListener('abort', stop, { once: true })
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', stop))
+  })
 }
 
 function checkRequest(req: ImportRequest) {
@@ -471,7 +489,11 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
       e.shapes += m.shapes
       for (const [label, n] of Object.entries(m.labels)) e.labels[label] = (e.labels[label] ?? 0) + n
     }
-    if (!e.blocked && e.annotations && !e.shapes) s.issues.push(say('warning', 'import-nothing', e.name, `${e.name}: none of its ${plural(e.annotations, 'annotation')} could be read, so it's left as it is`))
+    if (e.blocked) continue
+    // A COCO file lists its images whatever they hold (a keypoints file lists those without people
+    // too), so an image without annotations is left as it is, never given an empty label file
+    if (!e.annotations) s.issues.push(say('info', 'import-no-annotations', e.name, `${e.name} has no annotations in ${path.basename(s.source)}, so it's left as it is`))
+    else if (!e.shapes) s.issues.push(say('warning', 'import-nothing', e.name, `${e.name}: none of its ${plural(e.annotations, 'annotation')} could be read, so it's left as it is`))
   }
 }
 
@@ -482,8 +504,9 @@ const entry = (name: string, label: string | null, byName: boolean): Entry =>
 
 async function readYoloSource(s: Session, folder: string[], progress: (p: ImportProgress) => void, signal: AbortSignal) {
   progress({ phase: `Reading ${path.basename(s.source)}`, done: 0, total: 0 })
-  const dataset = await readYoloDataset(s.source)
-  if (signal.aborted) return
+  // Finding the dataset's files can't be stopped, so Stop doesn't wait for it: what it finds is dropped
+  const dataset = await unlessStopped(readYoloDataset(s.source), signal)
+  if (!dataset) return
   s.issues = [...dataset.issues]
   // Each image once, however many splits list it
   const items = new Map<string, string | null>()
@@ -606,6 +629,15 @@ async function measure(s: Session, progress: (p: ImportProgress) => void, signal
   }, (done) => progress({ phase: 'Measuring the images', done, total }), signal)
 }
 
+// An image whose labels are read from its VOC or YOLO file, the window's save format, while it has
+// a LabelMe file too: writing the LabelMe file wouldn't change what the window shows, and saveLabels
+// won't turn the other into LabelMe JSON over it, so neither is done
+function twoFiles(root: string, name: string, found: Found): string | null {
+  const json = labelPath(root, name)
+  if (found.file === json || !existsSync(json)) return null
+  return `${name} has labels in ${path.basename(found.file)} and in ${path.basename(json)}, so nothing is imported into it: keep one of them first`
+}
+
 async function look(s: Session, entries: Entry[], progress: (p: ImportProgress) => void, signal: AbortSignal) {
   const total = entries.length
   progress({ phase: 'Looking at their label files', done: 0, total })
@@ -613,6 +645,11 @@ async function look(s: Session, entries: Entry[], progress: (p: ImportProgress) 
     const found = await findLabels(s.root, e.name, s.prefer).catch(() => null)
     if (!found) return
     e.has = { format: found.format, file: found.file }
+    const two = twoFiles(s.root, e.name, found)
+    if (two) {
+      e.blocked = say('warning', 'import-two-files', e.name, two)
+      return
+    }
     try {
       const read = await readLabels(s.root, e.name, found, async () => e.size ?? [1, 1])
       if (!read) e.blocked = say('error', 'import-other-images', e.name, `${e.name}'s label file, ${path.basename(found.file)}, is a CreateML list of other images, so nothing is imported into it`)
@@ -637,11 +674,13 @@ function groupsOf(issues: Issue[]): IssueGroup[] {
   return [...groups.values()].sort((a, b) => RANK[a.severity] - RANK[b.severity] || b.count - a.count)
 }
 
-// Whether the import writes an image, before choosing what happens to labelled ones
-const nothing = (s: Session, e: Entry) => (s.kind === 'yolo' && !e.label) || (e.annotations > 0 && e.shapes === 0)
+// Whether the import leaves an image alone whatever the choice: it gets no shapes. A YOLO label
+// file without rows is the exception, being how a YOLO dataset marks an image with no objects:
+// an image without labels gets an empty label file too.
+const nothing = (s: Session, e: Entry) => !e.shapes && !(s.kind === 'yolo' && e.label && !e.annotations)
 
 function preview(s: Session): ImportPreview {
-  let fresh = 0, labelled = 0, labelImg = 0, emptyAdd = 0, unreadable = 0, blocked = 0, none = 0, byName = 0
+  let fresh = 0, blank = 0, labelled = 0, labelImg = 0, empty = 0, unreadable = 0, blocked = 0, none = 0, byName = 0
   const counts = new Map<string, LabelCount>()
   for (const e of s.entries) {
     if (e.byName) byName++
@@ -650,9 +689,12 @@ function preview(s: Session): ImportPreview {
     if (e.broken) { unreadable++; continue }
     if (e.has) {
       labelled++
-      if (e.has.format !== 'labelme') labelImg++
-      if (!e.shapes) emptyAdd++
-    } else fresh++
+      if (!e.shapes) empty++
+      else if (e.has.format !== 'labelme') labelImg++
+    } else {
+      fresh++
+      if (!e.shapes) blank++
+    }
     for (const [label, n] of Object.entries(e.labels)) {
       let c = counts.get(label)
       if (!c) counts.set(label, (c = { label, fresh: 0, labelled: 0, listed: s.listed.has(label) }))
@@ -666,7 +708,7 @@ function preview(s: Session): ImportPreview {
     kind: s.kind, source: s.source, name: path.basename(s.source), images: s.images, matched: s.entries.length,
     byName,
     base: s.base, missing: s.missing, ambiguous: s.ambiguous,
-    fresh, labelled, labelImg, emptyAdd, unreadable, blocked, nothing: none,
+    fresh, labelled, labelImg, blank, empty, unreadable, blocked, nothing: none,
     labels: [...counts.values()].sort((a, b) => b.fresh + b.labelled - a.fresh - a.labelled || a.label.localeCompare(b.label)),
     groups: groupsOf([...s.issues, ...s.rows]),
     ...(y ? {
@@ -783,45 +825,88 @@ async function shapesFor(s: Session, batch: Entry[]): Promise<Map<string, Shape[
   return out
 }
 
-type Outcome = { written?: Shape[]; repeated?: number; trashed?: number; skip?: { why: string; message: string } }
+type Outcome = {
+  written?: Shape[]; repeated?: number; trashed?: number; skip?: { why: string; message: string }
+  /** Nothing was written, but its label file changed: the old one went to the trash before writing failed */
+  changed?: boolean
+}
 
-// One image: its labels looked at again, as they may have changed since reading, then written as the choice says
-async function writeOne(s: Session, e: Entry, shapes: Shape[], policy: ImportPolicy): Promise<Outcome> {
-  const size = e.size!
-  const found = await findLabels(s.root, e.name, s.prefer)
-  const saved = (o: Awaited<ReturnType<typeof saveLabels>>, written: Shape[], repeated = 0, trashed = 0): Outcome =>
-    ({ written, repeated, trashed: trashed + (o.replaced ? 1 : 0), ...(o.kept ? { skip: { why: 'kept', message: `${e.name}: ${o.kept}` } } : {}) })
-  if (!found) return saved(await saveLabels(s.root, e.name, { shapes, flags: {}, size, imageData: null, format: 'labelme' }), shapes)
-  if (policy === 'skip') return { skip: { why: 'labelled', message: `${e.name} has labels, so it's left as it is` } }
-  let read
-  try {
-    read = await readLabels(s.root, e.name, found, async () => size)
-  } catch (err) {
-    return { skip: { why: 'import-label-unreadable', message: `${path.basename(found.file)} can't be read, so it's never touched: ${message(err)}` } }
-  }
-  if (!read) return { skip: { why: 'import-other-images', message: `${e.name}'s label file, ${path.basename(found.file)}, is a CreateML list of other images, so it's left as it is` } }
-  if (policy === 'add') {
-    const { added, repeated } = addShapes(read.doc.shapes, shapes)
-    if (!added.length) return { repeated, skip: { why: 'unchanged', message: `${e.name} has ${shapes.length === 1 ? 'the imported shape' : `all ${shapes.length} imported shapes`} already, so it's left as it is` } }
-    const all = [...read.doc.shapes, ...added]
-    const o = found.format === 'labelme'
-      ? await saveLabels(s.root, e.name, { shapes: all, flags: read.doc.flags, size, imageData: read.doc.imageData, verified: read.verified, format: 'labelme' })
-      : await saveLabels(s.root, e.name, { shapes: all, flags: {}, size, imageData: null, verified: read.verified, format: 'labelme', from: found.format })
-    return saved(o, added, repeated)
-  }
-  if (found.format === 'labelme') {
-    // The old file goes to the trash first, where it can be restored from; the new one takes its place
-    await sendToTrash(found.file)
-    return saved(await saveLabels(s.root, e.name, { shapes, flags: {}, size, imageData: read.doc.imageData, format: 'labelme', target: found.file }), shapes, 0, 1)
-  }
-  return saved(await saveLabels(s.root, e.name, { shapes, flags: {}, size, imageData: null, format: 'labelme', from: found.format }), shapes)
+// One image, in one turn of the label files' queue, so no save or pre-labelling writes its labels
+// between looking at them and writing them: its labels looked at again, as they may have changed
+// since reading, then written as the choice says
+function writeOne(s: Session, e: Entry, shapes: Shape[], policy: ImportPolicy): Promise<Outcome> {
+  return serial(async () => {
+    const size = e.size!
+    const save = (req: SaveRequest) => saveLabels(s.root, e.name, req, {}, inTurn)
+    const saved = (o: Saved, written: Shape[], repeated = 0): Outcome =>
+      ({ written, repeated, trashed: o.replaced ? 1 : 0, ...(o.kept ? { skip: { why: 'kept', message: `${e.name}: ${o.kept}` } } : {}) })
+    const found = await findLabels(s.root, e.name, s.prefer)
+    if (!found) return saved(await save({ shapes, flags: {}, size, imageData: null, format: 'labelme' }), shapes)
+    const old = path.basename(found.file)
+    // saveLabels sends a CreateML file of this image alone to the trash before LabelMe's takes its name
+    const failed = (err: unknown): Outcome => existsSync(found.file)
+      ? { skip: { why: 'failed', message: `${e.name}: ${message(err)}` } }
+      : { trashed: 1, changed: true, skip: { why: 'failed', message: `${old} went to the trash, but ${e.name}'s new labels couldn't be written: ${message(err)}` } }
+    const two = twoFiles(s.root, e.name, found)
+    if (two) return { skip: { why: 'import-two-files', message: two } }
+    if (policy === 'skip') return { skip: { why: 'labelled', message: `${e.name} has labels, so it's left as it is` } }
+    if (!shapes.length) return { skip: { why: 'no-shapes', message: `${e.name} gets no shapes from the dataset, so it's left as it is` } }
+    let read
+    try {
+      read = await readLabels(s.root, e.name, found, async () => size)
+    } catch (err) {
+      return { skip: { why: 'import-label-unreadable', message: `${old} can't be read, so it's never touched: ${message(err)}` } }
+    }
+    if (!read) return { skip: { why: 'import-other-images', message: `${e.name}'s label file, ${old}, is a CreateML list of other images, so it's left as it is` } }
+    if (policy === 'add') {
+      const { added, repeated } = addShapes(read.doc.shapes, shapes)
+      if (!added.length) return { repeated, skip: { why: 'unchanged', message: `${e.name} has ${shapes.length === 1 ? 'the imported shape' : `all ${shapes.length} imported shapes`} already, so it's left as it is` } }
+      const all = [...read.doc.shapes, ...added]
+      try {
+        return saved(found.format === 'labelme'
+          ? await save({ shapes: all, flags: read.doc.flags, size, imageData: read.doc.imageData, verified: read.verified, format: 'labelme' })
+          : await save({ shapes: all, flags: {}, size, imageData: null, verified: read.verified, format: 'labelme', from: found.format }), added, repeated)
+      } catch (err) {
+        return failed(err)
+      }
+    }
+    if (found.format !== 'labelme') {
+      try {
+        return saved(await save({ shapes, flags: {}, size, imageData: null, format: 'labelme', from: found.format }), shapes)
+      } catch (err) {
+        return failed(err)
+      }
+    }
+    // The new file is written beside the old one, the old one goes to the trash, where it can be
+    // restored from, then the new one takes its name, as rewriteLabels does: if writing fails, the old one stays
+    const tmp = `${found.file}.${process.pid}.${Date.now()}.tmp`
+    try {
+      await save({ shapes, flags: {}, size, imageData: read.doc.imageData, format: 'labelme', target: tmp })
+    } catch (err) {
+      await fs.rm(tmp, { force: true })
+      return { skip: { why: 'failed', message: `${e.name}'s new labels couldn't be written, so ${old} is left unchanged: ${message(err)}` } }
+    }
+    try {
+      await sendToTrash(found.file)
+    } catch (err) {
+      await fs.rm(tmp, { force: true })
+      return { skip: { why: 'failed', message: `${old} couldn't go to the trash, so it's left unchanged: ${message(err)}` } }
+    }
+    try {
+      await fs.rename(tmp, found.file)
+    } catch (err) {
+      return { trashed: 1, changed: true, skip: { why: 'failed', message: `${old} went to the trash, but ${e.name}'s new labels couldn't take its name: they're in ${path.basename(tmp)} (${message(err)})` } }
+    }
+    return { written: shapes, trashed: 1 }
+  })
 }
 
 /**
  * Writes what was read into the folder's label files, as LabelMe JSON, an image at a time. Images
  * with labels are left alone (skip), get the imported shapes added (add), or have their label file
- * sent to the trash and the imported shapes take its place (replace). The written images are then
- * counted again for the image list. Stopping keeps what's written.
+ * sent to the trash and the imported shapes take its place (replace); whatever the choice, an image
+ * the dataset gives no shapes keeps what it has. The written images are then counted again for the
+ * image list. Stopping keeps what's written.
  */
 export async function writeImport(policy: ImportPolicy, progress: (p: ImportProgress) => void, summaries: Summaries): Promise<ImportReport> {
   if (!['skip', 'add', 'replace'].includes(policy)) throw new Error(`${policy} isn't a choice`)
@@ -840,15 +925,16 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
   for (const e of s.entries) {
     if (e.blocked) skip(e.blocked.code, e.blocked.message, e.blocked.severity)
     else if (s.kind === 'yolo' && !e.label) skip('import-no-label-file', `${e.name} has no label file in the dataset, so it's left as it is`, 'info')
+    else if (s.kind === 'coco' && !e.annotations) skip('import-no-annotations', `${e.name} has no annotations in ${path.basename(s.source)}, so it's left as it is`, 'info')
     else if (nothing(s, e)) skip('import-nothing', `${e.name}: none of what the dataset has for it could be read, so it's left as it is`)
     else if (e.broken) skip('import-label-unreadable', `${e.has ? path.basename(e.has.file) : e.name} can't be read, so it's never touched: ${e.broken}`)
     else if (e.has && policy === 'skip') skip('labelled', `${e.name} has labels, so it's left as it is`)
-    else if (e.has && policy === 'add' && !e.shapes) skip('unchanged', `${e.name} gets no shapes from the dataset, so it's left as it is`)
+    else if (e.has && !e.shapes) skip('no-shapes', `${e.name} gets no shapes from the dataset, so it's left as it is`)
     else todo.push(e)
   }
   const names: string[] = []
   const labels = new Map<string, number>()
-  let shapes = 0, repeated = 0, trashed = 0, done = 0, told = 0
+  let written = 0, shapes = 0, repeated = 0, trashed = 0, done = 0, told = 0
   const total = todo.length
   progress({ phase: 'Writing label files', done: 0, total })
   for (let i = 0; i < todo.length && !signal.aborted; i += BATCH) {
@@ -868,8 +954,9 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
         repeated += o.repeated ?? 0
         trashed += o.trashed ?? 0
         if (o.skip) skip(o.skip.why, o.skip.message)
+        if (o.written || o.changed) names.push(e.name)
         if (o.written) {
-          names.push(e.name)
+          written++
           shapes += o.written.length
           for (const sh of o.written) labels.set(sh.label, (labels.get(sh.label) ?? 0) + 1)
         }
@@ -883,10 +970,10 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
       }
     }
   }
-  // The image list and the label list count the written images again
+  // The image list and the label list count the images whose label files changed again
   if (names.length) await summarizeAll(s.root, summaries, s.prefer, names).catch(() => {})
   return {
-    stopped: signal.aborted, total, done, written: names.length, shapes, repeated, trashed,
+    stopped: signal.aborted, total, done, written, shapes, repeated, trashed,
     labels: [...labels].map(([label, n]) => ({ label, shapes: n, listed: s.listed.has(label) })).sort((a, b) => b.shapes - a.shapes || a.label.localeCompare(b.label)),
     skipped: [...skipped].map(([code, g]) => ({ code, severity: g.severity, title: g.title, count: g.rows.length, rows: g.rows.slice(0, SHOWN) }))
       .sort((a, b) => RANK[a.severity] - RANK[b.severity] || b.count - a.count),
