@@ -135,7 +135,21 @@ describe('YOLO from other tools', () => {
     expect(readYolo('\n0 0.5 0.5 0.5 0.5\n\n', ['a'], 100, 100).map((s) => s.points)).toEqual([[[25, 25], [75, 75]]])
     expect(() => readYolo('3 0.5 0.5 0.1 0.1', ['a'], 10, 10)).toThrow(/class 3 isn't in classes.txt/)
     expect(() => readYolo('0 0.5 0.5 0.1', ['a'], 10, 10)).toThrow(/four numbers/)
-    expect(() => readYolo('0 0.5 0.5 0.1 0.1 0.2 0.3', ['a'], 10, 10)).toThrow(/four numbers/)
+    expect(() => readYolo('0 0.5 0.5 0.1 0.1 0.2', ['a'], 10, 10)).toThrow(/four numbers/)
+    expect(() => readYolo('a photo of a dog on grass', ['a'], 10, 10)).toThrow(/four numbers/)
+  })
+  test("Ultralytics' outline, rotated box and keypoints rows are refused with a pointer to Import dataset, so the file stays as it is", () => {
+    const rows = {
+      outline: '0 0.1 0.1 0.4 0.1 0.3 0.5',
+      'rotated box': '0 0.1 0.1 0.4 0.1 0.4 0.3 0.1 0.3',
+      keypoints: '0 0.5 0.5 0.2 0.2 0.45 0.45 2 0 0 0'
+    }
+    for (const [kind, row] of Object.entries(rows)) {
+      for (const text of [row, `0 0.5 0.5 0.1 0.1\n${row}\n`]) {
+        expect(() => readYolo(text, ['a'], 10, 10), kind).toThrow(LabelFileError)
+        expect(() => readYolo(text, ['a'], 10, 10), kind).toThrow(/Ultralytics outline, rotated box or keypoints row.*File > Import dataset/)
+      }
+    }
   })
   test('classes.txt keeps blank lines inside it, so the numbers after them stay; Windows line ends read too', () => {
     expect(readClasses('a\n\nc\n')).toEqual(['a', '', 'c'])

@@ -1,0 +1,14 @@
+train: images/train
+val: images/val
+
+kpt_shape: [3, 3]
+flip_idx: [0, 2, 1]
+
+names:
+  0: person
+
+kpt_names:
+  0:
+    - nose
+    - left_eye
+    - right_eye

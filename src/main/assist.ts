@@ -2,10 +2,10 @@
 // results become shapes of the kind asked for, without repeats, without objects already drawn
 // when that's asked for, and with new group IDs after the image's own.
 import type { AiOutput } from '../shared/config'
+import type { Grid } from '../shared/polygonize'
 import { type Annotation, generateFromPrompt, generateFromTexts, modelDef } from './ai'
 import { assignGroupIds, type BuiltShape, type Detection, type ExistingShape, matchExisting, NEEDS_MASK, nms, roundHalfEven, shapesFromDetections, suppressGreedy } from './detections'
 import { decodeMask, encodeMask } from './masks'
-import type { Grid } from './polygonize'
 
 /** A shape on its way to the window: a mask shape's pixels as labelme's base64 PNG */
 export type ProposedShape = { label?: string; shape_type: AiOutput; points: number[][]; mask?: string; description?: string; group_id?: number | null }

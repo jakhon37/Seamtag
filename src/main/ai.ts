@@ -5,10 +5,10 @@ import path from 'path'
 import { gunzipSync } from 'zlib'
 import { app, net } from 'electron'
 import { InferenceSession, Tensor } from 'onnxruntime-node'
+import type { Grid } from '../shared/polygonize'
 import { Tokenizer } from './clip'
 import { nms, roundHalfEven } from './detections'
 import { rgbPixels } from './images'
-import type { Grid } from './polygonize'
 import { pilResize } from './resize'
 
 // labelme 7's AI models, run as osam runs them: the same files from the same addresses, kept

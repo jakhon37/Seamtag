@@ -4,7 +4,7 @@ import { gunzipSync } from 'zlib'
 import { describe, expect, test } from 'vitest'
 import { Tokenizer } from '../../src/main/clip'
 import { type Detection, type ExistingShape, matchExisting, nms, shapesFromDetections, suppressGreedy } from '../../src/main/detections'
-import { circleFromMask, type Grid, orientedRectFromMask, polygonsFromMask } from '../../src/main/polygonize'
+import { circleFromMask, type Grid, orientedRectFromMask, polygonsFromMask } from '../../src/shared/polygonize'
 
 // What labelme 7.9.1 and osam 0.10.2 make of the same inputs: tests/fixtures/labelme7/make_ai_shapes.py
 const ref = JSON.parse(readFileSync(path.join(__dirname, '../fixtures/labelme7/ai_shapes.json'), 'utf8'))
