@@ -312,3 +312,66 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .stats-image-sizes { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; font-variant-numeric: tabular-nums; }
 .dialog.stats .actions { align-items: center; position: sticky; bottom: -12px; background: var(--panel); padding: 10px 0 0; margin-top: 0; border-top: 1px solid var(--line); }
 .stats-saved { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+
+/* File > Export dataset…: options on the left, what the export holds on the right */
+.dialog.export-dialog { width: 1000px; height: min(860px, calc(100vh - 32px)); top: 50%; transform: translate(-50%, -50%); padding: 14px 16px; gap: 10px; outline: none; }
+.dialog.export-dialog.done { width: 760px; height: auto; max-height: calc(100vh - 32px); }
+.export-dialog h3 { margin: 0; }
+.export-dialog h4 { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 10px 0 0; }
+.export-dialog h4:first-child { margin-top: 0; }
+.export-dialog .seg.small button { flex: auto; text-transform: none; white-space: nowrap; padding: 4px 8px; }
+.export-dialog .seg.small button.on { background: var(--selected); font-weight: 600; }
+.export-dialog .check { margin: 1px 0; }
+.export-dialog .link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.export-dialog .actions { align-items: center; }
+.export-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; }
+.export-options { border: 0; margin: 0; padding: 0 8px 4px 0; min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.export-check { min-width: 0; min-height: 0; overflow-y: auto; padding: 0 4px 4px 16px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.export-check > div { display: flex; flex-direction: column; gap: 6px; }
+.export-formats { display: flex; flex-direction: column; gap: 1px; }
+.dialog label.export-format { flex-direction: row; align-items: flex-start; gap: 8px; padding: 3px 8px; border-radius: 6px; color: var(--text); cursor: pointer; }
+.export-format:hover { background: var(--raised); }
+.export-format.on { background: var(--selected); }
+.export-format input { width: auto; margin: 3px 0 0; accent-color: var(--accent); }
+.export-format > span { display: flex; flex-direction: column; min-width: 0; }
+.export-format b { font-weight: 600; }
+.export-format small { color: var(--muted); font-size: 12px; }
+.export-file { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.export-file > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-file .ghost { flex: none; padding: 4px 9px; }
+.export-shares { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.dialog .export-shares label { gap: 2px; font-size: 12px; }
+.export-shares input { padding: 4px 6px; }
+.export-hint, .export-note { margin: 0; color: var(--muted); font-size: 12px; }
+.export-make { align-self: flex-start; padding: 4px 9px; }
+.export-lead { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.export-busy { display: flex; flex-direction: column; gap: 6px; color: var(--muted); }
+.export-busy.inline { flex-direction: row; }
+.export-stale { opacity: .45; pointer-events: none; }
+.export-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }
+.export-table th, .export-table td { padding: 3px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.export-table th:first-child, .export-table td:first-child { text-align: left; width: 38%; padding-left: 0; }
+.export-table th { color: var(--muted); font-weight: 500; }
+.export-table tr.total td { font-weight: 600; }
+.export-table tr.none td { color: var(--muted); }
+.export-table .name { display: block; overflow: hidden; text-overflow: ellipsis; }
+.export-more { align-self: flex-start; margin-top: 4px; }
+.export-issues-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.export-issues-title span { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; }
+.export-group-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px; border-radius: 6px; text-align: left; }
+.export-group-head:hover { background: var(--raised); }
+.export-group-head b, .export-accepted b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.export-sev { flex: none; }
+.export-sev.is-error { color: var(--danger); }
+.export-sev.is-warning { color: var(--warn); }
+.export-sev.is-info { color: var(--muted); }
+.export-sev.is-ok { color: var(--ok); }
+.export-rows { list-style: none; margin: 0 0 6px; padding: 2px 6px 2px 47px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); max-height: 240px; overflow-y: auto; }
+.export-rows li { overflow-wrap: anywhere; }
+.export-status { flex: 1; min-width: 0; font-size: 12px; }
+.export-done { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
+.export-done > * { max-width: 680px; }
+.export-path { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.export-done .kv b { overflow-wrap: anywhere; }
+.export-accepted { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.export-accepted li { display: flex; align-items: center; gap: 8px; }
