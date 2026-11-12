@@ -123,13 +123,14 @@ declare global {
       statsStop(root: string): Promise<void>
       statsSave(root: string): Promise<string | null>
       onStats(fn: (p: Progress & { root: string }) => void): () => void
-      exportCheck(root: string, options: ExportOptions): Promise<Preflight>
+      exportCheck(root: string, options: ExportOptions, read: string): Promise<Preflight>
       exportIssues(id: number, key: string, from: number): Promise<Issue[]>
       exportFolder(root: string): Promise<{ path: string; problem: string | null } | null>
       exportKeypoints(): Promise<KeypointsSummary | null>
       exportMakeKeypoints(root: string, prefer: LabelFormat): Promise<KeypointsSummary | null>
       exportRun(root: string, options: ExportOptions, out: string): Promise<ExportResult>
       exportStop(): Promise<void>
+      exportClose(): Promise<void>
       exportReveal(out: string): Promise<void>
       onExportProgress(fn: (p: ExportProgress) => void): () => void
     }

@@ -272,6 +272,43 @@ test('export every format through the window, with a check of what goes in befor
   expect(readFileSync(path.join(pose, 'data.yaml'), 'utf8')).toContain('kpt_shape: [3, 3]\nflip_idx: [0, 2, 1]\n')
   expectYolo(pose, 'pose', ['person'], { kpt_shape: [3, 3], flip_idx: [0, 2, 1] })
 
+  // An export that fails says why, and still does once the window has read the folder and checked it again
+  dialog = await openExport(page)
+  await choose(dialog, 'YOLO detect')
+  const taken = path.join(OUT, 'taken')
+  await answer(app, 'opens', taken)
+  await dialog.getByRole('button', { name: 'Choose…' }).first().click()
+  await expect(dialog.locator('.export-file').first()).toContainText('taken')
+  // Something else saves a file there meanwhile
+  mkdirSync(taken)
+  writeFileSync(path.join(taken, 'notes.txt'), 'mine')
+  await change(dialog, () => dialog.getByRole('button', { name: /^Export \d/ }).click())
+  await expect(dialog.getByRole('alert')).toHaveText("That folder isn't empty: choose a new or empty folder, so nothing in it is written over")
+  await expect(dialog.locator('.export-file').first()).toContainText('A new or empty folder')
+  expect(readdirSync(taken)).toEqual(['notes.txt'])
+
+  // A check that fails leaves nothing to export from: the last check's counts go, and Export waits for one that works
+  await answer(app, 'opens', path.join(OUT, 'unused'))
+  await dialog.getByRole('button', { name: 'Choose…' }).first().click()
+  await expect(dialog.getByRole('alert')).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: /^Export \d/ })).toBeEnabled()
+  await app.evaluate(({ ipcMain }) => {
+    ipcMain.removeHandler('export:check')
+    ipcMain.handle('export:check', () => {
+      throw new Error('The folder went away')
+    })
+  })
+  await change(dialog, () => dialog.getByLabel('Include never-labelled images as backgrounds').click())
+  await expect(dialog.getByRole('alert')).toHaveText('The folder went away')
+  await expect(dialog.locator('.export-lead')).toHaveText('Not checked')
+  await expect(dialog.locator('.export-table')).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: 'Export', exact: true })).toBeDisabled()
+  await page.screenshot({ path: `${SHOTS}/export-failed-dark-960.png` })
+  await fits(page)
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toHaveCount(0)
+  expect(existsSync(path.join(OUT, 'unused'))).toBe(false)
+
   // Nothing was written in the image folder
   expect(files(DIR).filter((f) => !/\.(png|json)$/.test(f))).toEqual([])
   await finish(app, errors)

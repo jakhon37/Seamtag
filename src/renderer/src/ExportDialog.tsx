@@ -63,13 +63,19 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const [keypoints, setKeypoints] = useState<KeypointsSummary | null>(null)
   const [check, setCheck] = useState<Preflight | null>(null)
   const [checking, setChecking] = useState(false)
+  // Checks again with the same read of the folder (a keypoints file chosen again), or with a new one (after an export fails)
   const [again, setAgain] = useState(0)
+  const [reread, setReread] = useState(0)
   const [progress, setProgress] = useState<ExportProgress | null>(null)
   const [running, setRunning] = useState(false)
   const [done, setDone] = useState<ExportResult | null>(null)
+  // What went wrong with something the user did, kept until they do something else; and with the last check
   const [error, setError] = useState('')
+  const [checkError, setCheckError] = useState('')
   const [note, setNote] = useState('')
   const seq = useRef(0)
+  // The window's own id for the folder's read: main reads it once, and again only under a new one
+  const session = useRef(`${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`)
   const box = useRef<HTMLDivElement>(null)
   const set = (change: Partial<Kept>) => setKept((k) => ({ ...k, ...change }))
 
@@ -86,7 +92,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
     images, backgrounds: kept.backgrounds, leaveAi: kept.leaveAi, keypoints: posed ? keypoints?.file ?? null : null, prefer, labels: labels ?? []
   }
   // Copying or linking reads the same: only leaving images in place changes what the check finds
-  const checkKey = sharesBad ? '' : JSON.stringify({ ...options, images: images === 'leave' ? 'leave' : 'copy', again })
+  const checkKey = sharesBad ? '' : JSON.stringify({ ...options, images: images === 'leave' ? 'leave' : 'copy', again, reread })
 
   useEffect(() => {
     try {
@@ -98,8 +104,8 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   useEffect(() => window.api.onExportProgress(setProgress), [])
   useEffect(() => {
     box.current?.focus()
-    // A check still running when the window closes is stopped
-    return () => void window.api.exportStop()
+    // A check still running when the window closes is stopped, and what the checks kept is let go
+    return () => void window.api.exportClose()
   }, [])
   useEffect(() => {
     if (!checkKey || running || done) return
@@ -108,12 +114,15 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
     setProgress(null)
     // Typing a share or a seed checks once, when it settles
     const timer = setTimeout(() => {
-      window.api.exportCheck(root, options).then((p) => {
+      window.api.exportCheck(root, options, `${session.current}:${reread}`).then((p) => {
         if (at !== seq.current) return
         setCheck(p)
-        setError('')
+        setCheckError('')
       }).catch((e) => {
-        if (at === seq.current) setError(plainError(e))
+        if (at !== seq.current) return
+        // What an earlier check found isn't what these options would export
+        setCheck(null)
+        setCheckError(plainError(e))
       }).finally(() => {
         if (at === seq.current) setChecking(false)
       })
@@ -125,7 +134,9 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const chooseFolder = async () => {
     try {
       const picked = await window.api.exportFolder(root)
-      if (picked) setOut(picked)
+      if (!picked) return
+      setOut(picked)
+      setError('')
     } catch (e) {
       setError(plainError(e))
     }
@@ -154,9 +165,9 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
       else setDone(result)
     } catch (e) {
       setError(plainError(e))
-      // The folder may have taken files meanwhile, or the labels changed: the window checks again
+      // The folder may have taken files meanwhile, or the labels changed: the window reads them and checks again
       setOut(null)
-      setAgain((a) => a + 1)
+      setReread((r) => r + 1)
     } finally {
       setRunning(false)
     }
@@ -248,10 +259,12 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
             </fieldset>
 
             <section className="export-check" aria-label="What the export holds" aria-busy={checking}>
-              {checking || !check ? (
-                <Busy progress={checking ? progress : null} />
-              ) : (
+              {checking ? (
+                <Busy progress={progress} />
+              ) : check ? (
                 <p className="export-lead">{count(total, 'image')} and {count(check.splits.reduce((a, s) => a + s.objects, 0), 'object')}{check.splits.some((s) => s.posed) ? `, ${count(check.splits.reduce((a, s) => a + s.posed, 0), 'posed object')}` : ''}</p>
+              ) : (
+                <p className="export-lead muted">Not checked</p>
               )}
               {check && (
                 <div className={checking || sharesBad ? 'export-stale' : ''}>
@@ -268,8 +281,8 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
             </section>
           </div>
         )}
-        {error && <p className="error static" role="alert">{error}</p>}
-        {note && !error && <p className="export-note">{note}</p>}
+        {(error || checkError) && <p className="error static" role="alert">{error || checkError}</p>}
+        {note && !error && !checkError && <p className="export-note">{note}</p>}
         <div className="actions">
           {running ? (
             <>
@@ -298,7 +311,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
 }
 
 function Busy({ progress, inline }: { progress: ExportProgress | null; inline?: boolean }) {
-  const text = progress ? `${PHASES[progress.phase]}${progress.total > 1 ? `: ${n(progress.done)} of ${n(progress.total)}` : '…'}` : 'Reading label files…'
+  const text = progress ? `${PHASES[progress.phase]}${progress.total > 1 ? `: ${n(progress.done)} of ${n(progress.total)}` : '…'}` : inline ? 'Exporting…' : 'Checking…'
   return (
     <div className={inline ? 'export-busy inline' : 'export-busy'}>
       <span>{text}</span>

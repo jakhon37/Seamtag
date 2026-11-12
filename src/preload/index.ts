@@ -75,13 +75,14 @@ contextBridge.exposeInMainWorld('api', {
   statsStop: (root: string) => ipc.invoke('stats:stop', root),
   statsSave: (root: string) => dialog('stats:save', root),
   onStats: on('stats:progress'),
-  exportCheck: (root: string, options: unknown) => ipc.invoke('export:check', root, options),
+  exportCheck: (root: string, options: unknown, read: string) => ipc.invoke('export:check', root, options, read),
   exportIssues: (id: number, key: string, from: number) => ipc.invoke('export:issues', id, key, from),
   exportFolder: (root: string) => dialog('export:folder', root),
   exportKeypoints: () => dialog('export:keypoints'),
   exportMakeKeypoints: (root: string, prefer: string) => dialog('export:make-keypoints', root, prefer),
   exportRun: (root: string, options: unknown, out: string) => ipc.invoke('export:run', root, options, out),
   exportStop: () => ipc.invoke('export:stop'),
+  exportClose: () => ipc.invoke('export:close'),
   exportReveal: (out: string) => ipc.invoke('export:reveal', out),
   onExportProgress: on('export:progress')
 })
