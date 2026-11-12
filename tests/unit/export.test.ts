@@ -238,28 +238,35 @@ describe('COCO', () => {
     expect(result.notes).toContain("The label list's __ignore__ and _background_ aren't classes: labelme's converters number the classes after them.")
   })
 
-  test("an image an EXIF orientation turns is noted, as COCO gives it upright and a reader that ignores the orientation sees it turned; its file goes in as it is", async () => {
+  test("an image an EXIF orientation turns, in any format that holds one, is noted, as COCO gives it upright and a reader that ignores the orientation sees it turned; its file goes in as it is", async () => {
     const dir = await folderWith({ 'a.png': [square('cat', 1, 1)] })
-    // Stored 30 x 40, and upright 40 x 30, as labelme, OpenCV and Ultralytics show it
-    await sharp({ create: { width: 30, height: 40, channels: 3, background: '#808080' } }).jpeg().withMetadata({ orientation: 6 }).toFile(path.join(dir, 'p.jpg'))
-    writeFileSync(path.join(dir, 'p.json'), labelme('p.jpg', [square('cat', 2, 2)]))
+    // Each stored 30 x 40, and upright 40 x 30, as Seamtag shows it, and for the JPEG labelme, OpenCV and Ultralytics too
+    const stored = () => sharp({ create: { width: 30, height: 40, channels: 3, background: '#808080' } })
+    const turned = { 'p.jpg': stored().jpeg(), 'q.png': stored().png(), 't.tif': stored().tiff(), 'w.webp': stored().webp() }
+    for (const [name, pixels] of Object.entries(turned)) {
+      await pixels.withMetadata({ orientation: 6 }).toFile(path.join(dir, name))
+      writeFileSync(path.join(dir, name.replace(/\.\w+$/, '.json')), labelme(name, [square('cat', 2, 2)]))
+    }
     await openProject(dir, null)
     const check = await preflight(dir, options())
-    const turned = check.groups.find((g) => g.code === 'export-exif-orientation')!
-    expect(turned).toMatchObject({ severity: 'info', title: 'Images turned by their EXIF orientation', count: 1 })
-    expect(turned.issues[0]).toMatchObject({
-      image: 'p.jpg', message: "p.jpg is stored turned, with EXIF orientation 6: its width, height and shapes are for it upright, as labelme, OpenCV and Ultralytics " +
-        "show it, so a reader that ignores the orientation, such as torchvision's CocoDetection, sees it turned"
-    })
+    const notes = check.groups.find((g) => g.code === 'export-exif-orientation')!
+    expect(notes).toMatchObject({ severity: 'info', title: 'Images turned by their EXIF orientation', count: 4 })
+    const said = (name: string, shown: string) => `${name} is stored turned, with EXIF orientation 6: its width, height and shapes are for it upright, as ${shown}, ` +
+      "so a reader that ignores the orientation, such as torchvision's CocoDetection, sees it turned"
+    expect(notes.issues.map((i) => [i.image, i.message])).toEqual([
+      ['p.jpg', said('p.jpg', 'labelme, OpenCV and Ultralytics show it')], ['q.png', said('q.png', 'Seamtag shows it')],
+      ['t.tif', said('t.tif', 'Seamtag shows it')], ['w.webp', said('w.webp', 'Seamtag shows it')]
+    ])
     const out = newFolder()
     const result = await runExport(dir, options(), out)
     expect(json(out, 'annotations/instances_default.json').images.map((i: any) => [i.file_name, i.width, i.height])).toEqual([
-      ['images/default/a.png', 40, 30], ['images/default/p.jpg', 40, 30]
+      ['images/default/a.png', 40, 30], ['images/default/p.jpg', 40, 30], ['images/default/q.png', 40, 30], ['images/default/t.tif', 40, 30], ['images/default/w.webp', 40, 30]
     ])
-    expect(readFileSync(path.join(out, 'images/default/p.jpg'))).toEqual(readFileSync(path.join(dir, 'p.jpg')))
-    expect(result.accepted).toContainEqual({ severity: 'info', title: 'Images turned by their EXIF orientation', count: 1 })
-    // Ultralytics turns it upright itself
-    expect(codes(await preflight(dir, options({ format: 'yolo-detect' })))).toEqual([])
+    for (const name of Object.keys(turned)) expect(readFileSync(path.join(out, 'images/default', name))).toEqual(readFileSync(path.join(dir, name)))
+    expect(result.accepted).toContainEqual({ severity: 'info', title: 'Images turned by their EXIF orientation', count: 4 })
+    // Ultralytics turns JPEG files upright itself
+    const yolo = await preflight(dir, options({ format: 'yolo-detect' }))
+    expect(yolo.groups.flatMap((g) => g.issues.map((i) => i.image))).not.toContain('p.jpg')
   })
 })
 
@@ -513,7 +520,9 @@ describe('the output folder', () => {
   test("the top of a drive takes it beside the folders the drive's system keeps there", async () => {
     const dir = await folderWith({ 'a.png': [square('cat', 1, 1)] })
     const out = path.join(folder(), 'drive')
-    for (const f of ['lost+found', '.Trashes', 'System Volume Information']) mkdirSync(path.join(out, f), { recursive: true })
+    // Linux's lost+found, macOS's .Trashes and document versions, Linux desktops' trash, and Windows' System Volume Information
+    const kept =['lost+found', '.Trashes', '.DocumentRevisions-V100', '.Trash-1000', '.Trash', 'System Volume Information']
+    for (const f of kept) mkdirSync(path.join(out, f), { recursive: true })
     writeFileSync(path.join(out, '.DS_Store'), 'x')
     // Anywhere else those folders are someone's
     expect(await folderProblem(dir, out)).toBe("That folder isn't empty: choose a new or empty folder, so nothing in it is written over")
@@ -525,7 +534,28 @@ describe('the output folder', () => {
     })
     expect(await folderProblem(dir, out)).toBeNull()
     await runExport(dir, options({ format: 'yolo-detect' }), out)
-    expect(readdirSync(out).sort()).toEqual(['.DS_Store', '.Trashes', 'System Volume Information', 'data.yaml', 'images', 'labels', 'lost+found'])
+    expect(readdirSync(out).sort()).toEqual([...kept, '.DS_Store', 'data.yaml', 'images', 'labels'].sort())
+  })
+
+  test('a folder holding only the hidden folder an unfinished export left there is refused with that folder named, as macOS and Linux hide it', async () => {
+    const dir = await folderWith({ 'a.png': [square('cat', 1, 1)] })
+    const out = path.join(folder(), 'chosen')
+    mkdirSync(out)
+    writeFileSync(path.join(out, '.DS_Store'), 'x')
+    // An export that fails and can't remove what it wrote leaves what a crash would
+    vi.spyOn(fsp, 'copyFile').mockRejectedValue(Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' }))
+    vi.spyOn(fsp, 'rm').mockRejectedValue(Object.assign(new Error('EBUSY: resource busy or locked, rm'), { code: 'EBUSY' }))
+    await expect(runExport(dir, options(), out)).rejects.toThrow("What it wrote couldn't all be removed")
+    vi.restoreAllMocks()
+    const [work, ...rest] = readdirSync(out).filter((f) => f !== '.DS_Store')
+    expect([work, rest]).toEqual([expect.stringMatching(/^\.seamtag-export-[0-9a-f]{8}$/), []])
+    expect(await folderProblem(dir, out)).toBe(`That folder holds ${work}, a hidden folder left by an export that didn't finish: delete it, or choose another folder`)
+    mkdirSync(path.join(out, '.seamtag-export-00000000'))
+    expect(await folderProblem(dir, out)).toBe(
+      `That folder holds .seamtag-export-00000000 and ${work}, hidden folders left by exports that didn't finish: delete them, or choose another folder`)
+    // Anything else in it is someone's
+    mkdirSync(path.join(out, '.seamtag-export-mine'))
+    expect(await folderProblem(dir, out)).toBe("That folder isn't empty: choose a new or empty folder, so nothing in it is written over")
   })
 
   test.skipIf(writesAnywhere)("an empty folder takes it where the folder holding it can't be written to, and folders that can't be written to are refused first", async () => {
@@ -555,21 +585,27 @@ describe('the output folder', () => {
       as(platform)
     })
 
-    test('on Windows, a folder a scanner holds for a moment is moved once it lets go', async () => {
+    test('on Windows, a folder a scanner or a sync client holds for a while is moved once it lets go', async () => {
       const dir = await folderWith({ 'a.png': [square('cat', 1, 1)] })
+      const now = Date.now
       for (const existing of [false, true]) {
         const out = newFolder()
         if (existing) mkdirSync(out)
+        // Held for 30 seconds of a clock that each refusal puts 3 seconds on
+        let ahead = 0
+        vi.spyOn(Date, 'now').mockImplementation(() => now() + ahead)
         const rename = fsp.rename.bind(fsp)
-        let held = 3
         const spy = vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
-          if (held-- > 0) throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: 'EPERM' })
+          if (String(to).startsWith(out) && ahead < 30000) {
+            ahead += 3000
+            throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: 'EPERM' })
+          }
           return rename(from, to)
         })
         as('win32')
         await runExport(dir, options(), out)
         as(platform)
-        expect(spy.mock.calls.length).toBeGreaterThan(3)
+        expect(spy.mock.calls.length).toBeGreaterThan(10)
         expect(filesIn(out)).toEqual(['annotations/instances_default.json', 'images/default/a.png'])
         expect(readdirSync(path.dirname(out))).toEqual(['dataset'])
         vi.restoreAllMocks()
@@ -690,6 +726,21 @@ describe('what stops an export', () => {
     await runExport(dir, options({ leaveAi: true }), out)
     expect(json(out, 'annotations/instances_default.json').annotations.map((a: any) => a.category_id)).toEqual([2])
     expect(filesIn(out)).toEqual(['annotations/instances_default.json', 'images/default/a.png'])
+  })
+
+  test('with AI proposals left out, an image whose other shapes are all labelled __ignore__ is still labelled, so it goes in with no objects', async () => {
+    const dir = await folderWith({ 'a.png': [ai('cat', [[1, 1], [9, 1], [9, 9]]), square('__ignore__', 5, 5)], 'b.png': [square('dog', 1, 1)] })
+    const check = await preflight(dir, options({ format: 'yolo-detect', leaveAi: true }))
+    expect(codes(check)).toEqual([['info', 'export-ai-left-out', 1], ['info', 'export-not-a-class', 1]])
+    expect(check.groups.map((g) => [g.issues[0].shape, g.issues[0].message])).toEqual([
+      [0, 'a.png: its 1 AI proposal not yet accepted is left out'],
+      [1, "a.png: shape 2, labelled “__ignore__”, is left out, as labelme's converters take __ignore__ for a region to ignore, not an object"]
+    ])
+    expect(check.splits[0]).toMatchObject({ images: 2, objects: 1, backgrounds: 1 })
+    const out = newFolder()
+    await runExport(dir, options({ format: 'yolo-detect', leaveAi: true }), out)
+    expect(filesIn(out)).toEqual(['data.yaml', 'images/a.png', 'images/b.png', 'labels/a.txt', 'labels/b.txt'])
+    expect(text(out, 'labels/a.txt')).toBe('')
   })
 
   test("images sharing one label file, label files that can't be read, and a folder with nothing to export", async () => {

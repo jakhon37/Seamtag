@@ -178,8 +178,8 @@ const issue = (severity: Severity, code: string, image: string | null, message: 
   shape === undefined ? { severity, code, image, message } : { severity, code, image, shape, message }
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en-GB')} ${n === 1 ? one : many}`
 // A few names in full; the rest, as when every image shares one -O labels.json, as a count
-const listed = (names: string[]) => names.length < 2 ? names.join('')
-  : names.length > 4 ? `${names.slice(0, 3).join(', ')} and ${plural(names.length - 3, 'other image')}` : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
+const listed = (names: string[], others = 'other image') => names.length < 2 ? names.join('')
+  : names.length > 4 ? `${names.slice(0, 3).join(', ')} and ${plural(names.length - 3, others)}` : `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`
 const byCode = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const posixJoin = (...parts: string[]) => parts.filter(Boolean).join('/')
 // The main process answers the window between chunks of work, so its saves never wait on an export
@@ -233,14 +233,21 @@ async function realPath(p: string): Promise<string> {
 
 // What systems leave in folders of their own accord, so a folder holding only these counts as
 // empty: Finder's .DS_Store, .localized, Icon\r and ._ files, Explorer's Thumbs.db and desktop.ini,
-// and KDE's .directory; at the top of a drive, also the folders its system keeps there. The
-// export puts its files beside them and never touches them.
+// and KDE's .directory; at the top of a drive, also the folders its system keeps there, Linux
+// desktops' trash (.Trash-1000) among them. The export puts its files beside them and never
+// touches them.
 const SYSTEM_FILES = new Set(['.ds_store', '.localized', 'icon\r', 'thumbs.db', 'ehthumbs.db', 'desktop.ini', '.directory'])
-const DRIVE_FOLDERS = new Set(['.spotlight-v100', '.fseventsd', '.trashes', '.temporaryitems', 'system volume information', '$recycle.bin', 'lost+found'])
+const DRIVE_FOLDERS = new Set([
+  '.spotlight-v100', '.fseventsd', '.trashes', '.temporaryitems', '.documentrevisions-v100', 'system volume information', '$recycle.bin', 'lost+found', '.trash'
+])
 const systemEntry = (e: Dirent, drive: boolean) => {
   const name = e.name.toLowerCase()
-  return e.isFile() ? SYSTEM_FILES.has(name) || name.startsWith('._') : drive && e.isDirectory() && DRIVE_FOLDERS.has(name)
+  return e.isFile() ? SYSTEM_FILES.has(name) || name.startsWith('._') : drive && e.isDirectory() && (DRIVE_FOLDERS.has(name) || /^\.trash-\d+$/.test(name))
 }
+// The hidden folder an export into an empty folder is built in. One that a quit or a crash cut
+// off stays there, and is all that keeps the folder from being empty.
+const WORK_PREFIX = '.seamtag-export-'
+const leftover = (e: Dirent) => e.isDirectory() && e.name.startsWith(WORK_PREFIX) && /^[0-9a-f]{8}$/.test(e.name.slice(WORK_PREFIX.length))
 // Whether new files can be made in a folder, as far as the system says before anything is written
 const writable = (dir: string) => fs.access(dir, constants.W_OK | constants.X_OK).then(() => true, () => false)
 
@@ -272,7 +279,15 @@ export async function folderProblem(root: string, out: string): Promise<string |
     if (!entries) return "That folder can't be read: choose another"
     // The top of a drive: a folder that's its own parent, as E:\ is, or on another device than its parent
     const drive = path.dirname(out) === out || (await fs.stat(path.dirname(out)).catch(() => stat)).dev !== stat.dev
-    if (!entries.every((e) => systemEntry(e, drive))) return "That folder isn't empty: choose a new or empty folder, so nothing in it is written over"
+    const held = entries.filter((e) => !systemEntry(e, drive))
+    // Named, as macOS and Linux hide it. It's left for the person to remove: it may hold a whole
+    // dataset that couldn't be moved into place, or another window's export under way.
+    if (held.length && held.every(leftover)) {
+      const names = held.map((e) => e.name).sort(byCode)
+      return names.length === 1 ? `That folder holds ${names[0]}, a hidden folder left by an export that didn't finish: delete it, or choose another folder`
+        : `That folder holds ${listed(names, 'other folder')}, hidden folders left by exports that didn't finish: delete them, or choose another folder`
+    }
+    if (held.length) return "That folder isn't empty: choose a new or empty folder, so nothing in it is written over"
     if (!(await writable(out))) return "That folder can't be written to: choose another"
   } else if (!(await fs.stat(path.dirname(out)).catch(() => null))?.isDirectory()) {
     return "The folder it would go in doesn't exist"
@@ -593,7 +608,9 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     if (options.leaveAi) for (const i of ai) dropped.add(i)
     const map = image.shapes.flatMap((s, i) => (dropped.has(i) ? [] : [i]))
     if (options.leaveAi && ai.length) {
-      if (!map.length) {
+      // Shapes labelled __ignore__ or _background_ are someone's labels too, so an image holding
+      // them goes in, with no objects if they're all that's left of it
+      if (ai.length === image.shapes.length) {
         add('info', 'export-ai-only', name, `${name} holds only ${proposals} not yet accepted, so it's left out, as not yet labelled`, ai[0])
         continue
       }
@@ -804,15 +821,18 @@ function cocoChunk(g: Gathered, part: Item[], names: string[], info: CocoInfo, g
   return { datasets, tallies }
 }
 
-// EXIF orientations, by image as read, read once an image: of photos, as JPEG and TIFF files
-// hold them, where cameras and phones write them
+// EXIF orientations, by image as read, read once an image, of every format readDataset turns
+// upright by its orientation: all but BMP, whose size it reads itself, and GIF, which holds none
 const orientations = new WeakMap<DatasetImage, number>()
 const HOW: Record<number, string> = { 2: 'mirrored', 3: 'turned', 4: 'mirrored', 5: 'turned and mirrored', 6: 'turned', 7: 'turned and mirrored', 8: 'turned' }
+// labelme, OpenCV and Ultralytics all turn JPEG files upright, which is where cameras and phones
+// write the orientation; on other formats they differ
+const shownBy = (name: string) => (/\.(jpe?g|jfif)$/i.test(name) ? 'labelme, OpenCV and Ultralytics show it' : 'Seamtag shows it')
 
 /**
- * COCO gives each image's width, height and shapes upright, as labelme, OpenCV and Ultralytics
- * show it, while its file goes into the dataset as it is: each image an EXIF orientation turns
- * gets a note in its tally, as a reader that ignores the orientation sees it otherwise
+ * COCO gives each image's width, height and shapes upright, as Seamtag shows it, while its file
+ * goes into the dataset as it is: each image an EXIF orientation turns gets a note in its tally,
+ * as a reader that ignores the orientation sees it otherwise
  */
 async function orientationNotes(root: string, part: Item[], tallies: Tally[]) {
   // Eight headers read at a time, as readDataset reads them, so main never sets up many at once
@@ -824,14 +844,14 @@ async function orientationNotes(root: string, part: Item[], tallies: Tally[]) {
       let o = orientations.get(read)
       if (o === undefined) {
         const file = imagePath(root, image.name)
-        o = isEmbedded(root, image.name) || !/\.(jpe?g|jfif|tiff?)$/i.test(file) ? 1
+        o = isEmbedded(root, image.name) || /\.(bmp|gif)$/i.test(file) ? 1
           : (await sharp(file, { limitInputPixels: false }).metadata().catch(() => null))?.orientation ?? 1
         orientations.set(read, o)
       }
       const how = HOW[o]
       if (how) {
         tallies[k].issues.push(issue('info', 'export-exif-orientation', image.name, `${image.name} is stored ${how}, with EXIF orientation ${o}: its width, height and ` +
-          `shapes are for it upright, as labelme, OpenCV and Ultralytics show it, so a reader that ignores the orientation, such as torchvision's CocoDetection, sees it ${how}`))
+          `shapes are for it upright, as ${shownBy(image.name)}, so a reader that ignores the orientation, such as torchvision's CocoDetection, sees it ${how}`))
       }
     }
   }))
@@ -1133,18 +1153,24 @@ async function workFolder(dir: string, prefix: string): Promise<string> {
   }
 }
 
+// Windows refuses to move a folder while a scanner or a sync client holds a file in it, which for
+// a folder of thousands of images just written can take a while. The move comes once, at the end
+// of a long export, so it's tried for up to a minute in all, as graceful-fs tries npm's renames.
+const MOVE_PATIENCE = 60_000
+
 /**
  * Moves a finished dataset into place: its hidden folder takes a new folder's name, or what it
  * holds moves into the empty folder chosen, one by one by name, never over anything put there
- * meanwhile. Windows refuses for a moment while a scanner or a sync client holds a file just
- * written, which renameRetrying waits out. Should a move still fail, the dataset is kept where it
- * is and the error says where. Returns the emptied hidden folder if it couldn't be removed.
+ * meanwhile. Should a move still fail, the dataset is kept where it is and the error says where.
+ * Returns the emptied hidden folder if it couldn't be removed.
  */
 async function intoPlace(work: string, out: string, existing: boolean, names: string[]): Promise<string | null> {
   const why = (e: unknown) => (e as NodeJS.ErrnoException).code ?? reason(e)
+  const until = Date.now() + MOVE_PATIENCE
+  const move = (from: string, to: string) => renameRetrying(from, to, Math.max(0, until - Date.now()))
   if (!existing) {
     try {
-      await renameRetrying(work, out)
+      await move(work, out)
     } catch (e) {
       throw new Error(`The dataset is written, but it couldn't be moved to ${out} (${why(e)}), so it's in ${work}: rename that folder ${path.basename(out)} yourself`, { cause: e })
     }
@@ -1154,7 +1180,7 @@ async function intoPlace(work: string, out: string, existing: boolean, names: st
   while (left.length) {
     try {
       if (await fs.lstat(path.join(out, left[0])).then(() => true, () => false)) throw new Error(`${left[0]} is there already`)
-      await renameRetrying(path.join(work, left[0]), path.join(out, left[0]))
+      await move(path.join(work, left[0]), path.join(out, left[0]))
       left.shift()
     } catch (e) {
       const one = left.length === 1
@@ -1185,7 +1211,7 @@ export async function runExport(root: string, options: ExportOptions, out: strin
   const blocking = g.issues.find((i) => i.severity === 'error')
   if (blocking) throw new Error(`The dataset can't be exported: ${blocking.message}`)
   const existing = !!(await fs.lstat(out).catch(() => null))
-  const work = await workFolder(existing ? out : path.dirname(out), existing ? '.seamtag-export-' : `.${path.basename(out)}.export-`)
+  const work = await workFolder(existing ? out : path.dirname(out), existing ? WORK_PREFIX : `.${path.basename(out)}.export-`)
   const counts = { copied: 0, linked: 0, fellBack: 0, left: options.images === 'leave' ? g.items.length : 0 }
   let files = 0
   // What the export put at the top of the dataset, which moves into an empty folder at the end
