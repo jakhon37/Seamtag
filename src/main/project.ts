@@ -374,9 +374,10 @@ export function closeProject(dir: string) {
 const summaryCache = new Map<string, { key: string; item: Partial<ImageItem>; labels: string[] }>()
 const anySize: SizeOf = async () => [1, 1]
 
-export async function summarizeAll(dir: string, send: (batch: { root: string; items: ImageItem[]; labels: string[] }) => void, prefer: LabelFormat = 'labelme') {
+// `only` names the images to count again, after their label files were written outside the window
+export async function summarizeAll(dir: string, send: (batch: { root: string; items: ImageItem[]; labels: string[] }) => void, prefer: LabelFormat = 'labelme', only?: string[]) {
   const r = getRoot(dir)
-  const names = [...r.images.keys()]
+  const names = only ? only.filter((n) => r.images.has(n)) : [...r.images.keys()]
   let batch: ImageItem[] = []
   let labels = new Set<string>()
   let last = Date.now()
