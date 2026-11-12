@@ -4,7 +4,7 @@
 // functions over what src/main/dataset.ts read, so the window can run it again and apply the
 // fixes that change nothing but the problem.
 import ClipperLib from 'clipper-lib'
-import type { DatasetImage, Issue, MaskBits, Severity } from './dataset'
+import { type DatasetImage, type Issue, type MaskBits, type Severity, sizeText } from './dataset'
 import { boxOf } from './formats'
 import { isAi, type Shape, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
@@ -465,7 +465,7 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
     const clash = clashed.get(name)
     if (image.file && sized && image.labelSize && (image.labelSize[0] !== image.width || image.labelSize[1] !== image.height)) {
       const [w, h] = image.labelSize
-      add('size-mismatch', name, `${fileName(image.file)} gives the image size as ${w} x ${h}, but ${name} is ${image.width} x ${image.height}, ` +
+      add('size-mismatch', name, `${fileName(image.file)} gives the image size as ${sizeText(w, h)}, but ${name} is ${sizeText(image.width, image.height)}, ` +
         `so its shapes may be out of place${image.format === 'labelme' ? ", and labelme 7 won't open it" : ''}`)
     }
     if (clash) {

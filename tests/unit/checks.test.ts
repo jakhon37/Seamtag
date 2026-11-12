@@ -50,7 +50,7 @@ describe('errors', () => {
     const issues = check([image('a.png', [], { labelSize: [300, 400] }), image('b.png', [], { labelSize: null, format: 'yolo' }), image('c.png')])
     expect(of(issues, 'size-mismatch')).toEqual([{
       severity: 'error', code: 'size-mismatch', image: 'a.png',
-      message: "a.json gives the image size as 300 x 400, but a.png is 400 x 300, so its shapes may be out of place, and labelme 7 won't open it"
+      message: "a.json gives the image size as 300 × 400, but a.png is 400 × 300, so its shapes may be out of place, and labelme 7 won't open it"
     }])
   })
 

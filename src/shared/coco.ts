@@ -10,7 +10,7 @@
 // When writing objects whole puts a shape before one it came after, every shape keeps its place
 // in the label file as `index`, so importing puts them back in order. A keypoints file keeps its
 // posed objects' outlines the same way, so it gives them back on its own.
-import type { DatasetImage, Issue, KeypointSchema, MaskBits, PoseInstance, Severity } from './dataset'
+import { type DatasetImage, type Issue, type KeypointSchema, type MaskBits, type PoseInstance, type Severity, sizeText } from './dataset'
 import { newShape, pointCount, readShape, type Shape, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
 import { short } from './pose'
@@ -757,7 +757,8 @@ function readSegmentation(a: Record<string, unknown>, label: string, image: Coco
       return null
     }
     if (size[0] !== h || size[1] !== w) {
-      note('warning', 'coco-mask-size', `has a ${size[0]} x ${size[1]} mask on a ${h} x ${w} image, ${lost}`)
+      // COCO gives a mask's size as height, width: written width first, as every size is
+      note('warning', 'coco-mask-size', `has a ${sizeText(size[1], size[0])} mask on a ${sizeText(w, h)} image, ${lost}`)
       return null
     }
     try {
@@ -783,7 +784,7 @@ function readSegmentation(a: Record<string, unknown>, label: string, image: Coco
   if (mask) {
     const [x, y, bw, bh] = rleToBbox(mask)
     if (bw * bh > MASK_PIXELS) {
-      note('warning', 'coco-mask-too-big', `has a mask of ${bw} x ${bh} pixels, more than the ${MASK_PIXELS.toLocaleString('en-GB')} a mask shape can hold, ${lost}`)
+      note('warning', 'coco-mask-too-big', `has a mask of ${sizeText(bw, bh)} pixels, more than the ${MASK_PIXELS.toLocaleString('en-GB')} a mask shape can hold, ${lost}`)
       return null
     }
     const box = { x, y, width: bw, height: bh }
@@ -847,8 +848,8 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
       } else if (!(box.width > 0 && box.height > 0)) return `shape ${i + 1} has a mask box with no pixels`
       // Its pixels take memory: no mask of the image is more than twice as wide or tall as it
       const mw = own ? own.w : box.width, mh = own ? own.h : box.height
-      if (mw > 2 * w || mh > 2 * h) return `shape ${i + 1}'s mask is ${mw} x ${mh} pixels, too big for the ${w} x ${h} image`
-      if (mw * mh > MASK_PIXELS) return `shape ${i + 1}'s mask is ${mw} x ${mh} pixels, more than the ${MASK_PIXELS.toLocaleString('en-GB')} a mask shape can hold`
+      if (mw > 2 * w || mh > 2 * h) return `shape ${i + 1}'s mask is ${sizeText(mw, mh)} pixels, too big for the ${sizeText(w, h)} image`
+      if (mw * mh > MASK_PIXELS) return `shape ${i + 1}'s mask is ${sizeText(mw, mh)} pixels, more than the ${MASK_PIXELS.toLocaleString('en-GB')} a mask shape can hold`
       pixels = own ? { rle: own, box: { x: 0, y: 0, width: own.w, height: own.h }, x: box.x, y: box.y } : { rle: mask!, box, x: box.x, y: box.y }
     }
     out.push({ shape, pixels, ...(r.index === undefined ? {} : { index: r.index as number }) })
@@ -865,7 +866,7 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
   }
   const masks = out.filter((r) => r.pixels), wide = masks.reduce((n, r) => n + r.pixels!.box.width, 0)
   if (wide > MASK_COLUMNS) {
-    const which = masks.length > 1 ? `its shapes' masks are ${wide} pixels wide in all` : `shape ${out.indexOf(masks[0]) + 1}'s mask is ${wide} pixels wide`
+    const which = masks.length > 1 ? `its shapes' masks are ${wide.toLocaleString('en-GB')} pixels wide in all` : `shape ${out.indexOf(masks[0]) + 1}'s mask is ${wide.toLocaleString('en-GB')} pixels wide`
     return `${which}, more than the ${MASK_COLUMNS.toLocaleString('en-GB')} Seamtag compares with a segmentation`
   }
   // Compared as runs, so no pixels are made for shapes that may not be kept

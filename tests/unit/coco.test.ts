@@ -559,9 +559,9 @@ describe("Seamtag's attributes", () => {
     expect(read.results.get(1)!.shapes).toEqual([fromMask, fromMask, fromMask, newShape('cat', 'polygon', [[1, 1], [5, 1], [3, 4]])])
     expect(read.results.get(1)!.masks.slice(0, 3)).toEqual(Array(3).fill({ x: 1, y: 3, width: 1, height: 3, data: Uint8Array.from([1, 1, 1]) }))
     expect(read.issues.map((i) => i.message)).toEqual([
-      "a.jpg: annotation 1 (“cat”) carries Seamtag's attributes, but shape 1's mask is 300001 x 300001 pixels, too big for the 10 x 8 image, so it's imported from its segmentation",
-      "a.jpg: annotation 2 (“cat”) carries Seamtag's attributes, but shape 1's mask is 300000 x 300000 pixels, too big for the 10 x 8 image, so it's imported from its segmentation",
-      "a.jpg: annotation 3 (“cat”) carries Seamtag's attributes, but shape 1's mask is 21 x 4 pixels, too big for the 10 x 8 image, so it's imported from its segmentation"
+      "a.jpg: annotation 1 (“cat”) carries Seamtag's attributes, but shape 1's mask is 300,001 × 300,001 pixels, too big for the 10 × 8 image, so it's imported from its segmentation",
+      "a.jpg: annotation 2 (“cat”) carries Seamtag's attributes, but shape 1's mask is 300,000 × 300,000 pixels, too big for the 10 × 8 image, so it's imported from its segmentation",
+      "a.jpg: annotation 3 (“cat”) carries Seamtag's attributes, but shape 1's mask is 21 × 4 pixels, too big for the 10 × 8 image, so it's imported from its segmentation"
     ])
   })
 
@@ -706,7 +706,7 @@ describe('reading COCO from other tools', () => {
       [4, [1, 90, 6, 95], [[3, 92, 2], null], false]
     ])
     expect(read.issues.map((i) => i.message)).toEqual([
-      "a.jpg: annotation 5 (“person”) has a 5 x 5 mask on a 100 x 100 image, so only its box and keypoints are imported",
+      "a.jpg: annotation 5 (“person”) has a 5 × 5 mask on a 100 × 100 image, so only its box and keypoints are imported",
       'person_keypoints_val2017.json: 3 keypoints are marked not labelled (visibility 0), so they\'re left out',
       "person_keypoints_val2017.json: 1 annotation has no keypoints labelled, so it's read as a plain object"
     ])
@@ -763,7 +763,7 @@ describe('reading COCO from other tools', () => {
       "b.jpg: annotation 3 (“cat”) has polygon 1 of 2 points, and a polygon needs 3, so that polygon is left out",
       "b.jpg: annotation 3 (“cat”) has polygon 2 of an odd count of numbers (7), so that polygon is left out",
       "b.jpg: annotation 3 (“cat”) keeps only its box, so it becomes a rectangle",
-      "b.jpg: annotation 4 (“cat”) has a 10 x 20 mask on a 20 x 20 image, so it's left out",
+      "b.jpg: annotation 4 (“cat”) has a 20 × 10 mask on a 20 × 20 image, so it's left out",
       "b.jpg: annotation 5 (“cat”) has a mask that can't be read (Its counts hold \"!\", which isn't one of COCO's characters), so it's left out",
       "b.jpg: annotation 6 (“cat”) has a mask that can't be read (Its runs cover 105 pixels, not 400), so it's left out",
       "b.jpg: annotation 7 (“cat”) carries Seamtag's attributes, but shape 1 has no points, so it's imported from its segmentation",
@@ -838,8 +838,8 @@ describe('reading COCO from other tools', () => {
     expect(read.results.get(1)!.shapes).toEqual([newShape('sky', 'mask', [[0, 5], [0, 5]])])
     expect(read.results.get(1)!.masks).toEqual([{ x: 0, y: 5, width: 1, height: 1, data: Uint8Array.from([1]) }])
     expect(read.issues.map((i) => i.message)).toEqual([
-      "a.jpg: annotation 1 (“sky”) has a mask of 16384 x 16384 pixels, more than the 268,402,689 a mask shape can hold, so it's left out",
-      "a.jpg: annotation 2 (“sky”) carries Seamtag's attributes, but shape 1's mask is 16384 x 16384 pixels, more than the 268,402,689 a mask shape can hold, so it's imported from its segmentation"
+      "a.jpg: annotation 1 (“sky”) has a mask of 16,384 × 16,384 pixels, more than the 268,402,689 a mask shape can hold, so it's left out",
+      "a.jpg: annotation 2 (“sky”) carries Seamtag's attributes, but shape 1's mask is 16,384 × 16,384 pixels, more than the 268,402,689 a mask shape can hold, so it's imported from its segmentation"
     ])
     // 16383 x 16383 is a mask shape, counted without making it
     const most = JSON.stringify({
@@ -879,7 +879,7 @@ describe('reading COCO from other tools', () => {
     expect(performance.now() - t).toBeLessThan(200)
     expect(read.results.get(1)!.shapes).toEqual([newShape('road', 'mask', [[0, 0], [W - 1, 0]])])
     expect(read.issues.map((i) => i.message)).toEqual([
-      "a.png: annotation 1 (“road”) carries Seamtag's attributes, but shape 1's mask is 268402689 pixels wide, more than the 4,194,304 Seamtag compares with a segmentation, so it's imported from its segmentation"
+      "a.png: annotation 1 (“road”) carries Seamtag's attributes, but shape 1's mask is 268,402,689 pixels wide, more than the 4,194,304 Seamtag compares with a segmentation, so it's imported from its segmentation"
     ])
     // An object's masks are held to it in all. Here each is a row of a 2-row image, so its runs
     // were cut at every column, two numbers a column: nearly a second and 100 MB a mask
@@ -896,7 +896,7 @@ describe('reading COCO from other tools', () => {
     expect(performance.now() - t).toBeLessThan(200)
     expect(read.results.get(1)!.shapes).toEqual([newShape('road', 'mask', [[0, 0], [N - 1, 1]])])
     expect(read.issues.map((i) => i.message)).toEqual([
-      "b.png: annotation 1 (“road”) carries Seamtag's attributes, but its shapes' masks are 6000000 pixels wide in all, more than the 4,194,304 Seamtag compares with a segmentation, so it's imported from its segmentation"
+      "b.png: annotation 1 (“road”) carries Seamtag's attributes, but its shapes' masks are 6,000,000 pixels wide in all, more than the 4,194,304 Seamtag compares with a segmentation, so it's imported from its segmentation"
     ])
   })
 

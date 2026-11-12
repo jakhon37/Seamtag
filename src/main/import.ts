@@ -9,7 +9,7 @@ import { constants, existsSync, promises as fs } from 'fs'
 import path from 'path'
 import type { Worker } from 'worker_threads'
 import { MAX_GROUP } from '../shared/coco'
-import type { Issue, MaskBits, Severity } from '../shared/dataset'
+import { type Issue, type MaskBits, type Severity, sizeText } from '../shared/dataset'
 import { LABEL_FORMATS, type LabelFormat } from '../shared/formats'
 import type { Shape } from '../shared/labelfile'
 import { readPoseYaml, short } from '../shared/pose'
@@ -492,7 +492,7 @@ async function readCocoSource(s: Session, folder: string[], progress: (p: Import
         const m = s.cocoImages.get(id)!
         if (m.width === w && m.height === h) return true
         const swapped = m.width === h && m.height === w
-        wrong.push(say('error', 'import-size', e.name, `${e.name} is ${w} x ${h} pixels upright, but ${short(m.fileName, 120)} in the COCO file is ${m.width} x ${m.height}${swapped ? ': the sides are swapped, so the image\'s EXIF orientation probably differs from the one its annotations were made on' : ''}, so none of its annotations are imported`))
+        wrong.push(say('error', 'import-size', e.name, `${e.name} is ${sizeText(w, h)} pixels upright, but ${short(m.fileName, 120)} in the COCO file is ${sizeText(m.width, m.height)}${swapped ? ': the sides are swapped, so the image\'s EXIF orientation probably differs from the one its annotations were made on' : ''}, so none of its annotations are imported`))
         return false
       })
       s.issues.push(...wrong)

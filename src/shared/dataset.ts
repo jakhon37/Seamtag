@@ -73,3 +73,6 @@ export type Severity = 'error' | 'warning' | 'info'
 export type Issue = { severity: Severity; code: string; image: string | null; shape?: number; message: string }
 
 export const SEVERITIES: Severity[] = ['error', 'warning', 'info']
+
+/** A size in messages, width first, as Statistics and the status bar write it: 6,050 × 12,300 */
+export const sizeText = (width: number, height: number) => `${width.toLocaleString('en-GB')} × ${height.toLocaleString('en-GB')}`

@@ -13,7 +13,7 @@ import { constants, createReadStream, type Dirent, promises as fs } from 'fs'
 import path from 'path'
 import sharp from 'sharp'
 import { cocoLabels, type CocoDataset, type CocoEntry, type CocoInfo, type CocoTask, writeCoco } from '../shared/coco'
-import { type DatasetImage, type Issue, type KeypointSchema, type PoseInstance, type Severity, SEVERITIES } from '../shared/dataset'
+import { type DatasetImage, type Issue, type KeypointSchema, type PoseInstance, type Severity, SEVERITIES, sizeText } from '../shared/dataset'
 import type { LabelFormat } from '../shared/formats'
 import { isAi } from '../shared/labelfile'
 import { CLOSED_TYPES } from '../shared/outline'
@@ -563,8 +563,8 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
   const take = (c: Chosen) => {
     const { image } = c, size = image.labelSize
     if (image.file && size && !image.unreadable && image.width > 0 && image.height > 0 && (size[0] !== image.width || size[1] !== image.height)) {
-      add('error', 'export-size-mismatch', image.name, `${path.basename(image.file)} gives the image size as ${size[0]} x ${size[1]}, but ${image.name} is ` +
-        `${image.width} x ${image.height}, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size`)
+      add('error', 'export-size-mismatch', image.name, `${path.basename(image.file)} gives the image size as ${sizeText(size[0], size[1])}, but ${image.name} is ` +
+        `${sizeText(image.width, image.height)}, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size`)
     }
     chosen.push(c)
   }

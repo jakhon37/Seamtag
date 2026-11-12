@@ -1,5 +1,6 @@
 import { ArrowDown, ArrowUp } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { sizeText } from '../../shared/dataset'
 import type { ShapeType } from '../../shared/labelfile'
 import { useModal } from './Modal'
 import { counted, number, showMore, StopButton } from './Problems'
@@ -245,7 +246,7 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
             {stats.imageSizes.length ? (
               <div className="stats-image-sizes">
                 {stats.imageSizes.map((s) => (
-                  <span key={`${s.width}x${s.height}`}><b>{number(s.width)} × {number(s.height)}</b> <span className="muted">{counted(s.images, 'image')}</span></span>
+                  <span key={`${s.width}x${s.height}`}><b>{sizeText(s.width, s.height)}</b> <span className="muted">{counted(s.images, 'image')}</span></span>
                 ))}
                 {stats.moreSizes > 0 && <span className="muted">and {counted(stats.moreSizes, 'size')} more</span>}
               </div>

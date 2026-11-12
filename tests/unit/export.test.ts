@@ -779,10 +779,10 @@ describe('what stops an export', () => {
       expect(codes(check).filter(([s]) => s === 'error')).toEqual([['error', 'export-size-mismatch', 2]])
       expect(check.groups[0]).toMatchObject({ title: 'Label files that give another image size' })
       expect(check.groups[0].issues.map((i) => [i.image, i.message])).toEqual([
-        ['c.png', 'c.json gives the image size as 400 x 200, but c.png is 200 x 100, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size'],
-        ['v.png', 'v.xml gives the image size as 100 x 50, but v.png is 200 x 100, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size']
+        ['c.png', 'c.json gives the image size as 400 × 200, but c.png is 200 × 100, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size'],
+        ['v.png', 'v.xml gives the image size as 100 × 50, but v.png is 200 × 100, so its shapes may be out of place: open it, check its shapes and save it, which writes its own size']
       ])
-      await expect(runExport(dir, options({ format }), newFolder())).rejects.toThrow("The dataset can't be exported: c.json gives the image size as 400 x 200")
+      await expect(runExport(dir, options({ format }), newFolder())).rejects.toThrow("The dataset can't be exported: c.json gives the image size as 400 × 200")
     }
   })
 

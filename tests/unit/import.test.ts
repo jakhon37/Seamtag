@@ -239,8 +239,8 @@ describe('a COCO file', () => {
     expect([p.matched, p.blocked, p.fresh]).toEqual([4, 2, 2])
     const sizes = group(p, 'import-size')!
     expect([sizes.severity, sizes.count]).toEqual(['error', 2])
-    expect(sizes.rows[0]).toBe("a.png is 40 x 30 pixels upright, but a.png in the COCO file is 30 x 40: the sides are swapped, so the image's EXIF orientation probably differs from the one its annotations were made on, so none of its annotations are imported")
-    expect(sizes.rows[1]).toBe('b.png is 40 x 30 pixels upright, but b.png in the COCO file is 50 x 30, so none of its annotations are imported')
+    expect(sizes.rows[0]).toBe("a.png is 40 × 30 pixels upright, but a.png in the COCO file is 30 × 40: the sides are swapped, so the image's EXIF orientation probably differs from the one its annotations were made on, so none of its annotations are imported")
+    expect(sizes.rows[1]).toBe('b.png is 40 × 30 pixels upright, but b.png in the COCO file is 50 × 30, so none of its annotations are imported')
     const r = await save()
     expect(r.names.sort()).toEqual(['c.png', 'e.jpg'])
     expect(group(r, 'import-size')!.count).toBe(2)
