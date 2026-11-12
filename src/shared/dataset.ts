@@ -31,6 +31,12 @@ export type DatasetImage = {
   labelImage?: string | null
   /** The image file's size in bytes, for finding copies of one image */
   bytes?: number
+  /**
+   * What the labels were read from, when they were: the label file's size, times and inode
+   * (with classes.txt's for YOLO), or a digest of the image's own entries in a CreateML list.
+   * A fix made from this read is refused once it differs, as it would undo what changed.
+   */
+  stamp?: string
 }
 
 /**

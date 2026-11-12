@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import {
-  boxesClipped, CHECKS, type CheckCode, type CheckOptions, checkDataset, crossing, fixIssue, renameLabel, withoutDuplicates, withoutRepeatedPoints
+  boxesClipped, CHECKS, type CheckCode, type CheckOptions, checkDataset, crossing, fixIssue, renameLabel, shapeArea, withoutDuplicates, withoutRepeatedPoints
 } from '../../src/shared/checks'
 import type { DatasetImage, Issue, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
@@ -102,13 +102,28 @@ describe('shapes', () => {
       'Shape 2 (car) covers less than a pixel',
       'Shape 4 (car) covers no area: its points lie on one line',
       'Shape 5 (ball) covers no area: its rim is at its centre',
-      'Shape 6 (road) covers no area: its mask has no pixels set'
+      'Shape 6 (road) covers no area: its mask has no pixels set inside the image'
     ])
   })
 
   test("a bow tie's lobes cancel in the shoelace sum, but it still covers an area", () => {
     const issues = check([image('a.png', [poly('car', [[0, 0], [10, 10], [10, 0], [0, 10]])])])
     expect(of(issues, 'zero-area')).toEqual([])
+  })
+
+  test('a polygon that meets itself is measured as it is filled, even-odd, whatever way round its parts go', () => {
+    // A 10 x 10 outline with a 4 x 4 hole joined to it by a cut, the hole wound the outline's
+    // way round as other tools write them: the shoelace sum gives 116
+    const holed = [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0], [3, 3], [7, 3], [7, 7], [3, 7], [3, 3]]
+    expect(shapeArea(poly('car', holed))).toBe(84)
+    // Wound the other way, as geometry.ts withHoles writes them
+    expect(shapeArea(poly('car', [[0, 0], [10, 0], [10, 10], [0, 10], [0, 0], [3, 3], [3, 7], [7, 7], [7, 3], [3, 3]]))).toBe(84)
+    // A bow tie with lobes of 11.43 and 71.43: the sum would give their difference, 60
+    expect(shapeArea(poly('car', [[0, 0], [20, 10], [20, 0], [0, 4]]))).toBeCloseTo(82.86, 1)
+    // Squares of 100 and 400 meeting at a corner, one wound against the other: the sum gives 300
+    expect(shapeArea(poly('car', [[0, 0], [10, 0], [10, 10], [10, 30], [30, 30], [30, 10], [10, 10], [0, 10]]))).toBe(500)
+    // An outline that never meets itself keeps its exact shoelace area
+    expect(shapeArea(poly('car', [[0.1, 0.1], [10.123, 0.1], [10.123, 7.777], [0.1, 7.777]]))).toBeCloseTo(10.023 * 7.677, 9)
   })
 
   test('points that repeat the one before, or a closing point that repeats the first, are a warning; a point visited twice apart is not', () => {
@@ -259,6 +274,16 @@ describe('files', () => {
     ])
   })
 
+  test("a label file holding its own image, and a CreateML list's entries no image reads, are told as such", () => {
+    const issues = check([image('a.png')], {
+      orphans: [{ file: 'd.json', names: null, holdsImage: true }, { file: 'out/labels.json', names: null, entries: ['gone.png', 'old/x.png'] }]
+    })
+    expect(of(issues, 'orphan-label-file').map((i) => i.message)).toEqual([
+      'd.json has no image in the folder, so its labels are never shown or exported; it holds its own image, so it still opens on its own',
+      "out/labels.json holds labels of gone.png and old/x.png, but no image in the folder reads them from it, so they're never shown or exported"
+    ])
+  })
+
   test('identical image files are a warning on each of them', () => {
     const issues = check([image('a.png'), image('b.png'), image('c.png')], { duplicates: [['a.png', 'c.png']] })
     expect(of(issues, 'duplicate-image').map((i) => [i.image, i.message])).toEqual([
@@ -316,6 +341,19 @@ describe('fixes', () => {
     const fixed = boxesClipped(shapes, W, H)!
     expect(fixed.map((s) => s.points)).toEqual([[[0, 10], [50, H]], [[500, 500], [600, 600]], [[10, 10], [20, 20]]])
     expect(boxesClipped(fixed, W, H)).toBeNull()
+  })
+
+  test('repeated points are left in a shape that would be left with too few without them: that is no fix', () => {
+    const shapes = [poly('car', [[1, 1], [50, 50], [1, 1]]), newShape('road', 'linestrip', [[5, 5], [5, 5]]), poly('car', [[0, 0], [9, 0], [9, 9], [9, 9]])]
+    const img = image('a.png', shapes)
+    const issues = of(check([img]), 'repeated-points')
+    expect(issues.map((i) => i.message)).toEqual([
+      'Shape 1 (car) ends with its first point again: without it, 2 points are left, and a polygon needs at least 3',
+      'Shape 2 (road) has 1 point that repeats the one before: without it, 1 point is left, and a line strip needs at least 2',
+      'Shape 3 (car) has 1 point that repeats the one before: taking it out leaves its outline as it is'
+    ])
+    expect(issues.map((i) => fixIssue(img, i)?.map((s) => s.points.length) ?? null)).toEqual([null, null, [3, 2, 3]])
+    expect(withoutRepeatedPoints(shapes.slice(0, 2))).toBeNull()
   })
 
   test('each fixable issue, fixed, is gone when the image is checked again', () => {

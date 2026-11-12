@@ -39,8 +39,13 @@ export type CheckCode = keyof typeof CHECKS
 
 /** Images whose label file is one and the same file (src/main/dataset.ts' labelFileClashes) */
 export type Clash = { file: string; images: string[] }
-/** A label file no image has: its path in the folder, or in full outside it, and the image its imagePath names */
-export type OrphanFile = { file: string; names: string | null }
+/**
+ * A label file no image reads (src/main/dataset.ts' orphanLabels): its path in the folder, or
+ * in full outside it, and the image its imagePath names. `holdsImage` when it holds its own
+ * image, so it still opens on its own. `entries` for a CreateML list that images do read, with
+ * the images it holds labels of that none of them is.
+ */
+export type OrphanFile = { file: string; names: string | null; holdsImage?: boolean; entries?: string[] }
 
 export type CheckOptions = {
   /** The label list (config's labels, or the project's classes); null when none is set */
@@ -136,9 +141,13 @@ export function shapeArea(s: Shape, bits: MaskBits | null = null): number | null
     const [[cx, cy], [px, py]] = s.points
     return Math.PI * ((px - cx) ** 2 + (py - cy) ** 2)
   }
-  const area = ringArea(s.points)
-  // The shoelace sum of a polygon that crosses itself can cancel out, as a bow tie's lobes do
-  return area < MIN_AREA ? Math.max(area, clipArea(ClipperLib.ClipType.ctUnion, s.points)) : area
+  const ring = cleaned(s.points, true).points
+  if (ring.length < 3) return 0
+  // The shoelace sum is the area of an outline that never meets itself. One that does is
+  // filled even-odd, as the canvas, PIL and labelme fill it: the sum would set a bow tie's
+  // lobes against each other, and count twice a hole whose cut joins it to the outline the
+  // same way round, as other tools write them.
+  return meeting(ring, meet) ? clipArea(ClipperLib.ClipType.ctUnion, ring) : ringArea(ring)
 }
 
 /** The points left after taking out those that repeat the one before, and a polygon's last point when it repeats its first */
@@ -157,13 +166,22 @@ function side(a: number[], b: number[], c: number[]) {
   return Math.abs(v) <= 1e-12 * scale ? 0 : Math.sign(v)
 }
 
+type Meets = (p: number[], q: number[], r: number[], s: number[]) => boolean
+/** Edge p q crosses edge r s: each one's ends lie either side of the other */
+const crosses: Meets = (p, q, r, s) => side(p, q, r) * side(p, q, s) < 0 && side(r, s, p) * side(r, s, q) < 0
+/** c, on the line through a and b, lies between them */
+const between = (a: number[], b: number[], c: number[]) =>
+  Math.min(a[0], b[0]) <= c[0] && c[0] <= Math.max(a[0], b[0]) && Math.min(a[1], b[1]) <= c[1] && c[1] <= Math.max(a[1], b[1])
+/** Edge p q crosses, touches or runs along edge r s */
+const meet: Meets = (p, q, r, s) => crosses(p, q, r, s) ||
+  (side(p, q, r) === 0 && between(p, q, r)) || (side(p, q, s) === 0 && between(p, q, s)) ||
+  (side(r, s, p) === 0 && between(r, s, p)) || (side(r, s, q) === 0 && between(r, s, q))
+
 /**
- * Where two edges of a ring cross, or null. Only a true crossing counts: edges that touch or
- * run along each other don't, so the zero-width cut that joins a hole to its outline in
- * Seamtag's polygons (geometry.ts withHoles) isn't one. Edges are swept along x, so long
- * outlines cost little more than short ones.
+ * The first two edges of a ring, not neighbours, that `meets` says meet, by their first
+ * points' indexes. Edges are swept along x, so long outlines cost little more than short ones.
  */
-export function crossing(ring: number[][]): [number, number] | null {
+function meeting(ring: number[][], meets: Meets): [number, number] | null {
   const n = ring.length
   if (n < 4) return null
   const edges = ring.map((p, i) => {
@@ -176,15 +194,26 @@ export function crossing(ring: number[][]): [number, number] | null {
     for (const a of active) {
       const gap = Math.abs(a.i - e.i)
       if (gap === 1 || gap === n - 1 || a.y1 < e.y0 || e.y1 < a.y0) continue
-      const [p, q, r, s] = [ring[a.i], ring[(a.i + 1) % n], ring[e.i], ring[(e.i + 1) % n]]
-      if (side(p, q, r) * side(p, q, s) >= 0 || side(r, s, p) * side(r, s, q) >= 0) continue
-      const d = (q[0] - p[0]) * (s[1] - r[1]) - (q[1] - p[1]) * (s[0] - r[0])
-      const t = ((r[0] - p[0]) * (s[1] - r[1]) - (r[1] - p[1]) * (s[0] - r[0])) / d
-      return [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]
+      if (meets(ring[a.i], ring[(a.i + 1) % n], ring[e.i], ring[(e.i + 1) % n])) return [a.i, e.i]
     }
     active.push(e)
   }
   return null
+}
+
+/**
+ * Where two edges of a ring cross, or null. Only a true crossing counts: edges that touch or
+ * run along each other don't, so the zero-width cut that joins a hole to its outline in
+ * Seamtag's polygons (geometry.ts withHoles) isn't one.
+ */
+export function crossing(ring: number[][]): [number, number] | null {
+  const pair = meeting(ring, crosses)
+  if (!pair) return null
+  const n = ring.length
+  const [p, q, r, s] = [ring[pair[0]], ring[(pair[0] + 1) % n], ring[pair[1]], ring[(pair[1] + 1) % n]]
+  const d = (q[0] - p[0]) * (s[1] - r[1]) - (q[1] - p[1]) * (s[0] - r[0])
+  const t = ((r[0] - p[0]) * (s[1] - r[1]) - (r[1] - p[1]) * (s[0] - r[0])) / d
+  return [p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]
 }
 
 /** A shape's points in a form where copies match: a box's corners sorted, a circle's centre and radius */
@@ -430,10 +459,14 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
       const area = shapeArea(s, image.masks[k] ?? null)
       if (area !== null && area < MIN_AREA) add('zero-area', name, `${shape} ${area > 0 ? 'covers less than a pixel' : `covers no area: ${noArea(s)}`}`, k)
       if (s.shape_type === 'polygon' || s.shape_type === 'linestrip') {
-        const { inRow, closing } = cleaned(s.points, s.shape_type === 'polygon')
+        const { points, inRow, closing } = cleaned(s.points, s.shape_type === 'polygon')
         if (inRow || closing) {
           const parts = [...(inRow ? [`has ${counted(inRow, 'point that repeats', 'points that repeat')} the one before`] : []), ...(closing ? ['ends with its first point again'] : [])]
-          add('repeated-points', name, `${shape} ${parts.join(', and ')}: taking ${inRow + closing === 1 ? 'it' : 'them'} out leaves its outline as it is`, k)
+          const them = inRow + closing === 1 ? 'it' : 'them'
+          // Too few points left: taking them out would only swap this warning for another, so there's no fix
+          add('repeated-points', name, `${shape} ${parts.join(', and ')}: ${points.length < rule.count
+            ? `without ${them}, ${counted(points.length, 'point is', 'points are')} left, and ${rule.name} needs at least ${rule.count}`
+            : `taking ${them} out leaves its outline as it is`}`, k)
         }
       }
       if (s.shape_type === 'polygon' || s.shape_type === 'oriented_rectangle') {
@@ -469,7 +502,12 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
     }
   }
   for (const o of orphans) {
-    add('orphan-label-file', null, `${o.file} has no image in the folder, so its labels are never shown or exported${o.names ? `; its imagePath names ${o.names}` : ''}`)
+    if (o.entries) {
+      add('orphan-label-file', null, `${o.file} holds labels of ${listed(o.entries)}, but no image in the folder reads them from it, so they're never shown or exported`)
+      continue
+    }
+    const more = [...(o.names ? [`its imagePath names ${o.names}`] : []), ...(o.holdsImage ? ['it holds its own image, so it still opens on its own'] : [])]
+    add('orphan-label-file', null, `${o.file} has no image in the folder, so its labels are never shown or exported${more.length ? `; ${more.join(', and ')}` : ''}`)
   }
   if (labels) {
     for (const label of labels) if (!accepted.has(label)) add('unused-label', null, `Label "${label}" is in the label list, but no accepted shape uses it`)
@@ -483,7 +521,8 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
 
 /** Why a shape with the right number of points covers no area */
 function noArea(s: Shape) {
-  if (s.shape_type === 'mask') return 'its mask has no pixels set'
+  // A mask is kept as labelme pastes it, clipped to the image
+  if (s.shape_type === 'mask') return 'its mask has no pixels set inside the image'
   if (s.shape_type === 'circle') return 'its rim is at its centre'
   if (s.shape_type === 'rectangle') {
     const [[x0, y0], [x1, y1]] = s.points
@@ -495,13 +534,17 @@ function noArea(s: Shape) {
 // Fixes. Each gives an image's new shape list, or null when there's nothing it would change;
 // the window applies them to the open image as edits that can be undone.
 
-/** Takes out points that repeat the one before them, and a polygon's last point when it repeats its first. The outline stays as it is. */
+/**
+ * Takes out points that repeat the one before them, and a polygon's last point when it repeats
+ * its first. The outline stays as it is. A shape that would be left with fewer points than its
+ * type needs stays as it is too: labelme2coco refuses a polygon of 2, so that's no fix.
+ */
 export function withoutRepeatedPoints(shapes: Shape[], only?: number): Shape[] | null {
   let changed = false
   const next = shapes.map((s, k) => {
     if ((only !== undefined && k !== only) || (s.shape_type !== 'polygon' && s.shape_type !== 'linestrip')) return s
     const { points } = cleaned(s.points, s.shape_type === 'polygon')
-    if (points.length === s.points.length) return s
+    if (points.length === s.points.length || points.length < POINTS[s.shape_type].count) return s
     changed = true
     return { ...s, points: points.map(([x, y]) => [x, y]) }
   })

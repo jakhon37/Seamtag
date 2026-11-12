@@ -124,10 +124,16 @@ export function datasetStats(images: DatasetImage[], { trainSize = 640, labels =
   }
 }
 
-/** A cell as RFC 4180 writes it: quoted when it holds a comma, a quote, a line break or spaces at either end */
+/**
+ * A cell as RFC 4180 writes it: quoted when it holds a comma, a quote, a line break or spaces
+ * at either end. Labels come from anyone's files, and a spreadsheet runs a cell starting with
+ * =, +, -, @, a tab or a carriage return as a formula, so such a text starts with a quote
+ * and is quoted, as OWASP's CSV injection advice has it.
+ */
 function cell(value: string | number) {
-  const text = String(value)
-  return /[",\r\n]/.test(text) || text !== text.trim() ? `"${text.replace(/"/g, '""')}"` : text
+  if (typeof value === 'number') return String(value)
+  const text = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value
+  return text !== value || /[",\r\n]/.test(text) || text !== text.trim() ? `"${text.replace(/"/g, '""')}"` : text
 }
 
 /** The per-label table as CSV: label, objects and images, then objects of each shape type used */

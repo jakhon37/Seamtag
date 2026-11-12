@@ -65,6 +65,16 @@ test("masks are measured by their pixels and circles by their radius", () => {
   expect(datasetStats(images).sizes.full).toEqual({ small: 1, medium: 1, large: 0 })
 })
 
+test('a polygon with a hole is measured without the hole, whichever way round the hole is wound', () => {
+  // 40 x 40 with a 30 x 30 hole joined by a cut: 700 square pixels, small; counting the hole in, 2500 would be medium
+  const ring = (hole: number[][]) => [[0, 0], [40, 0], [40, 40], [0, 40], [0, 0], ...hole, [5, 5]]
+  const images = [image('h', [
+    newShape('frame', 'polygon', ring([[5, 5], [35, 5], [35, 35], [5, 35]])),
+    newShape('frame', 'polygon', ring([[5, 5], [5, 35], [35, 35], [35, 5]]))
+  ])]
+  expect(datasetStats(images).sizes.full).toEqual({ small: 2, medium: 0, large: 0 })
+})
+
 test('image sizes are listed with how many images have each, the most common first', () => {
   expect(datasetStats(FOLDER).imageSizes).toEqual([{ width: 400, height: 300, images: 6 }, { width: 6000, height: 4000, images: 1 }])
 })
@@ -73,4 +83,12 @@ test('the per-label table saves as CSV, quoting what needs it', () => {
   expect(statsCsv(datasetStats(FOLDER))).toBe('label,objects,images,polygon,rectangle,point\r\ncar,4,3,0,4,0\r\nnose,1,1,0,0,1\r\nperson,1,1,1,0,0\r\n')
   const odd = datasetStats([image('a', [box('a, "b"', 0, 0, 5, 5), box('a, "b"', 9, 0, 15, 5), box(' c', 0, 0, 5, 5)])])
   expect(statsCsv(odd)).toBe('label,objects,images,rectangle\r\n"a, ""b""",2,1,2\r\n" c",1,1,1\r\n')
+})
+
+test('labels a spreadsheet would run as formulas are saved as text: a quote first, and quoted, as OWASP advises', () => {
+  const labels = ['=HYPERLINK("http://x","y")', '+1', '-car', '@SUM(A1)', '\tcat', '\rdog', 'a=b']
+  const stats = datasetStats([image('a', labels.map((l, k) => box(l, k * 10, 0, k * 10 + 5, 5)))])
+  expect(statsCsv(stats).split('\r\n').slice(1, -1).sort()).toEqual([
+    '"\'\tcat",1,1,1', '"\'\rdog",1,1,1', '"\'+1",1,1,1', '"\'-car",1,1,1', '"\'=HYPERLINK(""http://x"",""y"")",1,1,1', '"\'@SUM(A1)",1,1,1', 'a=b,1,1,1'
+  ].sort())
 })
