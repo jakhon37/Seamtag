@@ -1,0 +1,429 @@
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import path from 'path'
+import sharp from 'sharp'
+import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { findDuplicateImages, forgetDataset, labelFileClashes, orphanLabels, readDataset, rewriteLabels } from '../../src/main/dataset'
+import { setCacheDir } from '../../src/main/images'
+import { encodeMask } from '../../src/main/masks'
+import { openProject, setTrash } from '../../src/main/project'
+import { checkDataset, renameLabel, renaming } from '../../src/shared/checks'
+import type { DatasetImage } from '../../src/shared/dataset'
+import { readCreateML, readVoc } from '../../src/shared/formats'
+import { parseLabelFile } from '../../src/shared/labelfile'
+import { datasetStats } from '../../src/shared/stats'
+
+// Whole folders read with real images, made by sharp as e2e/helpers.ts makes them, and label
+// files in all four formats. The trash is a folder of the test's own, as in project.test.ts.
+const bin = mkdtempSync(path.join(tmpdir(), 'seamtag-trash-'))
+let trashed: string[] = []
+const toBin = async (file: string) => {
+  renameSync(file, path.join(bin, `${trashed.length}-${path.basename(file)}`))
+  trashed.push(file)
+}
+setTrash(toBin)
+// An image kept inside its label file is written out once, as the window opens it
+const cache = mkdtempSync(path.join(tmpdir(), 'seamtag-cache-'))
+setCacheDir(cache)
+
+const made: string[] = [bin, cache]
+const folder = () => {
+  const dir = mkdtempSync(path.join(tmpdir(), 'seamtag-dataset-'))
+  made.push(dir)
+  return dir
+}
+afterAll(() => {
+  // Windows can hold a file a moment after sharp lets go of it: what's left is the system's to clear
+  for (const dir of made) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5 })
+    } catch {}
+  }
+})
+
+let shade = 0
+/** A PNG of a colour of its own, so no two are one file by chance */
+async function png(file: string, width = 40, height = 30) {
+  mkdirSync(path.dirname(file), { recursive: true })
+  shade += 9
+  await sharp({ create: { width, height, channels: 3, background: { r: shade % 256, g: (shade * 7) % 256, b: 90 } } }).png().toFile(file)
+}
+function write(dir: string, files: Record<string, string | Buffer>) {
+  for (const [name, content] of Object.entries(files)) {
+    mkdirSync(path.dirname(path.join(dir, name)), { recursive: true })
+    writeFileSync(path.join(dir, name), content)
+  }
+}
+const read = (dir: string, name: string) => readFileSync(path.join(dir, name), 'utf8')
+const shape = (label: string, shape_type: string, points: number[][], extra: Record<string, unknown> = {}) =>
+  ({ label, points, group_id: null, description: '', shape_type, flags: {}, mask: null, ...extra })
+const labelme = (image: string, shapes: unknown[], extra: Record<string, unknown> = {}) =>
+  JSON.stringify({ version: '5.5.0', flags: {}, shapes, imagePath: image, imageData: null, imageHeight: 30, imageWidth: 40, ...extra })
+const voc = (objects: [string, number[]][], { size = [40, 30], depth = 3, verified = false } = {}) =>
+  `<annotation${verified ? ' verified="yes"' : ''}><folder>x</folder><size><width>${size[0]}</width><height>${size[1]}</height><depth>${depth}</depth></size>` +
+  objects.map(([name, [x0, y0, x1, y1]]) =>
+    `<object><name>${name}</name><difficult>0</difficult><bndbox><xmin>${x0}</xmin><ymin>${y0}</ymin><xmax>${x1}</xmax><ymax>${y1}</ymax></bndbox></object>`).join('') +
+  '</annotation>'
+const createml = (image: string, labels: string[], verified = false) =>
+  JSON.stringify([{ image, verified, annotations: labels.map((label) => ({ label, coordinates: { x: 20, y: 15, width: 10, height: 6 } })) }])
+const of = (images: DatasetImage[], name: string) => images.find((i) => i.name === name)!
+/** A 24-bit BMP in one colour: every one of a size has the same byte size */
+function bmp(width: number, height: number, [r, g, b]: number[]) {
+  const row = Math.ceil((width * 3) / 4) * 4
+  const data = Buffer.alloc(54 + row * height)
+  data.write('BM', 0)
+  data.writeUInt32LE(data.length, 2)
+  data.writeUInt32LE(54, 10)
+  data.writeUInt32LE(40, 14)
+  data.writeInt32LE(width, 18)
+  data.writeInt32LE(height, 22)
+  data.writeUInt16LE(1, 26)
+  data.writeUInt16LE(24, 28)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) data.set([b, g, r], 54 + y * row + x * 3)
+  }
+  return data
+}
+
+describe('a folder with every format', () => {
+  let root = ''
+  let names: string[] = []
+  let images: DatasetImage[] = []
+  beforeAll(async () => {
+    root = folder()
+    for (const name of ['a.png', 'b.png', 'd.png', 'e.png', 'h.png', 'sub/g.png', 'yolo/c.png']) await png(path.join(root, name))
+    // Stored 40 x 20, shown upright as 20 x 40
+    await sharp({ create: { width: 40, height: 20, channels: 3, background: '#808080' } }).jpeg().withMetadata({ orientation: 6 }).toFile(path.join(root, 'f.jpg'))
+    const embedded = await sharp({ create: { width: 16, height: 12, channels: 3, background: '#203040' } }).png().toBuffer()
+    write(root, {
+      'a.json': labelme('a.png', [
+        shape('car', 'polygon', [[1, 1], [20, 1], [10, 20]]),
+        shape('road', 'mask', [[5, 6], [8, 9]], { mask: await encodeMask(Uint8Array.from([1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1]), 4, 4) })
+      ], { custom: { kept: true } }),
+      'b.xml': voc([['dog', [2, 3, 20, 25]]], { verified: true }),
+      'bad.png': 'not an image',
+      'd.json': createml('d.png', ['bird'], true),
+      'e.json': '{"shapes": [',
+      'f.json': labelme('f.jpg', [shape('car', 'rectangle', [[1, 1], [5, 5]])], { imageWidth: 40, imageHeight: 20 }),
+      'sub/g.json': labelme('../a.png', []),
+      'yolo/c.txt': '1 0.5 0.5 0.5 0.5\n',
+      'yolo/classes.txt': 'cat\ndog\n',
+      'emb.json': labelme('gone.png', [shape('cat', 'rectangle', [[2, 2], [9, 9]])], { imageData: embedded.toString('base64'), imageWidth: 16, imageHeight: 12 }),
+      '.myseg/stray.json': labelme('nothing.png', [])
+    })
+    // Opening the file that holds its own image opens its folder with it
+    const opened = await openProject(path.join(root, 'emb.json'), null)
+    names = opened.images.map((i) => i.name)
+    images = await readDataset(root)
+  })
+
+  test("every image comes in the folder's order, with its label file and the format it's in", () => {
+    expect(images.map((i) => i.name)).toEqual(names)
+    expect(names).toContain('emb.json')
+    expect(Object.fromEntries(images.map((i) => [i.name, i.format]))).toEqual({
+      'a.png': 'labelme', 'b.png': 'voc', 'bad.png': null, 'd.png': 'createml', 'e.png': 'labelme', 'f.jpg': 'labelme', 'h.png': null,
+      'sub/g.png': 'labelme', 'yolo/c.png': 'yolo', 'emb.json': 'labelme'
+    })
+    expect(of(images, 'b.png').file).toBe(path.join(root, 'b.xml'))
+    expect(of(images, 'h.png').file).toBeNull()
+  })
+
+  test("sizes are the images' own, upright after EXIF orientation, with the size each label file gives", () => {
+    expect(images.map((i) => [i.name, i.width, i.height, i.labelSize])).toEqual([
+      ['a.png', 40, 30, [40, 30]], ['b.png', 40, 30, [40, 30]], ['bad.png', 0, 0, null], ['d.png', 40, 30, null], ['e.png', 40, 30, null],
+      ['f.jpg', 20, 40, [40, 20]], ['h.png', 40, 30, null], ['sub/g.png', 40, 30, [40, 30]], ['yolo/c.png', 40, 30, null], ['emb.json', 16, 12, [16, 12]]
+    ])
+    expect(of(images, 'a.png').bytes).toBe(statSync(path.join(root, 'a.png')).size)
+    expect(of(images, 'emb.json').bytes).toBeUndefined()
+  })
+
+  test("YOLO's shares are read against the real size, and CreateML's and VOC's boxes, verified marks and all", () => {
+    expect(of(images, 'yolo/c.png').shapes.map((s) => [s.label, s.points])).toEqual([['dog', [[10, 8], [30, 22]]]])
+    expect(of(images, 'd.png').shapes.map((s) => [s.label, s.points])).toEqual([['bird', [[15, 12], [25, 18]]]])
+    expect(images.filter((i) => i.verified).map((i) => i.name)).toEqual(['b.png', 'd.png'])
+  })
+
+  test("what can't be read says why: a broken label file, an image that isn't one", () => {
+    expect(of(images, 'e.png')).toMatchObject({ broken: expect.stringMatching(/isn't valid JSON/), file: path.join(root, 'e.json'), shapes: [] })
+    expect(of(images, 'bad.png').unreadable).toMatch(/unsupported image format/)
+    expect(images.filter((i) => i.broken || i.unreadable).map((i) => i.name)).toEqual(['bad.png', 'e.png'])
+  })
+
+  test('masks are decoded where they sit; imagePath is a path in the folder, and says nothing for a file holding its image', () => {
+    const [polygon, mask] = of(images, 'a.png').masks
+    expect(polygon).toBeNull()
+    expect({ ...mask!, data: [...mask!.data] }).toEqual({ x: 5, y: 6, width: 4, height: 4, data: [1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1] })
+    expect(images.map((i) => i.labelImage)).toEqual(['a.png', undefined, undefined, undefined, undefined, 'f.jpg', undefined, 'a.png', undefined, undefined])
+  })
+
+  test('the checks find what is wrong in it, and only that', async () => {
+    const issues = checkDataset(images, {
+      labels: null, clashes: labelFileClashes(images), duplicates: await findDuplicateImages(root, images), orphans: await orphanLabels(root)
+    })
+    const found = (name: string | null) => issues.filter((i) => i.image === name).map((i) => i.code)
+    expect(found(null)).toEqual([])
+    expect(found('e.png')).toEqual(['label-file-unreadable'])
+    expect(found('bad.png')).toEqual(['image-unreadable', 'never-labelled'])
+    expect(found('f.jpg')).toEqual(['size-mismatch', 'not-verified'])
+    expect(found('sub/g.png')).toEqual(['image-path-mismatch', 'labelled-empty', 'not-verified'])
+    expect(found('h.png')).toEqual(['never-labelled'])
+    expect(found('b.png')).toEqual([])
+    expect(found('yolo/c.png')).toEqual([])
+  })
+
+  test('statistics count it as it is', () => {
+    const stats = datasetStats(images)
+    expect(stats.images).toEqual({ total: 10, labelled: 6, empty: 1, never: 2, verified: 2, broken: 1, unreadable: 1, aiPending: 0 })
+    expect(stats.labels.map((l) => [l.label, l.objects, l.images, l.types])).toEqual([
+      ['car', 2, 2, { polygon: 1, rectangle: 1 }], ['dog', 2, 2, { rectangle: 2 }], ['bird', 1, 1, { rectangle: 1 }], ['cat', 1, 1, { rectangle: 1 }],
+      ['road', 1, 1, { mask: 1 }]
+    ])
+    expect(stats.imageSizes).toEqual([{ width: 40, height: 30, images: 7 }, { width: 16, height: 12, images: 1 }, { width: 20, height: 40, images: 1 }])
+  })
+})
+
+test('mask shapes are placed where labelme 7.9.1 pastes them: whole-pixel corners crop or pad to the box between them', async () => {
+  const root = folder()
+  await png(path.join(root, 'm.png'))
+  const four = await encodeMask(Uint8Array.from({ length: 16 }, (_, k) => (k % 3 ? 1 : 0)), 4, 4)
+  write(root, {
+    'm.json': labelme('m.png', [
+      shape('a', 'mask', [[5, 6], [8, 9]], { mask: four }),
+      shape('b', 'mask', [[5.5, 6.5], [8.5, 9.5]], { mask: four }),
+      shape('c', 'mask', [[1, 1], [2, 2]], { mask: four }),
+      shape('d', 'mask', [[1, 1], [5, 5]], { mask: four }),
+      shape('e', 'mask', [[1, 1], [2, 2]], { mask: 'bm90IGEgcG5n' })
+    ])
+  })
+  await openProject(root, null)
+  const [m] = await readDataset(root)
+  expect(m.masks.map((b) => b && [b.x, b.y, b.width, b.height, [...b.data].join('')])).toEqual([
+    [5, 6, 4, 4, '0110110110110110'],
+    // Python's round sends halves to the even number
+    [6, 6, 4, 4, '0110110110110110'],
+    [1, 1, 2, 2, '0111'],
+    [1, 1, 5, 5, '0110011010101100110000000'],
+    null
+  ])
+  expect(checkDataset([m], { labels: null }).filter((i) => i.code === 'mask-undecodable').map((i) => i.shape)).toEqual([4])
+})
+
+describe('output folders and files', () => {
+  test('an -O folder is read for labels, and its files without an image are found; files that are not labels are not', async () => {
+    const root = folder(), out = folder()
+    for (const name of ['x.png', 'sub/y.png', 'z.png']) await png(path.join(root, name))
+    write(out, {
+      'x.json': labelme(path.relative(out, path.join(root, 'x.png')), [shape('car', 'rectangle', [[1, 1], [9, 9]])]),
+      'sub/y.xml': voc([['dog', [2, 2, 8, 8]]]),
+      'w.json': labelme(path.relative(out, path.join(root, 'w.png')), []),
+      'notes.json': JSON.stringify({ title: 'not labels' })
+    })
+    const selfie = await sharp({ create: { width: 4, height: 4, channels: 3, background: '#000' } }).png().toBuffer()
+    write(root, {
+      'old/q.json': labelme('../gone/q.png', []),
+      'caption.txt': 'a caption, not labels',
+      'settings.xml': '<config><a>1</a></config>',
+      'coco.json': JSON.stringify({ images: [], annotations: [], categories: [] }),
+      'selfie.json': labelme('selfie.png', [], { imageData: selfie.toString('base64') }),
+      'boxes/t.txt': '0 0.5 0.5 0.2 0.2\n',
+      'boxes/classes.txt': 'car\n'
+    })
+    await openProject(root, out)
+    const images = await readDataset(root)
+    expect(images.map((i) => [i.name, i.format, i.file && path.relative(out, i.file)])).toEqual([
+      ['sub/y.png', 'voc', path.join('sub', 'y.xml')], ['x.png', 'labelme', 'x.json'], ['z.png', null, null]
+    ])
+    expect(of(images, 'x.png').labelImage).toBe('x.png')
+    expect(await orphanLabels(root)).toEqual([
+      { file: 'boxes/t.txt', names: null },
+      { file: 'old/q.json', names: 'gone/q.png' },
+      { file: path.join(out, 'w.json'), names: 'w.png' }
+    ])
+  })
+
+  test('two images beside one label file, or every image in one -O LabelMe file, share it; one CreateML file keeps them apart', async () => {
+    const root = folder()
+    await png(path.join(root, 'a.png'))
+    await sharp({ create: { width: 40, height: 30, channels: 3, background: '#123456' } }).jpeg().toFile(path.join(root, 'a.jpg'))
+    await png(path.join(root, 'b.png'))
+    write(root, { 'a.json': labelme('a.png', []) })
+    await openProject(root, null)
+    expect(labelFileClashes(await readDataset(root))).toEqual([{ file: path.join(root, 'a.json'), images: ['a.jpg', 'a.png'] }])
+
+    const one = path.join(folder(), 'labels.json')
+    writeFileSync(one, labelme('b.png', []))
+    await openProject(root, one)
+    expect(labelFileClashes(await readDataset(root))).toEqual([{ file: one, images: ['a.jpg', 'a.png', 'b.png'] }])
+    writeFileSync(one, JSON.stringify([...JSON.parse(createml('a.png', ['cat'])), ...JSON.parse(createml('b.png', ['dog']))]))
+    const listed = await readDataset(root)
+    expect(labelFileClashes(listed)).toEqual([])
+    expect(listed.map((i) => [i.name, i.format, i.shapes.map((s) => s.label)])).toEqual([['a.jpg', null, []], ['a.png', 'createml', ['cat']], ['b.png', 'createml', ['dog']]])
+  })
+})
+
+describe('reading again', () => {
+  let root = ''
+  beforeAll(async () => {
+    root = folder()
+    for (const name of ['m.png', 'n.png', 'yolo/o.png']) await png(path.join(root, name))
+    write(root, {
+      'm.json': labelme('m.png', [shape('car', 'rectangle', [[1, 1], [9, 9]])]),
+      'n.xml': voc([['dog', [1, 1, 9, 9]]]),
+      'yolo/o.txt': '1 0.5 0.5 0.2 0.2\n',
+      'yolo/classes.txt': 'cat\ndog\n'
+    })
+    await openProject(root, null)
+  })
+  const same = (a: DatasetImage[], b: DatasetImage[]) => a.map((image, k) => image === b[k])
+
+  test('only label files, images and classes.txt that changed are read again', async () => {
+    const first = await readDataset(root)
+    const second = await readDataset(root)
+    expect(same(second, first)).toEqual([true, true, true])
+    write(root, { 'n.xml': voc([['dog', [1, 1, 9, 9]], ['cat', [2, 2, 8, 8]]]) })
+    const third = await readDataset(root)
+    expect(same(third, second)).toEqual([true, false, true])
+    expect(third[1].shapes.map((s) => s.label)).toEqual(['dog', 'cat'])
+    await png(path.join(root, 'm.png'), 50, 30)
+    const fourth = await readDataset(root)
+    expect(same(fourth, third)).toEqual([false, true, true])
+    expect(fourth[0].width).toBe(50)
+    write(root, { 'yolo/classes.txt': 'cat\npuppy\n' })
+    const fifth = await readDataset(root)
+    expect(same(fifth, fourth)).toEqual([true, true, false])
+    expect(fifth[2].shapes[0].label).toBe('puppy')
+    forgetDataset(root)
+    expect(same(await readDataset(root), fifth)).toEqual([false, false, false])
+  })
+
+  test('the preferred format is read first when an image has files in two', async () => {
+    write(root, { 'n.json': labelme('n.png', [shape('bird', 'rectangle', [[1, 1], [9, 9]])]) })
+    expect((await readDataset(root))[1].format).toBe('labelme')
+    expect((await readDataset(root, { prefer: 'voc' }))[1].format).toBe('voc')
+    rmSync(path.join(root, 'n.json'))
+  })
+
+  test('progress is told, and a stop rejects with what was read kept for next time', async () => {
+    const told: number[][] = []
+    await readDataset(root, { onProgress: (done, total) => told.push([done, total]) })
+    expect(told[told.length - 1]).toEqual([3, 3])
+    const stop = new AbortController()
+    stop.abort()
+    await expect(readDataset(root, { signal: stop.signal })).rejects.toThrow(/abort/i)
+    expect(await readDataset(root)).toHaveLength(3)
+  })
+})
+
+test('identical image files are found; files of one size with other bytes are not', async () => {
+  const root = folder()
+  write(root, {
+    'p.bmp': bmp(8, 6, [200, 10, 10]), 'q.bmp': bmp(8, 6, [200, 10, 10]), 'sub/r.bmp': bmp(8, 6, [10, 200, 10]), 's.bmp': bmp(9, 6, [200, 10, 10]),
+    't.bmp': bmp(9, 6, [200, 10, 10])
+  })
+  await openProject(root, null)
+  const images = await readDataset(root)
+  expect(images.map((i) => [i.name, i.width, i.height])).toEqual([['p.bmp', 8, 6], ['q.bmp', 8, 6], ['s.bmp', 9, 6], ['sub/r.bmp', 8, 6], ['t.bmp', 9, 6]])
+  expect(await findDuplicateImages(root, images)).toEqual([['p.bmp', 'q.bmp'], ['s.bmp', 't.bmp']])
+})
+
+describe('rewriting labels', () => {
+  let root = ''
+  beforeAll(async () => {
+    root = folder()
+    for (const name of ['a.png', 'b.png', 'd.png', 'e.png', 'f.png', 'yolo/c.png']) await png(path.join(root, name))
+    await sharp({ create: { width: 40, height: 30, channels: 3, background: '#654321' } }).jpeg().toFile(path.join(root, 'f.jpg'))
+    write(root, {
+      'a.json': labelme('a.png', [shape('dog', 'rectangle', [[1, 1], [9, 9]]), shape('cat', 'polygon', [[1, 1], [9, 1], [5, 9]])],
+        { flags: { night: true }, custom: { kept: true }, verified: true }),
+      'b.xml': voc([['dog', [2, 3, 20, 25]], ['cat', [1, 1, 5, 5]]], { depth: 1, verified: true }),
+      'd.json': createml('d.png', ['dog'], true),
+      'e.json': '{"shapes": [',
+      'f.json': labelme('f.png', [shape('dog', 'rectangle', [[1, 1], [9, 9]])]),
+      'yolo/c.txt': '1 0.512345 0.5 0.25 0.25\n0 0.2 0.2 0.1 0.1\n',
+      'yolo/classes.txt': 'cat\ndog\n'
+    })
+    await openProject(root, null)
+  })
+
+  test("a label renamed across the folder keeps each file's format and all it holds, with the old files in the trash", async () => {
+    const before = Object.fromEntries(['a.json', 'b.xml', 'd.json', 'yolo/c.txt'].map((f) => [f, read(root, f)]))
+    const plan = renameLabel(await readDataset(root), 'dog', 'puppy', labelFileClashes(await readDataset(root)))
+    expect(plan.images.map((i) => i.name)).toEqual(['a.png', 'b.png', 'd.png', 'yolo/c.png'])
+    expect(plan.skipped.map((s) => s.name)).toEqual(['e.png', 'f.jpg', 'f.png'])
+    trashed = []
+    for (const image of plan.images) {
+      const flags: Record<string, boolean> = image.name === 'a.png' ? { night: false } : {}
+      expect((await rewriteLabels(root, image.name, image.shapes, flags)).item.classes).toMatchObject({ puppy: 1 })
+    }
+    expect(trashed).toEqual(['a.json', 'b.xml', 'd.json', 'yolo/c.txt'].map((f) => path.join(root, f)))
+    // The trash holds the files as they were
+    expect(readdirSync(bin).map((f) => readFileSync(path.join(bin, f), 'utf8')).sort()).toEqual(Object.values(before).sort())
+
+    const a = parseLabelFile(read(root, 'a.json'))
+    expect(a.shapes.map((s) => s.label)).toEqual(['puppy', 'cat'])
+    expect(a.flags).toEqual({ night: false })
+    expect(a.other).toEqual({ custom: { kept: true }, verified: true })
+    const b = readVoc(read(root, 'b.xml'))
+    expect([b.verified, b.shapes.map((s) => s.label)]).toEqual([true, ['puppy', 'cat']])
+    expect(read(root, 'b.xml')).toContain('<width>40</width>\n\t\t<height>30</height>\n\t\t<depth>1</depth>')
+    const d = readCreateML(read(root, 'd.json'), 'd.png')
+    expect([d.verified, d.shapes.map((s) => s.label)]).toEqual([true, ['puppy']])
+    // A box that didn't move keeps its numbers: only its class does, and the new name goes last in classes.txt
+    expect(read(root, 'yolo/c.txt')).toBe('2 0.512345 0.5 0.25 0.25\n0 0.2 0.2 0.1 0.1\n')
+    expect(read(root, 'yolo/classes.txt')).toBe('cat\ndog\npuppy\n')
+    expect(readdirSync(root).filter((f) => f.endsWith('.tmp'))).toEqual([])
+  })
+
+  test('a rename given as a change is made to what the file holds as it is written, so edits since the folder was read stay', async () => {
+    const read1 = of(await readDataset(root), 'a.png')
+    write(root, { 'a.json': labelme('a.png', [shape('puppy', 'rectangle', [[1, 1], [9, 9]]), shape('owl', 'point', [[3, 3]])], { flags: { night: true } }) })
+    const done = await rewriteLabels(root, 'a.png', renaming('puppy', 'dog'), null)
+    const a = parseLabelFile(read(root, 'a.json'))
+    expect(read1.shapes.map((s) => s.label)).toEqual(['puppy', 'cat'])
+    expect([a.shapes.map((s) => s.label), a.flags]).toEqual([['dog', 'owl'], { night: true }])
+    expect(done.item.classes).toEqual({ dog: 1, owl: 1 })
+  })
+
+  test("a label file that can't be read, or that two images share, is never written over", async () => {
+    trashed = []
+    await expect(rewriteLabels(root, 'e.png', [], {})).rejects.toThrow("e.json can't be read, so it's left unchanged: It isn't valid JSON")
+    expect(read(root, 'e.json')).toBe('{"shapes": [')
+    await expect(rewriteLabels(root, 'f.png', [], {})).rejects.toThrow("f.json holds the labels of other images too, so it's left unchanged")
+    await expect(rewriteLabels(root, 'yolo/c.png', [], {}, 'voc')).resolves.toMatchObject({ format: 'yolo' })
+    expect(trashed).toEqual([path.join(root, 'yolo', 'c.txt')])
+  })
+
+  test('when the old file can not go to the trash, it stays as it was and nothing is left behind', async () => {
+    const text = read(root, 'a.json')
+    setTrash(async () => {
+      throw new Error('no trash here')
+    })
+    try {
+      await expect(rewriteLabels(root, 'a.png', [], {})).rejects.toThrow("a.json couldn't go to the trash, so it's left unchanged: no trash here")
+    } finally {
+      setTrash(toBin)
+    }
+    expect(read(root, 'a.json')).toBe(text)
+    expect(readdirSync(root).filter((f) => f.endsWith('.tmp'))).toEqual([])
+  })
+})
+
+test('2000 images read in a few seconds, and again from the cache faster still', async () => {
+  const root = folder()
+  const tiny = await sharp({ create: { width: 8, height: 6, channels: 3, background: '#406080' } }).png().toBuffer()
+  for (let k = 0; k < 2000; k++) {
+    writeFileSync(path.join(root, `${k}.png`), tiny)
+    writeFileSync(path.join(root, `${k}.json`), labelme(`${k}.png`, [shape('car', 'rectangle', [[1, 1], [5, 4]])], { imageWidth: 8, imageHeight: 6 }))
+  }
+  await openProject(root, null)
+  let started = performance.now()
+  const images = await readDataset(root)
+  const first = performance.now() - started
+  started = performance.now()
+  await readDataset(root)
+  const again = performance.now() - started
+  console.info(`readDataset: 2000 images in ${Math.round(first)} ms, ${Math.round(again)} ms from the cache`)
+  expect(images.every((i) => i.width === 8 && i.shapes.length === 1)).toBe(true)
+  expect(first).toBeLessThan(20000)
+  expect(again).toBeLessThan(first)
+})

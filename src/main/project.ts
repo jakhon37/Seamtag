@@ -205,9 +205,21 @@ let trash = (file: string) => fs.rm(file, { force: true })
 export function setTrash(fn: (file: string) => Promise<void>) {
   trash = fn
 }
+/** Moves a file to the trash the window set, where it can be restored from */
+export const sendToTrash = (file: string) => trash(file)
 
 export function rootsOpen() {
   return [...roots.keys()]
+}
+
+/**
+ * An open folder as a whole-folder pass reads it: its images in list order, where their
+ * labels go (-O folder or file), the images kept inside their label files, and the file names
+ * that more than one image has
+ */
+export function folderOf(dir: string) {
+  const r = getRoot(dir)
+  return { dir: r.dir, images: [...r.images.keys()], outputDir: r.outputDir, outputFile: r.outputFile, embedded: new Map(r.embedded), shared: new Set(r.shared) }
 }
 
 async function scan(dir: string): Promise<string[]> {
