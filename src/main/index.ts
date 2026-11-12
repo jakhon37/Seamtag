@@ -8,7 +8,7 @@ import {
 } from './checking'
 import { forgetDataset } from './dataset'
 import {
-  type ExportOptions, type ExportProgress, folderProblem, keypointsFromFolder, moreIssues, preflight, readKeypoints, runExport, saveKeypoints
+  type ExportOptions, type ExportProgress, folderProblem, forgetChecks, keypointsFromFolder, moreIssues, preflight, readKeypoints, runExport, saveKeypoints
 } from './export'
 import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
@@ -229,7 +229,9 @@ function registerIpc() {
     return { ...options, labels: options.labels ?? [] }
   }
   const keypointsFilter = [{ name: 'Keypoints files', extensions: ['yaml', 'yml'] }]
-  ipcMain.handle('export:check', (_e, root: string, options: ExportOptions) => preflight(root, exportOptions(options), exportJob()))
+  // A check given the id of the last check's read uses that read again; the window gives a new one when it opens and after an export fails
+  ipcMain.handle('export:check', (_e, root: string, options: ExportOptions, read: unknown) =>
+    preflight(root, exportOptions(options), { ...exportJob(), read: typeof read === 'string' ? read : undefined }))
   ipcMain.handle('export:issues', (_e, id: number, key: string, from: number) => moreIssues(id, key, from))
   ipcMain.handle('export:folder', async (_e, root: string) => {
     const r = await dialog.showOpenDialog(win!, { title: 'Export to a new or empty folder', defaultPath: path.dirname(root), properties: ['openDirectory', 'createDirectory'] })
@@ -246,7 +248,11 @@ function registerIpc() {
   ipcMain.handle('export:make-keypoints', async (_e, root: string, prefer: LabelFormat) => {
     const schema = await keypointsFromFolder(root, prefer)
     if (!schema) throw new Error('The folder has no posed objects to make a keypoints file from: give a box and its points one group_id')
-    const r = await dialog.showSaveDialog(win!, { title: 'Save the keypoints file', defaultPath: path.join(path.dirname(root), `${path.basename(root)}-keypoints.yaml`), filters: keypointsFilter })
+    // GTK's save dialog asks before replacing a file only when told to: a keypoints file edited by hand is worth the question
+    const r = await dialog.showSaveDialog(win!, {
+      title: 'Save the keypoints file', defaultPath: path.join(path.dirname(root), `${path.basename(root)}-keypoints.yaml`), filters: keypointsFilter,
+      properties: ['showOverwriteConfirmation']
+    })
     if (r.canceled || !r.filePath) return null
     const summary = await saveKeypoints(r.filePath, schema)
     keypointFiles.add(summary.file)
@@ -258,6 +264,11 @@ function registerIpc() {
     return result
   })
   ipcMain.handle('export:stop', () => exporting?.abort())
+  // The window closed: what its checks kept goes with it
+  ipcMain.handle('export:close', () => {
+    exporting?.abort()
+    forgetChecks()
+  })
   ipcMain.handle('export:reveal', (_e, out: string) => {
     if (out === exported) shell.showItemInFolder(out)
   })

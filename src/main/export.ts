@@ -1,10 +1,12 @@
 // File > Export dataset…: an open folder's labels written as a COCO or Ultralytics YOLO dataset.
 // Each image's own label file stays the working copy; the dataset is made from it, as X-AnyLabeling
 // and CVAT make theirs. A check first reads every label file and runs the format's writers over it
-// without writing anything, so the window shows what goes in and what the format can't hold. The
-// export then builds the dataset in a hidden folder beside the one chosen and moves it into place
-// at the end, so a stopped or failed export leaves nothing half written. Nothing is ever written
-// inside the image folder or the folder its label files are saved in.
+// without writing anything, so the window shows what goes in and what the format can't hold. While
+// the window is open, a check after a change of options uses that read and what the writers made
+// of each image again, so only what the change touches is worked out again. The export reads the
+// folder afresh, builds the dataset in a hidden folder beside the one chosen and moves it into
+// place at the end, so a stopped or failed export leaves nothing half written. Nothing is ever
+// written inside the image folder or the folder its label files are saved in.
 import { constants, createReadStream, promises as fs } from 'fs'
 import path from 'path'
 import { cocoLabels, type CocoDataset, type CocoEntry, type CocoInfo, type CocoTask, writeCoco } from '../shared/coco'
@@ -52,7 +54,17 @@ export type ExportOptions = {
 }
 
 export type ExportProgress = { phase: 'read' | 'check' | 'write' | 'finish'; done: number; total: number }
-type Context = { signal?: AbortSignal; onProgress?: (p: ExportProgress) => void; version?: string }
+type Context = {
+  signal?: AbortSignal
+  onProgress?: (p: ExportProgress) => void
+  version?: string
+  /**
+   * The read a check may use again: a check given the id the last check read the folder under
+   * uses that read, rather than reading every label file again. The window gives a new id when
+   * it opens and after an export fails. With none, the folder is read.
+   */
+  read?: string
+}
 
 /** A split as the export makes it: its name, its folder in the dataset, and what it holds */
 export type SplitCount = { name: string; folder: string; images: number; objects: number; backgrounds: number; posed: number }
@@ -108,6 +120,7 @@ const TITLES: Record<string, string> = {
   'export-no-split-folder': 'Images under no train, val or test folder',
   'export-no-train': 'No images for train',
   'export-no-val': 'No images for val',
+  'export-empty-split': 'Splits with no images',
   'export-never-labelled': 'Never-labelled images left out',
   'export-background': 'Never-labelled images as backgrounds',
   'export-ai-left-out': 'AI proposals left out',
@@ -165,6 +178,12 @@ const posixJoin = (...parts: string[]) => parts.filter(Boolean).join('/')
 // The main process answers the window between chunks of work, so its saves never wait on an export
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve))
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e))
+const keyOf = (i: Issue) => `${i.code}\0${i.image}\0${i.shape}\0${i.message}`
+// The same problem told twice, as both of COCO's files tell of an image that can't be read, is one
+function unique(issues: Issue[]): Issue[] {
+  const seen = new Set<string>()
+  return issues.filter((i) => !seen.has(keyOf(i)) && !!seen.add(keyOf(i)))
+}
 
 // Windows and macOS find a.PNG by the name a.png
 const FOLDS = process.platform === 'win32' || process.platform === 'darwin'
@@ -338,11 +357,41 @@ export async function saveKeypoints(file: string, schema: KeypointSchema): Promi
   return summaryOf(file, schema)
 }
 
+// Images held inside their label files
+
+// What an image file's first bytes say it is
+const KINDS: [string, (head: string) => boolean][] = [
+  ['.png', (h) => h.startsWith('\x89PNG')], ['.jpg', (h) => h.startsWith('\xff\xd8\xff')], ['.gif', (h) => h.startsWith('GIF8')],
+  ['.webp', (h) => h.startsWith('RIFF') && h.slice(8, 12) === 'WEBP'], ['.tif', (h) => h.startsWith('II*\0') || h.startsWith('MM\0*')],
+  ['.bmp', (h) => h.startsWith('BM')]
+]
+const namesIn = new WeakMap<DatasetImage, string>()
+
+/**
+ * The name an image goes into the dataset under: its own, or for one held inside its LabelMe
+ * file (photo.json), that file's with the extension the image's bytes give (photo.png), so the
+ * dataset holds an image file that COCO's and Ultralytics' readers take for one
+ */
+async function nameIn(root: string, image: DatasetImage): Promise<string> {
+  if (!isEmbedded(root, image.name)) return image.name
+  let name = namesIn.get(image)
+  if (name === undefined) {
+    const doc = await readDoc(imagePath(root, image.name)).catch(() => null)
+    // 24 characters of base64 are its first 18 bytes
+    const head = Buffer.from((doc?.imageData ?? '').slice(0, 24), 'base64').toString('latin1')
+    name = `${image.name.replace(/\.[^./]*$/, '')}${KINDS.find(([, is]) => is(head))?.[0] ?? '.png'}`
+    namesIn.set(image, name)
+  }
+  return name
+}
+
 // The check
 
 /** An image as the export takes it */
 type Item = {
   image: DatasetImage
+  /** The image as read, before AI proposals were left out of it, which what checks made of it is kept by */
+  read: DatasetImage
   /** The number in the label file of each of image's shapes, when AI proposals were left out of them */
   map: number[] | null
   split: string
@@ -388,9 +437,20 @@ function checkOptions(o: ExportOptions) {
   } else if (s.mode !== 'none' && s.mode !== 'folders') throw new Error('Unknown split')
 }
 
+// The folder as the last check read it, under the id the window gave: a check after a change of
+// options uses it again, rather than reading every label file again. Dropped when the window closes.
+let lastRead: { id: string; root: string; prefer: LabelFormat; images: DatasetImage[] } | null = null
+
+async function readFolder(root: string, prefer: LabelFormat, ctx: Context): Promise<DatasetImage[]> {
+  if (ctx.read !== undefined && lastRead?.id === ctx.read && lastRead.root === root && lastRead.prefer === prefer) return lastRead.images
+  const images = await readDataset(root, { prefer, signal: ctx.signal, onProgress: (done, total) => ctx.onProgress?.({ phase: 'read', done, total }) })
+  if (ctx.read !== undefined) lastRead = { id: ctx.read, root, prefer, images }
+  return images
+}
+
 async function gather(root: string, options: ExportOptions, ctx: Context): Promise<Gathered> {
   checkOptions(options)
-  const all = await readDataset(root, { prefer: options.prefer, signal: ctx.signal, onProgress: (done, total) => ctx.onProgress?.({ phase: 'read', done, total }) })
+  const all = await readFolder(root, options.prefer, ctx)
   const issues: Issue[] = []
   const notes: string[] = []
   const add = (severity: Severity, code: string, image: string | null, message: string, shape?: number) => issues.push(issue(severity, code, image, message, shape))
@@ -410,8 +470,8 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     }
   }
 
-  // Which images go in, and what of them
-  const chosen: Omit<Item, 'split' | 'rel'>[] = []
+  // Which images go in, what of them, and under what name
+  const chosen: (Omit<Item, 'split' | 'rel'> & { as: string })[] = []
   let left = 0
   for (const image of all) {
     const { name } = image
@@ -421,22 +481,24 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
       left++
       continue
     }
-    if (task && !isYoloImage(name)) {
+    const embedded = isEmbedded(root, name)
+    const as = embedded ? await nameIn(root, image) : name
+    if (task && !isYoloImage(as)) {
       add('warning', 'export-not-yolo-image', name, `${name} isn't an image Ultralytics reads, so it's left out`)
       continue
     }
     if (never) add('info', 'export-background', name, `${name} has never been labelled, so it goes in as a background, with no objects`)
-    if (leave && isEmbedded(root, name)) add('error', 'export-in-label-file', name, `${name} is held inside its label file, so it can't be left in place: copy the images instead`)
+    if (leave && embedded) add('error', 'export-in-label-file', name, `${name} is held inside its label file, so it can't be left in place: copy the images instead`)
     const ai: number[] = []
     image.shapes.forEach((s, i) => { if (isAi(s)) ai.push(i) })
     if (!ai.length) {
-      chosen.push({ image, map: null })
+      chosen.push({ image, read: image, map: null, as })
       continue
     }
     const proposals = plural(ai.length, 'AI proposal')
     if (!options.leaveAi) {
       add('error', 'export-ai-pending', name, `${name} has ${proposals} not yet accepted: accept or reject ${ai.length === 1 ? 'it' : 'them'}, or leave unaccepted proposals out`, ai[0])
-      chosen.push({ image, map: null })
+      chosen.push({ image, read: image, map: null, as })
       continue
     }
     const map = image.shapes.flatMap((s, i) => (isAi(s) ? [] : [i]))
@@ -445,17 +507,34 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
       continue
     }
     add('info', 'export-ai-left-out', name, `${name}: its ${proposals} not yet accepted ${ai.length === 1 ? 'is' : 'are'} left out`, ai[0])
-    chosen.push({ image: { ...image, shapes: map.map((i) => image.shapes[i]), masks: map.map((i) => image.masks[i]) }, map })
+    chosen.push({ image: { ...image, shapes: map.map((i) => image.shapes[i]), masks: map.map((i) => image.masks[i]) }, read: image, map, as })
   }
+
+  // Posed objects, and the order of the categories or classes: the folder's, so that changing the
+  // split never numbers them differently
+  if (options.format === 'coco-keypoints' && schema) {
+    for (const c of chosen) {
+      const found = poseInstances(c.image, schema)
+      c.poses = found.instances
+      for (const f of found.issues) issues.push(renumbered(f, c.map))
+    }
+  }
+  let classes: string[]
+  if (task === 'pose') {
+    const keys = schema ? poseYamlKeys(schema) : null
+    classes = keys?.names ?? []
+    if (keys) issues.push(...keys.issues)
+  } else classes = cocoLabels(options.labels, chosen.map((c): CocoEntry => ({ image: c.image, fileName: '', poses: c.poses })))
 
   // Splits
   const s = options.split
+  const placed = (c: (typeof chosen)[number], split: string, rel: string): Item => ({ image: c.image, read: c.read, map: c.map, poses: c.poses, split, rel })
   let items: Item[]
   let splits: string[]
   if (s.mode === 'none') {
     // CVAT 2.83 calls the one subset of a dataset that isn't split default
     const folder = coco ? 'default' : ''
-    items = chosen.map((c) => ({ ...c, split: folder, rel: c.image.name }))
+    items = chosen.map((c) => placed(c, folder, c.as))
     splits = [folder]
     if (!coco) notes.push("With no split, images/ and labels/ hold every image, and data.yaml's train and val both point at images, as Ultralytics needs a val entry.")
   } else if (s.mode === 'ratio') {
@@ -465,13 +544,13 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     const at = new Map<string, string>()
     let k = 0
     SPLITS.forEach((split, i) => { for (let n = 0; n < counts[i]; n++) at.set(order[k++].image.name, split) })
-    items = chosen.map((c) => ({ ...c, split: at.get(c.image.name)!, rel: c.image.name }))
+    items = chosen.map((c) => placed(c, at.get(c.image.name)!, c.as))
     splits = SPLITS.filter((_, i) => [s.train, s.val, s.test][i] > 0)
   } else {
     items = chosen.map((c) => {
-      const { split, rel } = splitFolder(c.image.name)
+      const { split, rel } = splitFolder(c.as)
       if (!split) add('warning', 'export-no-split-folder', c.image.name, `${c.image.name} isn't under a train, val or test folder, so it goes to train`)
-      return { ...c, split: split ?? 'train', rel }
+      return placed(c, split ?? 'train', rel)
     })
     splits = SPLITS.filter((split) => split === 'train' || items.some((i) => i.split === split))
   }
@@ -481,6 +560,16 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     const train = items.some((i) => i.split === 'train')
     if (!train) add('warning', 'export-no-train', null, `No images go to train, so data.yaml's train points at the ${items[0].split} images`)
     if (!items.some((i) => i.split === 'val')) add('warning', 'export-no-val', null, `No images go to val, so data.yaml's val points at the ${train ? 'train' : items[0].split} images, as Ultralytics needs a val entry`)
+  }
+  // A split with a share, or train when the folders decide, that no image goes to
+  if (s.mode !== 'none' && items.length) {
+    for (const split of splits) {
+      if (items.some((i) => i.split === split)) continue
+      if (coco) {
+        const files = options.format === 'coco-keypoints' ? `instances_${split}.json and person_keypoints_${split}.json hold` : `instances_${split}.json holds`
+        add('warning', 'export-empty-split', null, `No images go to ${split}, so ${files} none`)
+      } else if (split === 'test') add('warning', 'export-empty-split', null, 'No images go to test, so data.yaml names no test folder')
+    }
   }
 
   // Images, and YOLO's label files, that would land on one path
@@ -504,19 +593,6 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     add('error', 'export-shared-label-file', c.images[0], `${listed(c.images)} share one label file, ${path.basename(c.file)}, so whose labels are whose can't be told: give each image its own name`)
   }
 
-  // Posed objects, and the order of the categories or classes
-  if (options.format === 'coco-keypoints' && schema) {
-    for (const i of items) {
-      const found = poseInstances(i.image, schema)
-      i.poses = found.instances
-      for (const f of found.issues) issues.push(renumbered(f, i.map))
-    }
-  }
-  let classes: string[]
-  if (task === 'pose') {
-    classes = schema ? poseYamlKeys(schema).names : []
-    if (schema) issues.push(...poseYamlKeys(schema).issues)
-  } else classes = cocoLabels(options.labels, items.map((i): CocoEntry => ({ image: i.image, fileName: '', poses: i.poses })))
   if (task && task !== 'pose' && !classes.length && items.length) {
     add('error', 'export-no-classes', null, "No shape has a label to make a class of, and data.yaml needs at least one: label some shapes, or add labels to the label list")
   }
@@ -534,6 +610,138 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
   return { options, items, splits, classes, schema, keypoints, issues, notes }
 }
 
+/** What the format's writers make of one image: its issues, and what it adds to its split */
+type Tally = {
+  issues: Issue[]
+  /** The label of each object written */
+  objects: string[]
+  /** No object written */
+  background: boolean
+  posed: number
+}
+
+// COCO's own names, which CVAT 2.83's COCO export also writes: annotations/instances_<split>.json beside images/<split>/
+const COCO_FILES: Record<CocoTask, string> = { instances: 'instances', keypoints: 'person_keypoints' }
+const cocoTasks = (g: Gathered): CocoTask[] => (g.options.format === 'coco-keypoints' && g.schema ? ['instances', 'keypoints'] : ['instances'])
+// A check's COCO files are never written: what they say of the export is nobody's
+const NO_INFO: CocoInfo = { description: '', version: '', year: 0, date_created: '', contributor: '', url: '' }
+
+/** The issues of no one image: COCO's skeleton lines to keypoints a class doesn't have */
+const globalIssues = (g: Gathered): Issue[] => TASKS[g.options.format] ? []
+  : cocoTasks(g).flatMap((task) => writeCoco([], { task, labels: g.classes, info: NO_INFO, schema: g.schema ?? undefined }).issues)
+
+/** An image's YOLO label file, and its tally */
+function yoloRows(g: Gathered, i: Item): { text: string; tally: Tally } {
+  const task = TASKS[g.options.format]!
+  // With no keypoints file there are no pose rows to make: the check says so, and nothing is exported
+  if (task === 'pose' && !g.schema) return { text: '', tally: { issues: [], objects: [], background: false, posed: 0 } }
+  const rows = labelRows(i.image, task, g.classes, g.schema ?? undefined)
+  const objects: string[] = []
+  for (const line of rows.text.split('\n')) if (line) objects.push(g.classes[Number(line.slice(0, line.indexOf(' ')))])
+  return { text: rows.text, tally: { issues: unique(rows.issues.map((f) => renumbered(f, i.map))), objects, background: !rows.rows, posed: task === 'pose' ? rows.rows : 0 } }
+}
+
+/**
+ * COCO's files for a chunk of images, each image going in under the file name given, and each
+ * image's tally. Issues of no one image go in `global`.
+ */
+function cocoChunk(g: Gathered, part: Item[], names: string[], info: CocoInfo, global: Map<string, Issue>) {
+  const entries = part.map((i, k): CocoEntry => ({ image: i.image, fileName: names[k], poses: i.poses }))
+  const at = new Map(part.map((i, k) => [i.image.name, k]))
+  const tallies: Tally[] = part.map(() => ({ issues: [], objects: [], background: true, posed: 0 }))
+  const datasets: [CocoTask, CocoDataset][] = []
+  for (const task of cocoTasks(g)) {
+    const { dataset, issues } = writeCoco(entries, { task, labels: g.classes, info, schema: g.schema ?? undefined })
+    for (const f of issues) {
+      const k = f.image === null ? undefined : at.get(f.image)
+      if (k === undefined) global.set(keyOf(f), f)
+      else tallies[k].issues.push(renumbered(f, part[k].map))
+    }
+    // writeCoco lists the images it takes in the order given, leaving out those it can't read
+    const of = new Map<number, number>()
+    let k = 0
+    for (const im of dataset.images) {
+      while (k < names.length && names[k] !== im.file_name) k++
+      of.set(im.id, k++)
+    }
+    for (const a of dataset.annotations) {
+      const t = tallies[of.get(a.image_id) ?? -1]
+      if (!t) continue
+      t.background = false
+      if (task === 'instances') t.objects.push(g.classes[a.category_id - 1] ?? String(a.category_id))
+      else t.posed++
+    }
+    datasets.push([task, dataset])
+  }
+  for (const t of tallies) t.issues = unique(t.issues)
+  return { datasets, tallies }
+}
+
+/** The images and objects in each split and of each label, and the issues, from each item's tally */
+function summed(g: Gathered, tallies: Tally[], global: Issue[]) {
+  const splits = new Map(g.splits.map((folder): [string, SplitCount] => [folder, { name: folder || 'all', folder, images: 0, objects: 0, backgrounds: 0, posed: 0 }]))
+  const labels = new Map(g.classes.map((label) => [label, g.splits.map(() => 0)]))
+  const issues: Issue[] = []
+  g.items.forEach((item, k) => {
+    const t = tallies[k], at = g.splits.indexOf(item.split), split = splits.get(item.split)!
+    split.images++
+    split.objects += t.objects.length
+    split.posed += t.posed
+    if (t.background) split.backgrounds++
+    for (const label of t.objects) {
+      let row = labels.get(label)
+      if (!row) labels.set(label, (row = g.splits.map(() => 0)))
+      row[at]++
+    }
+    for (const f of t.issues) issues.push(f)
+  })
+  for (const f of unique(global)) issues.push(f)
+  return { splits: [...splits.values()], labels: [...labels].map(([label, objects]): LabelCount => ({ label, objects })), issues }
+}
+
+/** What checks made of each image under one setting of what the writers depend on, by image as read, and the issues of no one image */
+type Memo = { images: WeakMap<DatasetImage, Tally>; global: Map<string, Issue> }
+// The last few settings checks ran the writers under (format, AI proposals left out, classes and
+// keypoints): a check after a change of split, folder, images or backgrounds only sums the tallies
+// again, and only images read again since they changed go through the writers again. Dropped when
+// the window closes.
+const memos = new Map<string, Memo>()
+const MEMOS = 4
+
+function memoOf(g: Gathered): Memo {
+  const key = JSON.stringify([g.options.format, g.options.leaveAi, g.classes, g.schema])
+  const memo = memos.get(key) ?? { images: new WeakMap(), global: new Map() }
+  memos.delete(key)
+  memos.set(key, memo)
+  for (const old of memos.keys()) if (memos.size > MEMOS) memos.delete(old)
+  return memo
+}
+
+// Images a COCO file takes at a time as an export writes it; a check runs the writers over fewer
+// at a time, so main answers the window more often between them
+const CHUNK = 256
+const CHECKED = 64
+
+/** Each item's tally, from what an earlier check made of it where it can, and the issues of no one image */
+async function tallied(g: Gathered, ctx: Context): Promise<{ tallies: Tally[]; global: Issue[] }> {
+  const memo = memoOf(g)
+  const todo = g.items.filter((i) => !memo.images.has(i.read))
+  let told = 0
+  for (let start = 0; start < todo.length; start += CHECKED) {
+    ctx.signal?.throwIfAborted()
+    const part = todo.slice(start, start + CHECKED)
+    const made = TASKS[g.options.format] ? part.map((i) => yoloRows(g, i).tally) : cocoChunk(g, part, part.map((i) => i.image.name), NO_INFO, memo.global).tallies
+    part.forEach((i, k) => memo.images.set(i.read, made[k]))
+    const done = start + part.length
+    if (Date.now() - told >= 100 || done === todo.length) {
+      told = Date.now()
+      ctx.onProgress?.({ phase: 'check', done, total: todo.length })
+    }
+    await tick()
+  }
+  return { tallies: g.items.map((i) => memo.images.get(i.read)!), global: [...globalIssues(g), ...memo.global.values()] }
+}
+
 /** What an export writes as it goes: an image, a text file, a chunk of a COCO file */
 type Sink = {
   image(item: Item, at: string): Promise<void>
@@ -541,38 +749,26 @@ type Sink = {
   coco(split: string, task: CocoTask, dataset: CocoDataset): Promise<void>
 }
 
-const CHUNK = 256
-
 /**
  * The format's writers over every image, a split at a time and a chunk of images at a time,
- * counting what goes in and keeping what they report; with a sink, writing it all too
+ * writing what they make. Labels that changed since the check, so that a writer finds an
+ * error, stop it before that chunk is written.
  */
-async function convert(g: Gathered, ctx: Context, sink: Sink | null) {
-  const { options, items, classes } = g
+async function convert(g: Gathered, ctx: Context, sink: Sink) {
+  const { options, items } = g
   const task = TASKS[options.format]
-  const issues: Issue[] = []
-  const splits = new Map(g.splits.map((folder) => [folder, { name: folder || 'all', folder, images: 0, objects: 0, backgrounds: 0, posed: 0 }]))
-  const labels = new Map(classes.map((label) => [label, g.splits.map(() => 0)]))
-  const count = (split: string, label: string) => {
-    const at = g.splits.indexOf(split)
-    const row = labels.get(label) ?? labels.set(label, g.splits.map(() => 0)).get(label)!
-    row[at]++
-    splits.get(split)!.objects++
-  }
+  const tallies: Tally[] = []
+  const global = new Map(globalIssues(g).map((f) => [keyOf(f), f]))
   const info: CocoInfo = {
     description: `Exported by Seamtag ${ctx.version ?? ''}`.trim(), version: ctx.version ?? '', year: new Date().getFullYear(),
     date_created: new Date().toISOString(), contributor: '', url: ''
   }
   const imageAt = (i: Item) => (options.images === 'leave' ? i.image.name : posixJoin('images', i.split, i.rel))
-  const phase = sink ? 'write' : 'check'
-  let done = 0, told = 0
-  const progress = (n: number) => {
-    done += n
-    if (Date.now() - told >= 100 || done === items.length) {
-      told = Date.now()
-      ctx.onProgress?.({ phase, done, total: items.length })
-    }
+  const stopAt = (made: Tally[]) => {
+    const failed = made.flatMap((t) => t.issues).find((f) => f.severity === 'error')
+    if (failed) throw new Error(`The labels changed since they were checked, so the export stopped: ${failed.message}`)
   }
+  let done = 0, told = 0
   for (let start = 0; start < items.length;) {
     ctx.signal?.throwIfAborted()
     // A chunk is in one split: the items are in split order, and a chunk ends where its split does
@@ -580,65 +776,58 @@ async function convert(g: Gathered, ctx: Context, sink: Sink | null) {
     const end = chunk.findIndex((i) => i.split !== chunk[0].split)
     const part = end < 0 ? chunk : chunk.slice(0, end)
     start += part.length
-    const split = part[0].split
-    const stats = splits.get(split)!
-    stats.images += part.length
     if (task) {
-      const texts = part.map((i) => {
-        const rows = labelRows(i.image, task, classes, g.schema ?? undefined)
-        for (const f of rows.issues) issues.push(renumbered(f, i.map))
-        if (!rows.rows) stats.backgrounds++
-        for (const line of rows.text.split('\n')) if (line) count(split, classes[Number(line.slice(0, line.indexOf(' ')))])
-        if (task === 'pose') stats.posed += rows.rows
-        return rows.text
-      })
-      if (sink) {
-        await pool(part.map((i, k) => [i, texts[k]] as const), async ([i, text]) => {
-          const at = imageAt(i)
-          await sink.image(i, at)
-          await sink.text(labelPathFor(at), text)
-        }, ctx.signal)
-      }
+      const made = part.map((i) => yoloRows(g, i))
+      stopAt(made.map((m) => m.tally))
+      await pool(part.map((i, k) => [i, made[k].text] as const), async ([i, text]) => {
+        const at = imageAt(i)
+        await sink.image(i, at)
+        await sink.text(labelPathFor(at), text)
+      }, ctx.signal)
+      for (const m of made) tallies.push(m.tally)
     } else {
-      const entries = part.map((i): CocoEntry => ({ image: i.image, fileName: imageAt(i), poses: i.poses }))
-      const byName = new Map(part.map((i) => [i.image.name, i]))
-      const tasks: CocoTask[] = options.format === 'coco-keypoints' ? ['instances', 'keypoints'] : ['instances']
-      const objects = new Set<number>()
-      for (const t of tasks) {
-        if (t === 'keypoints' && !g.schema) continue
-        const { dataset, issues: found } = writeCoco(entries, { task: t, labels: classes, info, schema: g.schema ?? undefined })
-        for (const f of found) issues.push(renumbered(f, f.image === null ? null : byName.get(f.image)?.map ?? null))
-        for (const a of dataset.annotations) {
-          objects.add(a.image_id)
-          if (t === 'instances') count(split, classes[a.category_id - 1] ?? String(a.category_id))
-          else stats.posed++
-        }
-        if (sink) await sink.coco(split, t, dataset)
-      }
-      stats.backgrounds += part.length - objects.size
-      if (sink && options.images !== 'leave') await pool(part, (i) => sink.image(i, imageAt(i)), ctx.signal)
+      const made = cocoChunk(g, part, part.map(imageAt), info, global)
+      stopAt(made.tallies)
+      for (const [t, dataset] of made.datasets) await sink.coco(part[0].split, t, dataset)
+      if (options.images !== 'leave') await pool(part, (i) => sink.image(i, imageAt(i)), ctx.signal)
+      for (const t of made.tallies) tallies.push(t)
     }
-    progress(part.length)
+    done += part.length
+    if (Date.now() - told >= 100 || done === items.length) {
+      told = Date.now()
+      ctx.onProgress?.({ phase: 'write', done, total: items.length })
+    }
     await tick()
   }
-  // The same problem told twice, as both of COCO's files tell of an image that can't be read, is one
-  const seen = new Set<string>()
-  const unique = issues.filter((i) => {
-    const key = `${i.code}\0${i.image}\0${i.shape}\0${i.message}`
-    return !seen.has(key) && !!seen.add(key)
-  })
-  return { issues: unique, splits: [...splits.values()], labels: [...labels].map(([label, objects]) => ({ label, objects })) }
+  // A split no image goes to still gets its files, holding none, so whatever names them finds them
+  if (!task) {
+    for (const split of g.splits) {
+      if (items.some((i) => i.split === split)) continue
+      for (const t of cocoTasks(g)) await sink.coco(split, t, writeCoco([], { task: t, labels: g.classes, info, schema: g.schema ?? undefined }).dataset)
+    }
+  }
+  return { tallies, global: [...global.values()] }
 }
 
-/** Runs one at a time per worker, four workers: enough to keep a disk busy */
+/**
+ * Runs fn over the list, four at a time: enough to keep a disk busy. Once one fails or the
+ * export stops, no more start, and it settles only once those under way have, so nothing is
+ * still writing when what was written is removed. Throws the first failure.
+ */
 async function pool<T>(list: readonly T[], fn: (t: T) => Promise<void>, signal?: AbortSignal) {
   let next = 0
+  const failures: unknown[] = []
   await Promise.all(Array.from({ length: Math.min(4, list.length) }, async () => {
-    while (next < list.length) {
-      signal?.throwIfAborted()
-      await fn(list[next++])
+    while (next < list.length && !failures.length && !signal?.aborted) {
+      try {
+        await fn(list[next++])
+      } catch (e) {
+        failures.push(e)
+      }
     }
   }))
+  signal?.throwIfAborted()
+  if (failures.length) throw failures[0]
 }
 
 function grouped(issues: Issue[]) {
@@ -663,8 +852,9 @@ let checks = 0
  */
 export async function preflight(root: string, options: ExportOptions, ctx: Context = {}): Promise<Preflight> {
   const g = await gather(root, options, ctx)
-  const converted = await convert(g, ctx, null)
-  const all = [...g.issues, ...converted.issues]
+  const { tallies, global } = await tallied(g, ctx)
+  const sums = summed(g, tallies, global)
+  const all = [...g.issues, ...sums.issues]
   const groups = grouped(all)
   const id = ++checks
   lastCheck = { id, groups }
@@ -674,7 +864,7 @@ export async function preflight(root: string, options: ExportOptions, ctx: Conte
   })).sort((a, b) => rank(a.severity) - rank(b.severity) || b.count - a.count || byCode(a.title, b.title))
   const counts = { error: 0, warning: 0, info: 0 }
   for (const i of all) counts[i.severity]++
-  return { id, splits: converted.splits, labels: converted.labels, groups: list, counts, blocked: counts.error > 0, keypoints: g.keypoints, notes: g.notes }
+  return { id, splits: sums.splits, labels: sums.labels, groups: list, counts, blocked: counts.error > 0, keypoints: g.keypoints, notes: g.notes }
 }
 
 /** More of a check's issues of one kind, from the one given on; none once a newer check has run */
@@ -683,8 +873,16 @@ export function moreIssues(id: number, key: string, from: number, count = 200): 
   return (lastCheck.groups.get(key) ?? []).slice(from, from + count)
 }
 
+/** Drops what checks keep while the window is open: the folder's read, what the writers made of each image, and the last check's issues */
+export function forgetChecks() {
+  lastRead = null
+  memos.clear()
+  lastCheck = null
+}
+
 /** One COCO file written a chunk of images at a time, as writeCoco writes them all at once; its annotations wait in a file of their own until the last image is in */
 class CocoFile {
+  private started = false
   private images = 0
   private annotations = 0
   private categories: unknown[] = []
@@ -695,9 +893,10 @@ class CocoFile {
     return new CocoFile(file, side, await fs.open(file, 'wx'), await fs.open(side, 'wx'))
   }
   async add(d: CocoDataset) {
-    if (!this.images) {
+    if (!this.started) {
       await this.head.write(`{"info":${JSON.stringify(d.info)},"licenses":${JSON.stringify(d.licenses)},"images":[`)
       this.categories = d.categories
+      this.started = true
     }
     if (d.images.length) await this.head.write((this.images ? ',' : '') + d.images.map((im) => JSON.stringify({ ...im, id: im.id + this.images })).join(','))
     if (d.annotations.length) {
@@ -719,14 +918,11 @@ class CocoFile {
   }
 }
 
-// COCO's own names, which CVAT 2.83's COCO export also writes: annotations/instances_<split>.json beside images/<split>/
-const COCO_FILES: Record<CocoTask, string> = { instances: 'instances', keypoints: 'person_keypoints' }
-
 /**
  * Writes the dataset into `out`, a new or empty folder outside the image folder: built in a
  * hidden folder beside it and moved into place at the end, or, where `out` is a drive of its
- * own, in it, emptied again if the export stops. Refuses while the check finds errors. Stopping
- * leaves nothing behind and resolves with `stopped`.
+ * own, in it, with what the export made removed again if it stops. Reads the folder afresh, and
+ * refuses while the check finds errors. Stopping leaves nothing behind and resolves with `stopped`.
  */
 export async function runExport(root: string, options: ExportOptions, out: string, ctx: Context = {}): Promise<ExportResult> {
   const problem = await folderProblem(root, out)
@@ -734,7 +930,7 @@ export async function runExport(root: string, options: ExportOptions, out: strin
   const stopped: ExportResult = { stopped: true, out, splits: [], images: { copied: 0, linked: 0, fellBack: 0, left: 0 }, files: 0, written: [], accepted: [], notes: [] }
   let g: Gathered
   try {
-    g = await gather(root, options, ctx)
+    g = await gather(root, options, { ...ctx, read: undefined })
   } catch (e) {
     if (ctx.signal?.aborted) return stopped
     throw e
@@ -748,6 +944,8 @@ export async function runExport(root: string, options: ExportOptions, out: strin
   const work = direct ? out : await fs.mkdtemp(path.join(parent, `.${path.basename(out)}.export-`))
   const counts = { copied: 0, linked: 0, fellBack: 0, left: options.images === 'leave' ? g.items.length : 0 }
   let files = 0
+  // What the export put at the top of `out`: in a drive of its own, all that a stop removes
+  const top = new Set<string>()
   const made = new Set<string>()
   const dir = async (file: string) => {
     const d = path.dirname(file)
@@ -759,6 +957,7 @@ export async function runExport(root: string, options: ExportOptions, out: strin
   const cocoFiles = new Map<string, CocoFile>()
   const sink: Sink = {
     async image(item, at) {
+      top.add(at.split('/')[0])
       const to = path.join(work, ...at.split('/'))
       await dir(to)
       if (isEmbedded(root, item.image.name)) {
@@ -770,6 +969,7 @@ export async function runExport(root: string, options: ExportOptions, out: strin
       files++
     },
     async text(at, text) {
+      top.add(at.split('/')[0])
       const to = path.join(work, ...at.split('/'))
       await dir(to)
       await fs.writeFile(to, text, { flag: 'wx' })
@@ -777,20 +977,28 @@ export async function runExport(root: string, options: ExportOptions, out: strin
     },
     async coco(split, task, dataset) {
       const at = posixJoin('annotations', `${COCO_FILES[task]}_${split}.json`)
+      top.add('annotations')
       let file = cocoFiles.get(at)
       if (!file) cocoFiles.set(at, (file = await CocoFile.open(path.join(work, ...at.split('/')))))
       await file.add(dataset)
     }
   }
+  // Nothing the export started is still writing by now (pool waits for those under way), so what
+  // it removes stays removed. Says what couldn't be.
   const cleanup = async () => {
     await Promise.allSettled([...cocoFiles.values()].map((f) => f.abandon()))
-    if (!direct) await fs.rm(work, { recursive: true, force: true })
-    else for (const e of await fs.readdir(work).catch(() => [] as string[])) await fs.rm(path.join(work, e), { recursive: true, force: true })
+    const left: string[] = []
+    for (const p of direct ? [...top].map((e) => path.join(work, e)) : [work]) {
+      try {
+        await fs.rm(p, { recursive: true, force: true, maxRetries: 3 })
+      } catch {
+        left.push(p)
+      }
+    }
+    return left
   }
   try {
     const converted = await convert(g, ctx, sink)
-    const failed = converted.issues.find((i) => i.severity === 'error')
-    if (failed) throw new Error(`The labels changed since they were checked, so the export stopped: ${failed.message}`)
     ctx.onProgress?.({ phase: 'finish', done: 0, total: 1 })
     const written: string[] = []
     for (const [at, file] of cocoFiles) {
@@ -808,6 +1016,7 @@ export async function runExport(root: string, options: ExportOptions, out: strin
         names: g.classes, train: posixJoin('images', train), val: posixJoin('images', used.includes('val') ? 'val' : train),
         test: used.includes('test') ? 'images/test' : null, kptShape: pose?.kptShape ?? null, flipIdx: pose?.flipIdx ?? null, kptNames: pose?.kptNames ?? null
       })
+      top.add('data.yaml')
       await fs.writeFile(path.join(work, 'data.yaml'), yamlText, { flag: 'wx' })
       written.push('data.yaml')
       files++
@@ -819,27 +1028,39 @@ export async function runExport(root: string, options: ExportOptions, out: strin
       await fs.rename(work, out)
     }
     ctx.onProgress?.({ phase: 'finish', done: 1, total: 1 })
-    const accepted = [...grouped([...g.issues, ...converted.issues])].map(([, list]) => ({ severity: list[0].severity, title: titleOf(list[0].code, list[0].severity), count: list.length }))
+    const sums = summed(g, converted.tallies, converted.global)
+    const accepted = [...grouped([...g.issues, ...sums.issues])].map(([, list]) => ({ severity: list[0].severity, title: titleOf(list[0].code, list[0].severity), count: list.length }))
       .sort((a, b) => SEVERITIES.indexOf(a.severity) - SEVERITIES.indexOf(b.severity) || b.count - a.count)
-    return { stopped: false, out, splits: converted.splits, images: counts, files, written: written.sort(byCode), accepted, notes: g.notes }
+    return { stopped: false, out, splits: sums.splits, images: counts, files, written: written.sort(byCode), accepted, notes: g.notes }
   } catch (e) {
-    await cleanup()
-    if (ctx.signal?.aborted) return stopped
-    throw e
+    const left = await cleanup()
+    // The export's own failure is what's told, with what of it couldn't be removed
+    const rest = left.length ? ` What it wrote couldn't all be removed: delete ${left.join(' and ')} yourself.` : ''
+    if (ctx.signal?.aborted) {
+      if (!rest) return stopped
+      throw new Error(`The export stopped.${rest}`)
+    }
+    if (!rest) throw e
+    throw new Error(`${reason(e).replace(/\.$/, '')}.${rest}`, { cause: e })
   }
 }
 
-/** An image copied, or hard-linked and copied where a link can't be made, as across drives or on file systems without links */
+/**
+ * An image copied, or hard-linked and copied where a link can't be made, as across drives or on
+ * file systems without links. A link is to the file itself: an image that's a symbolic link (as
+ * in git-annex and DVC folders) is followed first, so the dataset never holds the link.
+ */
 async function putImage(from: string, to: string, link: boolean): Promise<'copied' | 'linked' | 'fellBack'> {
+  const file = await fs.realpath(from)
   if (link) {
     try {
-      await fs.link(from, to)
+      await fs.link(file, to)
       return 'linked'
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'EEXIST') throw e
     }
   }
   // A copy shares the file's blocks until either changes where the file system can (APFS, Btrfs, XFS)
-  await fs.copyFile(from, to, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE)
+  await fs.copyFile(file, to, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE)
   return link ? 'fellBack' : 'copied'
 }

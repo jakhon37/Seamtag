@@ -1,4 +1,4 @@
-import { existsSync, promises as fsp, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
+import { existsSync, promises as fsp, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
@@ -6,7 +6,7 @@ import yaml from 'js-yaml'
 import { afterAll, afterEach, describe, expect, test, vi } from 'vitest'
 import { readDataset } from '../../src/main/dataset'
 import {
-  type ExportOptions, folderProblem, keypointSchemaOf, moreIssues, preflight, runExport, shareOut, shuffled, splitFolder
+  type ExportOptions, type ExportProgress, folderProblem, forgetChecks, keypointSchemaOf, moreIssues, preflight, runExport, shareOut, shuffled, splitFolder
 } from '../../src/main/export'
 import { setCacheDir } from '../../src/main/images'
 import { encodeMask } from '../../src/main/masks'
@@ -152,6 +152,53 @@ describe('COCO', () => {
     expect(result.notes[0]).toBe(`Images stay where they are: each file_name is the image's path in the open folder, so use that folder (${dir}) as the image root.`)
     await expect(runExport(dir, options({ format: 'yolo-detect', images: 'leave' }), newFolder())).rejects.toThrow('Only COCO can leave the images where they are')
   })
+
+  test('by ratio, a split with a share but no images still gets its file, holding none, and the check says so first', async () => {
+    const files: Record<string, unknown[]> = {}
+    for (let i = 0; i < 5; i++) files[`e${i}.png`] = [square('cat', 1, 1)]
+    const dir = await folderWith(files)
+    const split = { mode: 'ratio', train: 80, val: 10, test: 10, seed: 3 } as const
+    const check = await preflight(dir, options({ split }))
+    expect(check.splits.map((s) => [s.name, s.images])).toEqual([['train', 4], ['val', 1], ['test', 0]])
+    expect(check.groups.find((g) => g.code === 'export-empty-split')!.issues.map((i) => i.message)).toEqual(['No images go to test, so instances_test.json holds none'])
+    const out = newFolder()
+    const result = await runExport(dir, options({ split }), out, { version: '1.0.0' })
+    expect(result.written).toEqual(['annotations/instances_test.json', 'annotations/instances_train.json', 'annotations/instances_val.json'])
+    const empty = json(out, 'annotations/instances_test.json')
+    expect(empty).toMatchObject({ images: [], annotations: [], categories: [{ id: 1, name: 'cat', supercategory: '' }] })
+    expect(text(out, 'annotations/instances_test.json')).toBe(writeCoco([], { task: 'instances', labels: ['cat'], info: empty.info }).json)
+    expect(result.accepted).toContainEqual({ severity: 'warning', title: 'Splits with no images', count: 1 })
+    // YOLO says so too, and data.yaml names no test folder
+    const yolo = await preflight(dir, options({ format: 'yolo-detect', split }))
+    expect(yolo.groups.find((g) => g.code === 'export-empty-split')!.issues.map((i) => i.message)).toEqual(['No images go to test, so data.yaml names no test folder'])
+  })
+
+  test("an image held inside its LabelMe file goes in under that file's name, with the extension its bytes give", async () => {
+    const base = folder()
+    const file = path.join(base, 'photo.json')
+    const hold = (bytes: Buffer) => writeFileSync(file, JSON.stringify({
+      version: '5.5.0', flags: {}, shapes: [square('cat', 2, 2)], imagePath: 'gone/photo.bmp', imageData: bytes.toString('base64'), imageHeight: 30, imageWidth: 40
+    }))
+    const pixels = () => sharp({ create: { width: 40, height: 30, channels: 3, background: '#336699' } })
+    const png = await pixels().png().toBuffer()
+    hold(png)
+    const { root } = await openProject(file, null)
+    const coco = newFolder()
+    await runExport(root, options(), coco)
+    expect(filesIn(coco)).toEqual(['annotations/instances_default.json', 'images/default/photo.png'])
+    expect(json(coco, 'annotations/instances_default.json').images[0].file_name).toBe('images/default/photo.png')
+    expect(readFileSync(path.join(coco, 'images/default/photo.png'))).toEqual(png)
+    const yolo = newFolder()
+    await runExport(root, options({ format: 'yolo-detect' }), yolo)
+    expect(filesIn(yolo)).toEqual(['data.yaml', 'images/photo.png', 'labels/photo.txt'])
+    expect(text(yolo, 'labels/photo.txt')).toBe('0 0.175000 0.233333 0.250000 0.333333\n')
+    // A JPEG held inside it goes in as photo.jpg
+    hold(await pixels().jpeg().toBuffer())
+    await openProject(file, null)
+    const jpeg = newFolder()
+    await runExport(root, options({ format: 'yolo-detect' }), jpeg)
+    expect(filesIn(jpeg)).toEqual(['data.yaml', 'images/photo.jpg', 'labels/photo.txt'])
+  })
 })
 
 describe('YOLO', () => {
@@ -204,6 +251,24 @@ describe('YOLO', () => {
     await expect(runExport(dir, options({ format: 'yolo-detect', backgrounds: true }), newFolder())).rejects.toThrow(/a\.jpg and a\.png would share one label file/)
     // COCO's images keep their names whole, so it can take both
     expect((await preflight(dir, options({ backgrounds: true }))).blocked).toBe(false)
+  })
+
+  test('pose with no keypoints file: the check says the file is needed, rather than failing', async () => {
+    const dir = await folderWith({ 'a.png': [shape('person', 'rectangle', [[4, 4], [20, 24]], { group_id: 2 }), shape('nose', 'point', [[12, 10]], { group_id: 2 })] })
+    const check = await preflight(dir, options({ format: 'yolo-pose' }))
+    expect(check.blocked).toBe(true)
+    expect(codes(check)).toEqual([['error', 'export-no-keypoints', 1]])
+  })
+
+  test("classes are numbered in the folder's order, whatever split the seed makes", async () => {
+    const dir = await folderWith({ 'p0.png': [square('bird', 1, 1)], 'p1.png': [square('ant', 1, 1)] })
+    // A seed that puts p1.png in train and p0.png in val
+    const seed = Array.from({ length: 50 }, (_, k) => k).find((k) => shuffled(['p0.png', 'p1.png'], k)[0] === 'p1.png')!
+    const out = newFolder()
+    await runExport(dir, options({ format: 'yolo-detect', split: { mode: 'ratio', train: 50, val: 50, test: 0, seed } }), out)
+    expect(filesIn(out).filter((f) => f.startsWith('labels/'))).toEqual(['labels/train/p1.txt', 'labels/val/p0.txt'])
+    expect(yaml.load(text(out, 'data.yaml'))).toMatchObject({ names: { 0: 'bird', 1: 'ant' } })
+    expect(text(out, 'labels/train/p1.txt').split(' ')[0]).toBe('1')
   })
 })
 
@@ -315,6 +380,24 @@ describe('images', () => {
     expect(readFileSync(path.join(other, 'images/default/a.png'))).toEqual(readFileSync(path.join(dir, 'a.png')))
   })
 
+  test('an image that is a symbolic link is hard-linked as the file it points to, so the dataset never holds the link', async () => {
+    const base = folder()
+    await picture(path.join(base, 'pool', 'x.png'))
+    const dir = path.join(base, 'imgs')
+    mkdirSync(dir)
+    // A relative link, as git-annex and DVC make them
+    symlinkSync(path.join('..', 'pool', 'x.png'), path.join(dir, 'a.png'), 'file')
+    writeFileSync(path.join(dir, 'a.json'), labelme('a.png', [square('cat', 1, 1)]))
+    await openProject(dir, null)
+    const out = newFolder()
+    const result = await runExport(dir, options({ format: 'yolo-detect', images: 'link' }), out)
+    expect(result.images).toEqual({ copied: 0, linked: 1, fellBack: 0, left: 0 })
+    const file = path.join(out, 'images', 'a.png')
+    expect(lstatSync(file).isSymbolicLink()).toBe(false)
+    expect(statSync(file).ino).toBe(statSync(path.join(base, 'pool', 'x.png')).ino)
+    expect(readFileSync(file)).toEqual(readFileSync(path.join(base, 'pool', 'x.png')))
+  })
+
   test('never-labelled images are left out unless chosen as backgrounds; images labelled with no shapes always go in', async () => {
     const dir = await folderWith({ 'a.png': [square('cat', 1, 1)], 'empty.png': [], 'never.png': null })
     const out = newFolder()
@@ -410,6 +493,78 @@ describe('what stops an export', () => {
     expect(await runExport(dir, options(), path.join(base, 'dataset'), { signal: stop.signal })).toMatchObject({ stopped: true })
     expect(readdirSync(base)).toEqual([])
   })
+
+  describe('while images are being written', () => {
+    // One image in each of 40 folders, so each image written makes folders of its own; copies
+    // under way end over the next 100 ms, as on a slow disk
+    const nested = async () => {
+      const files: Record<string, unknown[]> = {}
+      for (let i = 0; i < 40; i++) files[`d${i}/s.png`] = [square('cat', 1, 1)]
+      return folderWith(files)
+    }
+    const slowCopies = (then: (k: number) => void) => {
+      const copy = fsp.copyFile.bind(fsp)
+      const made = { copies: 0 }
+      vi.spyOn(fsp, 'copyFile').mockImplementation(async (...args: Parameters<typeof fsp.copyFile>) => {
+        const k = ++made.copies
+        await copy(...args)
+        then(k)
+        await new Promise((resolve) => setTimeout(resolve, 10 + (k % 4) * 30))
+      })
+      return made
+    }
+    const awhile = () => new Promise((resolve) => setTimeout(resolve, 400))
+
+    test("a failure stops the other writers before what was written is removed, nothing is left, and the failure is what's told", async () => {
+      const dir = await nested()
+      const made = slowCopies((k) => {
+        if (k === 6) throw Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' })
+      })
+      const base = folder()
+      await expect(runExport(dir, options({ format: 'yolo-detect' }), path.join(base, 'dataset'))).rejects.toThrow('ENOSPC: no space left on device')
+      const copies = made.copies
+      await awhile()
+      expect(made.copies).toBe(copies)
+      expect(readdirSync(base)).toEqual([])
+    })
+
+    test('Stop waits for the images under way, then leaves nothing behind', async () => {
+      const dir = await nested()
+      const stop = new AbortController()
+      slowCopies((k) => { if (k === 6) stop.abort() })
+      const base = folder()
+      expect(await runExport(dir, options({ format: 'yolo-detect' }), path.join(base, 'dataset'), { signal: stop.signal })).toMatchObject({ stopped: true })
+      await awhile()
+      expect(readdirSync(base)).toEqual([])
+    })
+
+    test('in a drive of its own, a failure or Stop removes only what the export made there, not what came in meanwhile', async () => {
+      const dir = await nested()
+      for (const how of ['fail', 'stop'] as const) {
+        const out = path.join(folder(), 'drive')
+        mkdirSync(out)
+        // The folder is a drive's root: a device of its own
+        const stat = fsp.stat.bind(fsp)
+        vi.spyOn(fsp, 'stat').mockImplementation(async (...args: Parameters<typeof fsp.stat>) => {
+          const s = await stat(...args)
+          return path.resolve(String(args[0])) === out ? Object.assign(s, { dev: Number(s.dev) + 1 }) : s
+        })
+        const stop = new AbortController()
+        slowCopies((k) => {
+          // Something else saves a file there meanwhile
+          if (k === 2) writeFileSync(path.join(out, 'notes.txt'), 'mine')
+          if (k === 6 && how === 'stop') stop.abort()
+          if (k === 6 && how === 'fail') throw Object.assign(new Error('ENOSPC: no space left on device, copyfile'), { code: 'ENOSPC' })
+        })
+        const run = runExport(dir, options({ format: 'yolo-detect' }), out, { signal: stop.signal })
+        if (how === 'fail') await expect(run).rejects.toThrow('ENOSPC')
+        else expect(await run).toMatchObject({ stopped: true })
+        await awhile()
+        expect(readdirSync(out)).toEqual(['notes.txt'])
+        vi.restoreAllMocks()
+      }
+    })
+  })
 })
 
 describe('the check', () => {
@@ -430,6 +585,42 @@ describe('the check', () => {
     expect(new Set([...lines.issues, ...rest].map((i) => i.image)).size).toBe(30)
     await preflight(dir, options({ format: 'yolo-detect' }))
     expect(moreIssues(check.id, lines.key, 20)).toEqual([])
+  })
+
+  test("a check with the last check's read id uses its read, and what the writers made of each image, again; a new id reads the folder again", async () => {
+    const dir = await folderWith({ 'train/a.png': [square('cat', 1, 1), shape('cat', 'line', [[1, 1], [5, 5]])], 'val/b.png': [square('dog', 2, 2)], 'c.png': null })
+    const phases: ExportProgress[] = []
+    const ctx = (read: string) => ({ read, onProgress: (p: ExportProgress) => phases.push(p) })
+    // What a check read and ran through the writers, by its progress: each phase and how many it went through
+    const work = () => [...new Set(phases.splice(0).map((p) => `${p.phase} ${p.total}`))]
+    const segment = options({ format: 'yolo-segment' })
+    await preflight(dir, segment, ctx('one'))
+    expect(work()).toEqual(['read 3', 'check 2'])
+    // Another split: nothing is read or run through the writers again, and the check is the one made afresh
+    const folders = { ...segment, split: { mode: 'folders' } } as const
+    const again = await preflight(dir, folders, ctx('one'))
+    expect(work()).toEqual([])
+    expect(again.splits.map((s) => [s.name, s.images, s.objects])).toEqual([['train', 1, 1], ['val', 1, 1]])
+    // Backgrounds: only the never-labelled image is new to the writers
+    await preflight(dir, { ...segment, backgrounds: true }, ctx('one'))
+    expect(work()).toEqual(['check 1'])
+    // Another format, and back: what the writers made under each is kept
+    await preflight(dir, options(), ctx('one'))
+    expect(work()).toEqual(['check 2'])
+    await preflight(dir, segment, ctx('one'))
+    expect(work()).toEqual([])
+    // A label file changed since: under the same id the check doesn't see it; under a new one the folder is read,
+    // and only that image goes through the writers again
+    writeFileSync(path.join(dir, 'val/b.json'), labelme('b.png', [square('dog', 2, 2), square('dog', 20, 10)]))
+    expect((await preflight(dir, segment, ctx('one'))).splits[0].objects).toBe(2)
+    expect(work()).toEqual([])
+    const fresh = await preflight(dir, folders, ctx('two'))
+    expect(work()).toEqual(['read 3', 'check 1'])
+    expect(fresh.splits.map((s) => s.objects)).toEqual([1, 2])
+    // Once the window closes nothing is kept, and the check made afresh is the same
+    forgetChecks()
+    expect(await preflight(dir, folders, ctx('two'))).toEqual({ ...fresh, id: expect.any(Number) })
+    expect(work()).toEqual(['read 3', 'check 2'])
   })
 
   test('a keypoints file made from the posed objects: each box with its points in the order first seen, and flip pairs where names say left and right', async () => {
