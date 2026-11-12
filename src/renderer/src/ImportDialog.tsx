@@ -1,4 +1,9 @@
-import type { LabelFormat } from './types'
+import { ChevronDown, ChevronRight, CircleAlert, FileJson, FileText, FolderOpen, Info, TriangleAlert, X } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import type { YoloTask } from '../../shared/ultralytics'
+import {
+  type ImportPolicy, type ImportPreview, type ImportProgress, type ImportReport, type ImportRequest, type IssueGroup, type LabelFormat, plainError
+} from './types'
 
 // File > Import dataset…: a COCO or Ultralytics YOLO dataset's labels, written as each image's own label file
 type Props = {
@@ -12,12 +17,312 @@ type Props = {
   onImported: (names: string[]) => void
 }
 
-export default function ImportDialog({ onClose }: Props) {
+const TASKS: { task: YoloTask; label: string; title: string }[] = [
+  { task: 'detect', label: 'Detect', title: 'Boxes: a class and 4 numbers a row' },
+  { task: 'segment', label: 'Segment', title: 'Outlines: a class and the points of a polygon' },
+  { task: 'pose', label: 'Pose', title: 'A box and keypoints a row' },
+  { task: 'obb', label: 'OBB', title: 'Rotated boxes: a class and 4 corners' }
+]
+const POLICIES: { policy: ImportPolicy; label: string }[] = [
+  { policy: 'skip', label: 'Skip them' }, { policy: 'add', label: 'Add shapes' }, { policy: 'replace', label: 'Replace' }
+]
+
+const count = (n: number) => n.toLocaleString('en-GB')
+const some = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`
+const ICONS = { error: CircleAlert, warning: TriangleAlert, info: Info }
+
+/** Issues of one kind, folded: opened, their messages, and more of them a page at a time */
+function Group({ group, list }: { group: IssueGroup; list: 'issues' | 'skipped' }) {
+  const [open, setOpen] = useState(false)
+  const [rows, setRows] = useState(group.rows)
+  useEffect(() => setRows(group.rows), [group])
+  const Icon = ICONS[group.severity]
+  const more = async () => setRows([...rows, ...(await window.api.importRows(list, group.code, rows.length))])
   return (
-    <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="dialog" role="dialog" aria-label="Import dataset" onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') onClose() }}>
+    <div className={`import-group sev-${group.severity}`} data-code={group.code}>
+      <button aria-expanded={open} onClick={() => setOpen(!open)}>
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <Icon size={14} className="sev" aria-label={group.severity} />
+        <span className="name">{group.title}</span>
+        <span className="count">{count(group.count)}</span>
+      </button>
+      {open && (
+        <ul className="import-rows">
+          {rows.map((r, i) => <li key={i}>{r}</li>)}
+          {rows.length < group.count && (
+            <li><button className="more" onClick={more}>Show {count(Math.min(200, group.count - rows.length))} more</button></li>
+          )}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+function Groups({ groups, list }: { groups: IssueGroup[]; list: 'issues' | 'skipped' }) {
+  return <div className="import-groups">{groups.map((g) => <Group key={`${list}:${g.code}`} group={g} list={list} />)}</div>
+}
+
+function Labels({ rows }: { rows: { label: string; shapes: number; listed: boolean }[] }) {
+  if (!rows.length) return <p className="muted">No shapes.</p>
+  return (
+    <div className="import-labels">
+      <table>
+        <thead><tr><th>Label</th><th className="n">Shapes</th></tr></thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td>{r.label}{!r.listed && <span className="tag new" title="Not in the label list yet">new</span>}</td>
+              <td className="n">{count(r.shapes)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+// How many images a choice writes, of those the preview found
+const writes = (p: ImportPreview, policy: ImportPolicy) =>
+  p.fresh + (policy === 'skip' ? 0 : policy === 'add' ? p.labelled - p.emptyAdd : p.labelled)
+
+export default function ImportDialog({ root, format, labels, onClose, onImported }: Props) {
+  const [stage, setStage] = useState<'start' | 'busy' | 'preview' | 'report'>('start')
+  const [request, setRequest] = useState<ImportRequest | null>(null)
+  const [preview, setPreview] = useState<ImportPreview | null>(null)
+  const [report, setReport] = useState<ImportReport | null>(null)
+  const [progress, setProgress] = useState<ImportProgress | null>(null)
+  const [error, setError] = useState('')
+  const [policy, setPolicy] = useState<ImportPolicy>('skip')
+  // When the rows fit more than one task, the window asks: a click on one says which
+  const [confirmed, setConfirmed] = useState(false)
+  const busy = stage === 'busy'
+
+  useEffect(() => window.api.onImportProgress(setProgress), [])
+  // What was read is let go of with the window
+  useEffect(() => () => void window.api.importClose(), [])
+
+  const read = async (req: ImportRequest) => {
+    setError('')
+    setProgress(null)
+    setStage('busy')
+    try {
+      const p = await window.api.importRead(root, req)
+      // Stopped: what was read is gone, so it starts again
+      if (!p) {
+        setPreview(null)
+        setStage('start')
+        return
+      }
+      setRequest(req)
+      setPreview(p)
+      setStage('preview')
+    } catch (e) {
+      setError(plainError(e))
+      setPreview(null)
+      setStage('start')
+    }
+  }
+  const pick = async (kind: ImportRequest['kind'], how: 'file' | 'folder') => {
+    const file = kind === 'coco'
+      ? await window.api.pickFile('Choose a COCO file', [{ name: 'COCO files', extensions: ['json'] }])
+      : how === 'folder'
+        ? await window.api.pickFolder('Choose a YOLO dataset folder')
+        : await window.api.pickFile("Choose a YOLO dataset's data.yaml", [{ name: 'Ultralytics data.yaml', extensions: ['yaml', 'yml'] }])
+    if (!file) return
+    setPolicy('skip')
+    setConfirmed(false)
+    read({ kind, path: file, prefer: format, labels: labels ?? [] })
+  }
+  const chooseTask = (task: YoloTask) => {
+    setConfirmed(true)
+    if (request && task !== preview?.task?.task) read({ ...request, task })
+  }
+  const pickKeypoints = async () => {
+    const file = await window.api.pickFile('Choose a keypoint file', [{ name: "X-AnyLabeling's keypoint files", extensions: ['yaml', 'yml'] }])
+    if (file && request) read({ ...request, task: 'pose', keypoints: file })
+  }
+  const write = async () => {
+    setError('')
+    setProgress(null)
+    setStage('busy')
+    try {
+      const r = await window.api.importWrite(policy)
+      setReport(r)
+      setStage('report')
+      // The open image is read again and its undo history dropped, as after pre-labelling
+      if (r.names.length) onImported(r.names)
+    } catch (e) {
+      setError(plainError(e))
+      setStage('preview')
+    }
+  }
+  const close = () => {
+    if (busy) void window.api.importStop()
+    else onClose()
+  }
+
+  const p = preview
+  const n = p ? writes(p, policy) : 0
+  const asking = !!p?.task?.ask && !confirmed
+  const labelRows = p ? p.labels.map((l) => ({ label: l.label, listed: l.listed, shapes: l.fresh + (policy === 'skip' ? 0 : l.labelled) })).filter((l) => l.shapes) : []
+  const shapes = labelRows.reduce((sum, l) => sum + l.shapes, 0)
+  const unlisted = report ? report.labels.filter((l) => !l.listed).map((l) => l.label) : []
+
+  return (
+    <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
+      <div className="dialog import" role="dialog" aria-label="Import dataset" onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
         <h3>Import dataset</h3>
-        <div className="actions"><button className="primary" onClick={onClose}>Close</button></div>
+        {stage === 'start' && (
+          <div className="import-body">
+            <p>Labels from a COCO file or an Ultralytics YOLO dataset go into this folder's label files as LabelMe JSON. Nothing is written until you choose Import.</p>
+            <div className="import-pick">
+              <button className="ghost" onClick={() => pick('coco', 'file')} autoFocus><FileJson size={15} /> COCO file…</button>
+              <button className="ghost" onClick={() => pick('yolo', 'folder')}><FolderOpen size={15} /> YOLO dataset folder…</button>
+              <button className="ghost" onClick={() => pick('yolo', 'file')}><FileText size={15} /> YOLO data.yaml…</button>
+            </div>
+            <p className="muted">COCO: instances or keypoints files, as pycocotools, CVAT and Seamtag write them. YOLO: Ultralytics', Roboflow's and CVAT's layouts, with or without data.yaml.</p>
+            {error && <p className="bad" role="alert">{error}</p>}
+          </div>
+        )}
+        {busy && (
+          <div className="import-body import-busy" aria-live="polite">
+            <p>{progress?.phase ?? 'Starting'}…</p>
+            <div className={`import-bar ${progress?.total ? '' : 'busy'}`}>
+              <i style={progress?.total ? { width: `${(progress.done / progress.total) * 100}%` } : undefined} />
+            </div>
+            <p className="muted">{progress?.total ? `${count(progress.done)} of ${count(progress.total)}` : ' '}</p>
+          </div>
+        )}
+        {stage === 'preview' && p && (
+          <div className="import-body">
+            <div className="import-source">
+              {p.kind === 'coco' ? <FileJson size={16} /> : <FolderOpen size={16} />}
+              <b title={p.source}>{p.name}</b>
+              <span className="muted">{p.kind === 'coco' ? 'COCO' : 'Ultralytics YOLO'} · {some(p.images, 'image')}</span>
+            </div>
+            {p.task && (
+              <section className="import-section">
+                <h4>Task</h4>
+                <div className={`import-seg ${asking ? 'ask' : ''}`} role="radiogroup" aria-label="Task">
+                  {TASKS.map((t) => (
+                    <button key={t.task} role="radio" aria-checked={p.task!.task === t.task} className={p.task!.task === t.task ? 'on' : ''} title={t.title} onClick={() => chooseTask(t.task)}>
+                      {t.label}{p.task!.guess === t.task ? ' (guess)' : ''}
+                    </button>
+                  ))}
+                </div>
+                <p className="muted">{p.task.reason}.</p>
+                {asking && <p className="warn ask">These rows fit more than one task: click the one they were made for.</p>}
+              </section>
+            )}
+            {p.keypoints && (
+              <section className="import-section">
+                <h4>Keypoint names</h4>
+                <div className="import-line">
+                  <span>
+                    {p.keypoints.from === 'yaml' ? "From data.yaml's kpt_names."
+                      : p.keypoints.from === 'file' ? `From ${p.keypoints.file?.split(/[\\/]/).pop()}.`
+                        : `None given, so they're called kp0 to kp${p.keypoints.count - 1}.`}
+                  </span>
+                  {p.keypoints.from !== 'yaml' && <button className="ghost" onClick={pickKeypoints}>Keypoint file…</button>}
+                </div>
+              </section>
+            )}
+            <section className="import-section">
+              <h4>Images</h4>
+              <p>
+                {!p.matched ? "None of its images are in this folder, so there's nothing to import."
+                  : `${p.matched < p.images ? `${count(p.matched)} of its ${count(p.images)} images are` : p.images === 1 ? 'Its one image is' : p.images === 2 ? 'Both its images are' : `All ${count(p.images)} of its images are`} in this folder: ` +
+                    `${p.matched - p.byName ? `${count(p.matched - p.byName)} by ${p.matched - p.byName === 1 ? 'its' : 'their'} path${p.base ? ` under ${p.base}` : ''}` : ''}` +
+                    `${p.matched - p.byName && p.byName ? ', ' : ''}${p.byName ? `${count(p.byName)} by file name alone` : ''}.`}
+              </p>
+              {(p.missing > 0 || p.ambiguous > 0) && (
+                <p className="muted">
+                  {[p.missing && `${some(p.missing, "isn't", "aren't")} here`, p.ambiguous && (p.ambiguous === 1 ? '1 has a name that matches more than one image' : `${count(p.ambiguous)} have names that match more than one image`)].filter(Boolean).join(', and ')}: nothing is imported for them, as listed below.
+                </p>
+              )}
+              {p.blocked > 0 && <p className="muted">{some(p.blocked, "image can't", "images can't")} take its labels, as listed below.</p>}
+              {p.nothing > 0 && <p className="muted">{some(p.nothing, 'image gets', 'images get')} nothing from it, so {p.nothing === 1 ? "it's" : "they're"} left as {p.nothing === 1 ? 'it is' : 'they are'}.</p>}
+            </section>
+            {(p.labelled > 0 || p.unreadable > 0) && (
+              <section className="import-section">
+                <h4>Images that have labels</h4>
+                {p.labelled > 0 && (
+                  <>
+                    <div className="import-seg" role="radiogroup" aria-label="Images that have labels">
+                      {POLICIES.map((o) => (
+                        <button key={o.policy} role="radio" aria-checked={policy === o.policy} className={policy === o.policy ? 'on' : ''} onClick={() => setPolicy(o.policy)}>{o.label}</button>
+                      ))}
+                    </div>
+                    <p>
+                      {policy === 'skip' ? `${some(p.labelled, 'image has', 'images have')} labels already: ${p.labelled === 1 ? "it's" : "they're"} left as ${p.labelled === 1 ? 'it is' : 'they are'}.`
+                        : policy === 'add' ? `${some(p.labelled, 'image has', 'images have')} labels already: the imported shapes go after ${p.labelled === 1 ? 'its' : 'theirs'}, and shapes ${p.labelled === 1 ? 'it has' : 'they have'} already aren't added twice.${p.emptyAdd ? ` ${some(p.emptyAdd, 'gets', 'get')} no shapes, so ${p.emptyAdd === 1 ? "it's" : "they're"} left as ${p.emptyAdd === 1 ? 'it is' : 'they are'}.` : ''}`
+                          : `${some(p.labelled, 'image has', 'images have')} labels already: ${p.labelled === 1 ? 'its label file goes' : 'their label files go'} to the trash, and the imported shapes take ${p.labelled === 1 ? 'its' : 'their'} place.`}
+                    </p>
+                    {policy !== 'skip' && p.labelImg > 0 && (
+                      <p className="muted">{some(p.labelImg, 'of them has', 'of them have')} Pascal VOC, YOLO or CreateML labels: {p.labelImg === 1 ? 'it gets' : 'they get'} LabelMe JSON, which holds every shape type, with {p.labelImg === 1 ? 'its' : 'their'} boxes{policy === 'replace' ? ' replaced' : ' kept'}, and the old {p.labelImg === 1 ? 'file goes' : 'files go'} to the trash.</p>
+                    )}
+                  </>
+                )}
+                {p.unreadable > 0 && <p className="muted">{some(p.unreadable, "label file can't", "label files can't")} be read, so {p.unreadable === 1 ? "it's" : "they're"} never touched.</p>}
+              </section>
+            )}
+            <section className="import-section">
+              <h4>Shapes to import{shapes ? ` · ${count(shapes)}` : ''}</h4>
+              <Labels rows={labelRows} />
+            </section>
+            <section className="import-section">
+              <h4>Problems and notes</h4>
+              {p.groups.length ? <Groups groups={p.groups} list="issues" /> : <p className="muted">None.</p>}
+            </section>
+            {error && <p className="bad" role="alert">{error}</p>}
+          </div>
+        )}
+        {stage === 'report' && report && (
+          <div className="import-body">
+            <p className="import-result">
+              {report.stopped ? `Stopped after ${count(report.done)} of ${some(report.total, 'image')}. ` : ''}
+              {report.written ? `Wrote ${some(report.written, 'label file')} with ${some(report.shapes, 'shape')}.` : 'No label file was written.'}
+            </p>
+            {report.trashed > 0 && <p>{some(report.trashed, 'old label file', 'old label files')} went to the trash.</p>}
+            {report.repeated > 0 && <p>{some(report.repeated, 'shape was', 'shapes were')} there already, so {report.repeated === 1 ? "it wasn't" : "they weren't"} added again.</p>}
+            {unlisted.length > 0 && (
+              <p>{unlisted.length === 1 ? `${unlisted[0]} isn't` : `${unlisted.slice(0, -1).join(', ')} and ${unlisted[unlisted.length - 1]} aren't`} in the label list, so {unlisted.length === 1 ? 'it shows' : 'they show'} under Labels as found in the label files.</p>
+            )}
+            {report.labels.length > 0 && (
+              <section className="import-section">
+                <h4>Shapes written</h4>
+                <Labels rows={report.labels} />
+              </section>
+            )}
+            {report.skipped.length > 0 && (
+              <section className="import-section">
+                <h4>Left as they were</h4>
+                <Groups groups={report.skipped} list="skipped" />
+              </section>
+            )}
+          </div>
+        )}
+        <div className="actions">
+          {busy ? (
+            <button className="ghost" onClick={() => window.api.importStop()} autoFocus><X size={15} /> Stop</button>
+          ) : stage === 'preview' && p ? (
+            <>
+              <span className="import-sum">
+                {asking ? 'Pick the task first.' : n ? `${some(n, 'image gets', 'images get')} a LabelMe JSON label file.` : 'Nothing to import with this choice.'}
+              </span>
+              <button className="ghost" onClick={() => { setPreview(null); setStage('start') }}>Back</button>
+              <button className="ghost" onClick={onClose}>Cancel</button>
+              <button className="primary" onClick={write} disabled={!n || asking} autoFocus>{n ? `Import ${some(n, 'image')}` : 'Import'}</button>
+            </>
+          ) : stage === 'report' ? (
+            <>
+              <button className="ghost" onClick={() => { setReport(null); setPreview(null); setStage('start') }}>Import another…</button>
+              <button className="primary" onClick={onClose} autoFocus>Close</button>
+            </>
+          ) : (
+            <button className="ghost" onClick={onClose}>Cancel</button>
+          )}
+        </div>
       </div>
     </div>
   )
