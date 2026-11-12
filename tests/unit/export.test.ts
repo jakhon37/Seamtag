@@ -284,6 +284,8 @@ describe('the output folder', () => {
     expect(await folderProblem(dir, path.join(labels, 'x'))).toBe("That's inside the folder the label files are saved in: choose a new or empty folder outside it")
     expect(await folderProblem(dir, path.join(base, 'full'))).toBe("That folder isn't empty: choose a new or empty folder, so nothing in it is written over")
     expect(await folderProblem(dir, path.join(base, 'file'))).toBe("That's a file: choose a new or empty folder")
+    symlinkSync(path.join(base, 'empty'), path.join(base, 'to-empty'), 'dir')
+    expect(await folderProblem(dir, path.join(base, 'to-empty'))).toBe("That's a link to a folder: choose the folder itself")
     expect(await folderProblem(dir, path.join(base, 'no', 'such'))).toBe("The folder it would go in doesn't exist")
     expect(await folderProblem(dir, 'relative')).toBe('Choose a folder to export to')
     expect(await folderProblem(dir, path.join(base, 'new'))).toBeNull()
@@ -293,7 +295,7 @@ describe('the output folder', () => {
     await openProject(dir, null)
     await runExport(dir, options(), path.join(base, 'empty'))
     expect(filesIn(path.join(base, 'empty'))).toEqual(['annotations/instances_default.json', 'images/default/a.png'])
-    expect(readdirSync(base).sort()).toEqual(['empty', 'file', 'full', 'labels', 'link'])
+    expect(readdirSync(base).sort()).toEqual(['empty', 'file', 'full', 'labels', 'link', 'to-empty'])
   })
 })
 

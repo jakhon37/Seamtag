@@ -210,7 +210,9 @@ export async function folderProblem(root: string, out: string): Promise<string |
   if (folder.outputFile && same(real, await realPath(path.dirname(folder.outputFile)))) {
     return "That's the folder the label file is saved in: choose a new or empty folder"
   }
-  const stat = await fs.stat(out).catch(() => null)
+  const stat = await fs.lstat(out).catch(() => null)
+  // The export is moved into place by its name at the end, which a link can't take
+  if (stat?.isSymbolicLink()) return "That's a link to a folder: choose the folder itself"
   if (stat && !stat.isDirectory()) return "That's a file: choose a new or empty folder"
   if (stat) {
     const entries = await fs.readdir(out).catch(() => null)
@@ -451,6 +453,7 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
   let items: Item[]
   let splits: string[]
   if (s.mode === 'none') {
+    // CVAT 2.83 calls the one subset of a dataset that isn't split default
     const folder = coco ? 'default' : ''
     items = chosen.map((c) => ({ ...c, split: folder, rel: c.image.name }))
     splits = [folder]
@@ -716,6 +719,7 @@ class CocoFile {
   }
 }
 
+// COCO's own names, which CVAT 2.83's COCO export also writes: annotations/instances_<split>.json beside images/<split>/
 const COCO_FILES: Record<CocoTask, string> = { instances: 'instances', keypoints: 'person_keypoints' }
 
 /**
@@ -835,6 +839,7 @@ async function putImage(from: string, to: string, link: boolean): Promise<'copie
       if ((e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'EEXIST') throw e
     }
   }
-  await fs.copyFile(from, to, constants.COPYFILE_EXCL)
+  // A copy shares the file's blocks until either changes where the file system can (APFS, Btrfs, XFS)
+  await fs.copyFile(from, to, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE)
   return link ? 'fellBack' : 'copied'
 }
