@@ -47,7 +47,7 @@ export type Settings = {
   /** The model for the AI text prompt */
   aiTextModel: string
   prelabelModel: string
-  docks: { files: boolean; labels: boolean; shapes: boolean; flags: boolean }
+  docks: { files: boolean; labels: boolean; shapes: boolean; flags: boolean; problems: boolean }
   dark: boolean
   /** Where new labels are saved; it follows the label file of the image opened, as in LabelImg */
   format: LabelFormat
@@ -65,7 +65,14 @@ export type Settings = {
 
 export type Command = { label: string; run: () => void; enabled?: () => boolean; checked?: () => boolean; shortcut?: ShortcutName; keys?: string }
 export type Commands = Record<string, Command>
-export type LabelerHandle = { commands: Commands; canLeave: () => Promise<boolean> }
+export type LabelerHandle = {
+  commands: Commands
+  canLeave: () => Promise<boolean>
+  /** Opens an image, once its changes are saved or let go, and brings one of its shapes into view selected */
+  showImage: (name: string, shape?: number) => Promise<void>
+  /** Label files written outside the window: their undo history is dropped and the open one is read again */
+  reloadImages: (names: string[]) => void
+}
 
 type Filter = 'all' | 'label' | 'review' | 'done'
 type Props = {
@@ -214,6 +221,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const alive = useRef(true)
   const history = useRef(new Map<string, { undo: Shape[][]; redo: Shape[][] }>())
   const reviewOnLoad = useRef(false)
+  // A shape to select once its image has loaded, for showImage
+  const selectOnLoad = useRef<{ name: string; shape?: number } | null>(null)
   const reviewBack = useRef<string | null>(null)
   const undoOnLoad = useRef(false)
   const overCanvas = useRef(false)
@@ -903,6 +912,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         if (undoHere) stepHistory(undo, redo)
         const first = reviewOrder(shapesRef.current)[0]
         if ((fromReview || undoHere) && first !== undefined) selectForReview(first, shapesRef.current)
+        const pick = selectOnLoad.current
+        selectOnLoad.current = null
+        if (pick?.name === name && pick.shape !== undefined && shapesRef.current[pick.shape]) selectForReview(pick.shape, shapesRef.current)
         invalidate()
       } catch (e) {
         if (stale) return
@@ -1699,6 +1711,26 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     copyOnLoad.current = copy
     setIndex(i)
   }, [index, images.length, canLeave])
+  const showImage = async (name: string, shape?: number) => {
+    const i = images.findIndex((x) => x.name === name)
+    if (i < 0) return
+    if (i === index) {
+      if (loadedName.current !== name) selectOnLoad.current = { name, shape }
+      else if (shape !== undefined && shapesRef.current[shape]) selectForReview(shape, shapesRef.current)
+      return
+    }
+    if (!(await canLeave())) return
+    selectOnLoad.current = { name, shape }
+    copyOnLoad.current = false
+    setIndex(i)
+  }
+  const reloadImages = (names: string[]) => {
+    for (const name of names) history.current.delete(name)
+    if (!names.includes(loadedName.current)) return
+    undo.current = []
+    redo.current = []
+    setReload((n) => n + 1)
+  }
   const go = (delta: number, copy = false) => {
     const at = visible.findIndex((v) => v.i === index)
     const next = visible[Math.max(0, Math.min(visible.length - 1, (at < 0 ? 0 : at) + delta))]
@@ -2295,9 +2327,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }
   const commandsRef = useRef(commands)
   commandsRef.current = commands
+  const handleRef = useRef({ showImage, reloadImages })
+  handleRef.current = { showImage, reloadImages }
   useImperativeHandle(ref, () => ({
     get commands() { return commandsRef.current },
-    canLeave
+    canLeave,
+    showImage: (name, shape) => handleRef.current.showImage(name, shape),
+    reloadImages: (names) => handleRef.current.reloadImages(names)
   }), [canLeave])
 
   // Keys: the configurable shortcuts, then the fixed ones (classes, Escape, arrows)

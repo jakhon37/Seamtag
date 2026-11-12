@@ -2,6 +2,8 @@ import { FolderOpen } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type Config, formatKeys, matches, shortcutList } from '../../shared/config'
 import { FORMAT_NAMES, LABEL_FORMATS } from '../../shared/formats'
+import ExportDialog from './ExportDialog'
+import ImportDialog from './ImportDialog'
 import Labeler, { type Commands, type LabelerHandle, type Settings } from './Labeler'
 import Logo from './Logo'
 import MenuBar, { ContextMenu, type MenuSpec } from './Menu'
@@ -43,7 +45,7 @@ function initialSettings(config: Config): Settings {
     aiTextModel: 'yoloworld:latest',
     prelabelModel: kept.prelabelModel ?? '',
     docks: {
-      files: config.file_dock.show, labels: config.label_dock.show, shapes: config.shape_dock.show, flags: config.flag_dock.show,
+      files: config.file_dock.show, labels: config.label_dock.show, shapes: config.shape_dock.show, flags: config.flag_dock.show, problems: false,
       ...kept.docks
     },
     dark: kept.dark ?? config.dark_mode,
@@ -57,10 +59,11 @@ function initialSettings(config: Config): Settings {
 }
 
 const MENUS: MenuSpec = [
-  { label: 'File', items: ['open', 'open_dir', { label: 'Open recent', items: [], prefix: 'recent:' }, 'open_annotation', '-', 'open_next', 'open_prev', 'copy_previous_shapes', '-', 'save', 'save_as', { label: 'Save format', items: [], prefix: 'format:' }, 'auto_save', 'with_image_data', 'save_to', '-', 'delete_file', 'delete_image', 'reveal', 'close', '-', 'preferences', 'reset_settings', 'quit'] },
+  { label: 'File', items: ['open', 'open_dir', { label: 'Open recent', items: [], prefix: 'recent:' }, 'open_annotation', '-', 'open_next', 'open_prev', 'copy_previous_shapes', '-', 'save', 'save_as', { label: 'Save format', items: [], prefix: 'format:' }, 'auto_save', 'with_image_data', 'save_to', '-', 'import_dataset', 'export_dataset', '-', 'delete_file', 'delete_image', 'reveal', 'close', '-', 'preferences', 'reset_settings', 'quit'] },
   { label: 'Edit', items: ['create_polygon', 'create_rectangle', 'create_oriented_rectangle', 'create_circle', 'create_line', 'create_point', 'create_linestrip', 'create_ai_points', 'create_ai_box', 'create_brush', 'create_eraser', 'edit_shape', 'draw_squares', 'box_line_color', '-', 'edit_label', 'duplicate_shape', 'copy_shape', 'paste_shape', 'delete_shape', 'merge_shapes', '-', 'undo', 'redo', 'remove_selected_point', 'add_point_to_edge', 'add_multiple_points', 'toggle_lock', 'toggle_difficult', 'shape_line_color', 'shape_fill_color', '-', 'verify_image', 'toggle_keep_prev_mode', '-', { label: 'Select a neighbour', items: ['select_shape_up', 'select_shape_down', 'select_shape_left', 'select_shape_right'] }] },
-  { label: 'View', items: ['dock_flags', 'dock_labels', 'dock_shapes', 'dock_files', 'toggle_label_panel', '-', 'fill_drawing', 'display_labels', 'toggle_all_shapes', 'hide_all_shapes', 'show_all_shapes', '-', 'single_class_mode', 'advanced_mode', '-', 'zoom_in', 'zoom_out', 'zoom_to_original', 'fit_window', 'fit_selection', 'fit_width', 'keep_prev_scale', '-', 'brightness_contrast', 'keep_prev_brightness_contrast', '-', 'dark_mode'] },
+  { label: 'View', items: ['dock_flags', 'dock_labels', 'dock_shapes', 'dock_files', 'dock_problems', 'toggle_label_panel', '-', 'fill_drawing', 'display_labels', 'toggle_all_shapes', 'hide_all_shapes', 'show_all_shapes', '-', 'single_class_mode', 'advanced_mode', '-', 'zoom_in', 'zoom_out', 'zoom_to_original', 'fit_window', 'fit_selection', 'fit_width', 'keep_prev_scale', '-', 'brightness_contrast', 'keep_prev_brightness_contrast', '-', 'dark_mode'] },
   { label: 'AI', items: ['create_ai_points', 'create_ai_box', { label: 'Model for AI points and box', items: [], prefix: 'ai_model:' }, { label: 'AI makes', items: [], prefix: 'ai_output:' }, { label: 'Model for the text prompt', items: [], prefix: 'ai_text_model:' }, 'ai_models', '-', 'prelabel_pick', 'prelabel_one', 'prelabel_all', '-', 'review_accept', 'review_reject', 'review_skip', 'review_accept_all', 'order_certainty'] },
+  { label: 'Dataset', items: ['check_labels', 'dataset_stats', '-', 'import_dataset', 'export_dataset'] },
   { label: 'Help', items: ['shortcuts', 'docs', 'about'] }
 ]
 const CONTEXT = ['edit_label', 'duplicate_shape', 'copy_shape', 'paste_shape', 'delete_shape', 'merge_shapes', 'toggle_lock', 'toggle_difficult', 'shape_line_color', 'shape_fill_color', '-', 'undo', 'redo', '-', 'add_point_to_edge', 'add_multiple_points', 'remove_selected_point', '-', 'edit_shape', 'create_polygon', 'create_rectangle']
@@ -74,6 +77,7 @@ export default function App() {
   const [context, setContext] = useState<{ x: number; y: number } | null>(null)
   const [about, setAbout] = useState(false)
   const [help, setHelp] = useState(false)
+  const [dataset, setDataset] = useState<'import' | 'export' | null>(null)
   const [, setTick] = useState(0)
   const labeler = useRef<LabelerHandle>(null)
   const config = start?.config ?? null
@@ -193,6 +197,13 @@ export default function App() {
     if (labeler.current && !(await labeler.current.canLeave())) return
     await window.api.resetSettings()
   }
+  // Importing and exporting read the label files, so the open image's changes are saved first
+  const openDataset = async (which: 'import' | 'export') => {
+    if (labeler.current && !(await labeler.current.canLeave())) return
+    setDataset(which)
+  }
+  // The label list: the config's labels, then the project's classes. Labels found in the files aren't in it.
+  const listed = data ? [...new Set([...(config?.labels ?? []), ...data.project.classes.map((c) => c.name)])] : []
   const dock = (k: keyof Settings['docks'], label: string) => ({
     label, run: () => setSettings((s) => ({ ...s, docks: { ...s.docks, [k]: !s.docks[k] } })), checked: () => !!settings?.docks[k]
   })
@@ -202,6 +213,8 @@ export default function App() {
       open: { label: 'Open…', run: pickOpen, shortcut: 'open' },
       open_dir: { label: 'Open folder…', run: pickDir, shortcut: 'open_dir' },
       save_to: { label: 'Change output folder…', run: changeOutput, shortcut: 'save_to', enabled: () => !!data },
+      import_dataset: { label: 'Import dataset…', run: () => openDataset('import'), enabled: () => !!data },
+      export_dataset: { label: 'Export dataset…', run: () => openDataset('export'), enabled: () => !!data },
       close: { label: 'Close folder', run: closeFolder, shortcut: 'close', enabled: () => !!data },
       preferences: { label: 'Open config file', run: () => window.api.openConfig().catch((e) => showError(plainError(e))) },
       reset_settings: { label: 'Reset settings…', run: resetSettings },
@@ -217,6 +230,7 @@ export default function App() {
       dock_labels: dock('labels', 'Labels'),
       dock_shapes: dock('shapes', 'Shapes'),
       dock_files: dock('files', 'Files'),
+      dock_problems: dock('problems', 'Problems'),
       dark_mode: { label: 'Dark mode', run: () => setSettings((s) => ({ ...s, dark: !s.dark })), checked: () => !!settings?.dark },
       shortcuts: { label: 'Keyboard shortcuts', run: () => setHelp(true) },
       docs: { label: 'Documentation', run: () => window.api.openLink(DOCS) },
@@ -311,6 +325,13 @@ export default function App() {
             setProject={setProject} setImages={setImages} discovered={discovered} mac={mac} onError={showError}
             onOpenMenu={(x, y) => setContext({ x, y })} onChange={() => setTick((t) => t + 1)} />
         </div>
+      )}
+      {dataset === 'export' && data && (
+        <ExportDialog root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)} />
+      )}
+      {dataset === 'import' && data && (
+        <ImportDialog root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)}
+          onImported={(names) => labeler.current?.reloadImages(names)} />
       )}
       {context && <ContextMenu at={context} items={CONTEXT} commands={commands()} config={config} mac={mac} onDone={() => setContext(null)} />}
       {about && (

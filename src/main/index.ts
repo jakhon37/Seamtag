@@ -3,6 +3,7 @@ import { existsSync, promises as fs, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { pathToFileURL } from 'url'
 import { cancelDownload, download, listModels, release, removeModel } from './ai'
+import { forgetDataset } from './dataset'
 import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
 import { type Args, loadConfig, type LoadedConfig, parseArgs, USAGE, USER_CONFIG } from './config'
@@ -112,7 +113,11 @@ function registerIpc() {
     return r.response
   })
   ipcMain.handle('project:open', (_e, target: string, output: string | null) => open(target, output))
-  ipcMain.handle('project:close', (_e, root: string) => closeProject(root))
+  ipcMain.handle('project:close', (_e, root: string) => {
+    // What the dataset reader keeps of the folder goes with it
+    forgetDataset(root)
+    return closeProject(root)
+  })
   ipcMain.handle('project:save', (_e, root: string, project: ProjectInfo) => saveProjectFile(root, project))
   ipcMain.handle('image:open', (_e, root: string, name: string) => openImage(root, name))
   // YOLO's boxes are shares of the image, so reading them needs its size: the window's, or the file's
