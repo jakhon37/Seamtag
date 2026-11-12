@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, CircleAlert, FileJson, FileText, FolderOpen,
 import { useEffect, useRef, useState } from 'react'
 import type { YoloTask } from '../../shared/ultralytics'
 import { useModal } from './Modal'
+import { showMore } from './Problems'
 import {
   type ImportPolicy, type ImportPreview, type ImportProgress, type ImportReport, type ImportRequest, type IssueGroup, type LabelFormat, plainError
 } from './types'
@@ -13,6 +14,8 @@ type Props = {
   format: LabelFormat
   /** The label list: the config's labels, then the project's classes; null when there is none */
   labels: string[] | null
+  /** Labels the folder has already: the label list's, and those found in its label files */
+  known: string[]
   onClose: () => void
   /** The images whose label files the import wrote */
   onImported: (names: string[]) => void
@@ -31,6 +34,8 @@ const POLICIES: { policy: ImportPolicy; label: string }[] = [
 const count = (n: number) => n.toLocaleString('en-GB')
 const some = (n: number, one: string, many = `${one}s`) => `${count(n)} ${n === 1 ? one : many}`
 const ICONS = { error: CircleAlert, warning: TriangleAlert, info: Info }
+// As the Export window names them
+const SEVERITIES = { error: 'Error', warning: 'Warning', info: 'Note' }
 
 /** Issues of one kind, folded: opened, their messages, and more of them a page at a time */
 function Group({ group, list }: { group: IssueGroup; list: 'issues' | 'skipped' }) {
@@ -43,7 +48,7 @@ function Group({ group, list }: { group: IssueGroup; list: 'issues' | 'skipped' 
     <div className={`import-group is-${group.severity}`} data-code={group.code}>
       <button aria-expanded={open} onClick={() => setOpen(!open)}>
         {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <Icon size={14} className="sev" aria-label={group.severity} />
+        <Icon size={14} className="sev" aria-label={SEVERITIES[group.severity]} />
         <span className="name">{group.title}</span>
         <span className="count">{count(group.count)}</span>
       </button>
@@ -51,7 +56,7 @@ function Group({ group, list }: { group: IssueGroup; list: 'issues' | 'skipped' 
         <ul className="import-rows">
           {rows.map((r, i) => <li key={i}>{r}</li>)}
           {rows.length < group.count && (
-            <li><button className="more" onClick={more}>Show {count(Math.min(200, group.count - rows.length))} more</button></li>
+            <li><button className="more" onClick={more}>{showMore(group.count - rows.length, 200)}</button></li>
           )}
         </ul>
       )}
@@ -63,8 +68,10 @@ function Groups({ groups, list }: { groups: IssueGroup[]; list: 'issues' | 'skip
   return <div className="import-groups">{groups.map((g) => <Group key={`${list}:${g.code}`} group={g} list={list} />)}</div>
 }
 
-function Labels({ rows }: { rows: { label: string; shapes: number; listed: boolean }[] }) {
+/** Labels and their shapes; a label the folder doesn't have yet, in its label list or its label files, is tagged new */
+function Labels({ rows, known, listing }: { rows: { label: string; shapes: number }[]; known: ReadonlySet<string>; listing: boolean }) {
   if (!rows.length) return <p className="muted">No shapes.</p>
+  const fresh = listing ? "Not in the label list or this folder's label files yet" : "Not in this folder's label files yet"
   return (
     <div className="import-labels">
       <table>
@@ -72,7 +79,7 @@ function Labels({ rows }: { rows: { label: string; shapes: number; listed: boole
         <tbody>
           {rows.map((r) => (
             <tr key={r.label}>
-              <td>{r.label}{!r.listed && <span className="tag new" title="Not in the label list yet">new</span>}</td>
+              <td>{r.label}{!known.has(r.label) && <span className="tag new" title={fresh}>new</span>}</td>
               <td className="n">{count(r.shapes)}</td>
             </tr>
           ))}
@@ -98,7 +105,7 @@ function labelledText(p: ImportPreview, policy: ImportPolicy) {
   return `${have}: ${what}.${p.empty ? ` ${some(p.empty, 'of them gets', 'of them get')} no shapes from it, so ${left(p.empty)}.` : ''}`
 }
 
-export default function ImportDialog({ root, format, labels, onClose, onImported }: Props) {
+export default function ImportDialog({ root, format, labels, known, onClose, onImported }: Props) {
   const [stage, setStage] = useState<'start' | 'busy' | 'preview' | 'report'>('start')
   const [request, setRequest] = useState<ImportRequest | null>(null)
   const [preview, setPreview] = useState<ImportPreview | null>(null)
@@ -108,6 +115,8 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
   const [policy, setPolicy] = useState<ImportPolicy>('skip')
   // When the rows fit more than one task, the window asks: a click on one says which
   const [confirmed, setConfirmed] = useState(false)
+  // The labels the folder had when the dataset was read, so the report tags the same labels new as the preview did
+  const [had, setHad] = useState<ReadonlySet<string>>(() => new Set(known))
   const busy = stage === 'busy'
   const box = useRef<HTMLDivElement>(null)
 
@@ -129,6 +138,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
       }
       setRequest(req)
       setPreview(p)
+      setHad(new Set(known))
       setStage('preview')
     } catch (e) {
       setError(plainError(e))
@@ -152,7 +162,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
     if (request && task !== preview?.task?.task) read({ ...request, task })
   }
   const pickKeypoints = async () => {
-    const file = await window.api.pickFile('Choose a keypoint file', [{ name: "X-AnyLabeling's keypoint files", extensions: ['yaml', 'yml'] }])
+    const file = await window.api.pickFile('Choose a keypoints file', [{ name: 'Keypoints files', extensions: ['yaml', 'yml'] }])
     if (file && request) read({ ...request, task: 'pose', keypoints: file })
   }
   const write = async () => {
@@ -181,9 +191,10 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
   const p = preview
   const n = p ? writes(p, policy) : 0
   const asking = !!p?.task?.ask && !confirmed
-  const labelRows = p ? p.labels.map((l) => ({ label: l.label, listed: l.listed, shapes: l.fresh + (policy === 'skip' ? 0 : l.labelled) })).filter((l) => l.shapes) : []
+  const labelRows = p ? p.labels.map((l) => ({ label: l.label, shapes: l.fresh + (policy === 'skip' ? 0 : l.labelled) })).filter((l) => l.shapes) : []
   const shapes = labelRows.reduce((sum, l) => sum + l.shapes, 0)
-  const unlisted = report ? report.labels.filter((l) => !l.listed).map((l) => l.label) : []
+  // With no label list, every label shows under Labels as found in the label files: that's nothing to say
+  const unlisted = report && labels ? report.labels.filter((l) => !l.listed).map((l) => l.label) : []
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
@@ -197,7 +208,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
               <button className="ghost" onClick={() => pick('yolo', 'folder')}><FolderOpen size={15} /> YOLO dataset folder…</button>
               <button className="ghost" onClick={() => pick('yolo', 'file')}><FileText size={15} /> YOLO data.yaml…</button>
             </div>
-            <p className="muted">COCO: instances or keypoints files, as pycocotools, CVAT and Seamtag write them. YOLO: Ultralytics', Roboflow's and CVAT's layouts, with or without data.yaml.</p>
+            <p className="muted">COCO: instances or person_keypoints files, as pycocotools, CVAT and Seamtag write them. YOLO: Ultralytics', Roboflow's and CVAT's layouts, with or without data.yaml.</p>
             {error && <p className="bad" role="alert">{error}</p>}
           </div>
         )}
@@ -221,11 +232,15 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
               <section className="import-section">
                 <h4>Task</h4>
                 <div className={`import-seg ${asking ? 'ask' : ''}`} role="radiogroup" aria-label="Task">
-                  {TASKS.map((t) => (
-                    <button key={t.task} role="radio" aria-checked={p.task!.task === t.task} className={p.task!.task === t.task ? 'on' : ''} title={t.title} onClick={() => chooseTask(t.task)}>
-                      {t.label}{p.task!.guess === t.task ? ' (guess)' : ''}
-                    </button>
-                  ))}
+                  {TASKS.map((t) => {
+                    // While the window asks, no task is chosen: the guess is only marked as one
+                    const on = !asking && p.task!.task === t.task
+                    return (
+                      <button key={t.task} role="radio" aria-checked={on} className={on ? 'on' : ''} title={t.title} onClick={() => chooseTask(t.task)}>
+                        {t.label}{p.task!.guess === t.task ? ' (guess)' : ''}
+                      </button>
+                    )
+                  })}
                 </div>
                 <p className="muted">{p.task.reason}.</p>
                 {asking && <p className="warn ask">These rows fit more than one task: click the one they were made for.</p>}
@@ -238,9 +253,10 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
                   <span>
                     {p.keypoints.from === 'yaml' ? "From data.yaml's kpt_names."
                       : p.keypoints.from === 'file' ? `From ${p.keypoints.file?.split(/[\\/]/).pop()}.`
-                        : `None given, so they're called kp0 to kp${p.keypoints.count - 1}.`}
+                        : p.keypoints.count === 1 ? "None given, so it's called kp0."
+                          : `None given, so they're called kp0 ${p.keypoints.count === 2 ? 'and' : 'to'} kp${p.keypoints.count - 1}.`}
                   </span>
-                  {p.keypoints.from !== 'yaml' && <button className="ghost" onClick={pickKeypoints}>Keypoint file…</button>}
+                  {p.keypoints.from !== 'yaml' && <button className="ghost" onClick={pickKeypoints}>Keypoints file…</button>}
                 </div>
               </section>
             )}
@@ -248,13 +264,13 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
               <h4>Images</h4>
               <p>
                 {!p.matched ? "None of its images are in this folder, so there's nothing to import."
-                  : `${p.matched < p.images ? `${count(p.matched)} of its ${count(p.images)} images are` : p.images === 1 ? 'Its one image is' : p.images === 2 ? 'Both its images are' : `All ${count(p.images)} of its images are`} in this folder: ` +
+                  : `${p.matched < p.images ? `${count(p.matched)} of its ${count(p.images)} images ${p.matched === 1 ? 'is' : 'are'}` : p.images === 1 ? 'Its one image is' : p.images === 2 ? 'Both its images are' : `All ${count(p.images)} of its images are`} in this folder: ` +
                     `${p.matched - p.byName ? `${count(p.matched - p.byName)} by ${p.matched - p.byName === 1 ? 'its' : 'their'} path${p.base ? ` under ${p.base}` : ''}` : ''}` +
                     `${p.matched - p.byName && p.byName ? ', ' : ''}${p.byName ? `${count(p.byName)} by file name alone` : ''}.`}
               </p>
               {(p.missing > 0 || p.ambiguous > 0) && (
                 <p className="muted">
-                  {[p.missing && `${some(p.missing, "isn't", "aren't")} here`, p.ambiguous && (p.ambiguous === 1 ? '1 has a name that matches more than one image' : `${count(p.ambiguous)} have names that match more than one image`)].filter(Boolean).join(', and ')}: nothing is imported for them, as listed below.
+                  {[p.missing && `${some(p.missing, "isn't", "aren't")} here`, p.ambiguous && (p.ambiguous === 1 ? '1 has a name that matches more than one image' : `${count(p.ambiguous)} have names that match more than one image`)].filter(Boolean).join(', and ')}: nothing is imported for {p.missing + p.ambiguous === 1 ? 'it' : 'them'}, as listed below.
                 </p>
               )}
               {p.blocked > 0 && <p className="muted">{some(p.blocked, "image can't", "images can't")} take its labels, as listed below.</p>}
@@ -282,10 +298,10 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
             )}
             <section className="import-section">
               <h4>Shapes to import{shapes ? ` · ${count(shapes)}` : ''}</h4>
-              <Labels rows={labelRows} />
+              <Labels rows={labelRows} known={had} listing={!!labels} />
             </section>
             <section className="import-section">
-              <h4>Problems and notes</h4>
+              <h4>Problems</h4>
               {p.groups.length ? <Groups groups={p.groups} list="issues" /> : <p className="muted">None.</p>}
             </section>
             {error && <p className="bad" role="alert">{error}</p>}
@@ -305,7 +321,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
             {report.labels.length > 0 && (
               <section className="import-section">
                 <h4>Shapes written</h4>
-                <Labels rows={report.labels} />
+                <Labels rows={report.labels} known={had} listing={!!labels} />
               </section>
             )}
             {report.skipped.length > 0 && (

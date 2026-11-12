@@ -2,6 +2,7 @@ import { type ElectronApplication, expect, type Locator, type Page, test } from 
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import path from 'path'
 import sharp from 'sharp'
+import { contrast } from './contrast'
 import { BASE, doc, finish, H, launch, open, project, read, saved, shapesIn, square, W } from './helpers'
 
 // Dataset > Check labels, the Problems dock, its fixes and renames, and Dataset > Statistics,
@@ -82,30 +83,6 @@ const fits = (page: Page, selector: string) => page.evaluate((sel) => {
   return { inside, page: document.documentElement.scrollWidth <= innerWidth, onScreen: box.bottom <= innerHeight + 1 && box.right <= innerWidth + 1 }
 }, selector)
 const shot = (page: Page, name: string) => page.screenshot({ path: path.join(SHOTS, name) })
-/**
- * The contrast of an element's words with what lies behind them, as WCAG works it out: its colour,
- * faded by its own and its ancestors' opacity, over the nearest background that isn't transparent
- */
-const contrast = (target: Locator) => target.evaluate((el) => {
-  const rgba = (c: string) => (c.match(/[\d.]+/g) ?? []).map(Number)
-  const lum = (rgb: number[]) => {
-    const [r, g, b] = rgb.map((v) => (v / 255 <= 0.04045 ? v / 255 / 12.92 : ((v / 255 + 0.055) / 1.055) ** 2.4))
-    return 0.2126 * r + 0.7152 * g + 0.0722 * b
-  }
-  let opacity = 1, back = [255, 255, 255]
-  for (let e: Element | null = el; e; e = e.parentElement) opacity *= Number(getComputedStyle(e).opacity)
-  for (let e: Element | null = el; e; e = e.parentElement) {
-    const [r, g, b, a = 1] = rgba(getComputedStyle(e).backgroundColor)
-    if (a > 0) {
-      back = [r, g, b]
-      break
-    }
-  }
-  const [r, g, b, a = 1] = rgba(getComputedStyle(el).color)
-  const fore = [r, g, b].map((v, k) => v * a * opacity + back[k] * (1 - a * opacity))
-  const [hi, lo] = [lum(fore), lum(back)].sort((x, y) => y - x)
-  return (hi + 0.05) / (lo + 0.05)
-})
 /** Whether the focus is inside the element */
 const holds = (page: Page, selector: string) => page.evaluate((sel) => !!document.querySelector(sel)?.contains(document.activeElement), selector)
 /** Whether the element is inert, or inside an element that is */

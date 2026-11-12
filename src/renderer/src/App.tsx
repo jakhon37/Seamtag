@@ -344,7 +344,7 @@ export default function App() {
         <ExportDialog key={folder} root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)} />
       )}
       {dataset === 'import' && data && (
-        <ImportDialog key={folder} root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)}
+        <ImportDialog key={folder} root={data.root} format={settings.format} labels={listed.length ? listed : null} known={[...listed, ...discovered]} onClose={() => setDataset(null)}
           onImported={(names) => labeler.current?.reloadImages(names)} />
       )}
       {context && <ContextMenu at={context} items={CONTEXT} commands={commands()} config={config} mac={mac} onDone={() => setContext(null)} />}

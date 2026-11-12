@@ -2,6 +2,7 @@ import { type ElectronApplication, expect, type Page, test } from '@playwright/t
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import path from 'path'
 import sharp from 'sharp'
+import { contrast } from './contrast'
 import { BASE, doc, finish, H, launch, open, project, read, shapesIn, square, W } from './helpers'
 
 // File > Import dataset: a COCO file, then a YOLO dataset, written into the open folder's label
@@ -102,7 +103,10 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await expect(dialog).toContainText("1 image gets nothing from it, so it's left as it is.")
   await expect(dialog).toContainText("2 images have labels already: they're left as they are.")
   await expect(dialog.locator('.import-labels tr', { hasText: 'dog' })).toContainText('2')
+  // dog is in neither the label list nor a label file here; cat is in both
   await expect(dialog.locator('.import-labels tr', { hasText: 'dog' }).locator('.tag.new')).toBeVisible()
+  await expect(dialog.locator('.import-labels tr', { hasText: 'dog' }).locator('.tag.new')).toHaveAttribute('title', "Not in the label list or this folder's label files yet")
+  await expect(dialog.locator('.import-labels tr', { hasText: 'cat' }).locator('.tag.new')).toHaveCount(0)
   for (const [code, n] of [['import-size', '1'], ['coco-image-missing', '1'], ['coco-image-ambiguous', '1'], ['coco-unknown-category', '1'], ['coco-box-only', '1'], ['import-no-annotations', '1']]) {
     await expect(dialog.locator(`.import-group[data-code="${code}"] .count`)).toHaveText(n)
   }
@@ -186,7 +190,11 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await expect(dialog.locator('.import-source')).toContainText('import-yolo')
   await expect(dialog).toContainText('All 3 of its images are in this folder: 3 by file name alone.')
   await expect(dialog).toContainText('These rows fit more than one task: click the one they were made for.')
-  await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'true')
+  // No task is chosen while the window asks: the guess is only marked as one
+  const tasks = dialog.getByRole('radiogroup', { name: 'Task' })
+  await expect(tasks.getByRole('radio', { checked: true })).toHaveCount(0)
+  await expect(tasks.locator('.on')).toHaveCount(0)
+  await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'false')
   // Both have labels now, which Skip leaves alone; and the task comes first
   await expect(dialog.getByRole('button', { name: 'Import', exact: true })).toBeDisabled()
   await expect(dialog.locator('.import-sum')).toHaveText('Pick the task first.')
@@ -204,6 +212,8 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await dialog.getByRole('button', { name: 'YOLO dataset folder…' }).click()
   await expect(dialog).toContainText('These rows fit more than one task: click the one they were made for.')
   await dialog.getByRole('radio', { name: 'OBB (guess)' }).click()
+  await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'true')
+  await expect(dialog).not.toContainText('These rows fit more than one task')
   await dialog.getByRole('radio', { name: 'Replace' }).click()
   // b gets no shapes from its empty label file, so Replace leaves it as it is
   await expect(dialog).toContainText("3 images have labels already: their label files go to the trash, and the imported shapes take their place. 1 of them gets no shapes from it, so it's left as it is.")
@@ -298,6 +308,9 @@ test('the Import window holds the focus: Tab goes round its controls, Escape clo
   await menu(page, 'File', 'Import dataset…')
   await dialog.getByRole('button', { name: 'COCO file…' }).click()
   await expect(dialog).toContainText('Its one image is in this folder')
+  // With no label list, a label the folder's label files have is nothing new
+  await expect(dialog.locator('.import-labels tr', { hasText: 'cat' })).toBeVisible()
+  await expect(dialog.locator('.import-labels .tag.new')).toHaveCount(0)
   await page.evaluate(() => {
     const input = document.createElement('input')
     input.type = 'file'
@@ -318,6 +331,7 @@ test('the Import window holds the focus: Tab goes round its controls, Escape clo
   await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
   await dialog.getByRole('button', { name: 'Import 1 image' }).click()
   await expect(dialog.locator('.import-result')).toHaveText('Wrote 1 label file with 1 shape.')
+  await expect(dialog).not.toContainText('label list')
   expect(await holds()).toBe(true)
   await page.keyboard.press('Escape')
   await expect(dialog).toHaveCount(0)
@@ -336,5 +350,84 @@ test('the Import window holds the focus: Tab goes round its controls, Escape clo
     }
     if (theme === 'dark') await menu(page, 'View', 'Dark mode')
   }
+  await finish(app, errors)
+})
+
+test("the Import window's words: counts that agree, its Problems, severities and keypoints file named as the Export window names them, and only labels new to the folder tagged", async () => {
+  const dir = await project('import-words', { a: null, b: doc('b', [square('cat', 20, 20, 120, 100)]), d: null })
+  const src = path.join(BASE, 'import-src')
+  mkdirSync(src, { recursive: true })
+  const image = (id: number, file_name: string, width = W, height = H) => ({ id, file_name, width, height })
+  const polygon = (id: number, image_id: number, category_id: number) => ({ id, image_id, category_id, iscrowd: 0, area: 1, bbox: [0, 0, 1, 1], segmentation: [[10, 10, 60, 10, 40, 60]] })
+  const categories = [{ id: 1, name: 'cat' }, { id: 2, name: 'zebra' }]
+  // One of its three images is here
+  const three = path.join(src, 'words-three.json')
+  writeFileSync(three, JSON.stringify({ images: [image(1, 'a.png'), image(2, 'x.png'), image(3, 'y.png')], categories, annotations: [polygon(1, 1, 1), polygon(2, 1, 2)] }))
+  // An error, warnings and a note: d.png's sides are swapped, q.png isn't here, category 9 is unknown, b.png has no annotations
+  const mixed = path.join(src, 'words-mixed.json')
+  writeFileSync(mixed, JSON.stringify({
+    images: [image(1, 'a.png'), image(2, 'd.png', H, W), image(3, 'b.png'), image(4, 'q.png')], categories,
+    annotations: [polygon(1, 1, 1), polygon(2, 1, 9), polygon(3, 2, 1)]
+  }))
+  // YOLO pose rows of one keypoint, which data.yaml doesn't name
+  const pose = path.join(src, 'words-pose')
+  rmSync(pose, { recursive: true, force: true })
+  await png(path.join(pose, 'images', 'train', 'a.png'))
+  mkdirSync(path.join(pose, 'labels', 'train'), { recursive: true })
+  writeFileSync(path.join(pose, 'labels', 'train', 'a.txt'), '0 0.5 0.5 0.2 0.2 0.45 0.45 2\n')
+  writeFileSync(path.join(pose, 'data.yaml'), 'train: images/train\nval: images/train\nkpt_shape: [1, 3]\nnames:\n  0: person\n')
+  const names = path.join(src, 'words-keypoints.yaml')
+  writeFileSync(names, 'classes:\n  person:\n    - nose\n')
+
+  // No label list here
+  const { app, page, errors } = await launch(dir)
+  const dialog = page.getByRole('dialog', { name: 'Import dataset' })
+  const read = async (file: string, button: string) => {
+    await answer(app, file)
+    await menu(page, 'File', 'Import dataset…')
+    await dialog.getByRole('button', { name: button }).click()
+    await expect(dialog.locator('.import-source')).toBeVisible()
+  }
+  await read(three, 'COCO file…')
+  await expect(dialog).toContainText('1 of its 3 images is in this folder: 1 by its path.')
+  await expect(dialog).toContainText("2 aren't here: nothing is imported for them, as listed below.")
+  await expect(dialog.locator('.import-section h4', { hasText: /^Problems$/ })).toBeVisible()
+  // cat is in b's label file; zebra is new to the folder
+  await expect(dialog.locator('.import-labels tr', { hasText: 'cat' }).locator('.tag')).toHaveCount(0)
+  const fresh = dialog.locator('.import-labels tr', { hasText: 'zebra' }).locator('.tag.new')
+  await expect(fresh).toHaveAttribute('title', "Not in this folder's label files yet")
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+    expect(await contrast(fresh)).toBeGreaterThanOrEqual(4.5)
+  }
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+  await page.keyboard.press('Escape')
+
+  await read(mixed, 'COCO file…')
+  await expect(dialog).toContainText("1 isn't here: nothing is imported for it, as listed below.")
+  // The icons are named Error, Warning and Note, as in the Export window
+  expect((await dialog.locator('.import-group .sev').evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')))).sort()).toEqual(['Error', 'Note', 'Warning', 'Warning'])
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+    expect(await contrast(dialog.locator('.import-group.is-warning .sev').first())).toBeGreaterThanOrEqual(3)
+  }
+  await page.screenshot({ path: `${SHOTS}/import-words-light-1500.png` })
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+  await page.keyboard.press('Escape')
+
+  // A keypoint data.yaml doesn't name, and the keypoints file that names it
+  await read(pose, 'YOLO dataset folder…')
+  await expect(dialog.locator('.import-line')).toContainText("None given, so it's called kp0.")
+  await app.evaluate(({ dialog }, f) => {
+    dialog.showOpenDialog = (async (...args: any[]) => {
+      (globalThis as any).asked = args[args.length - 1]
+      return { canceled: false, filePaths: [f] }
+    }) as any
+  }, names)
+  await dialog.getByRole('button', { name: 'Keypoints file…' }).click()
+  await expect(dialog.locator('.import-line')).toContainText('From words-keypoints.yaml.')
+  expect(await app.evaluate(() => { const o = (globalThis as any).asked; return [o.title, o.filters[0].name] })).toEqual(['Choose a keypoints file', 'Keypoints files'])
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
   await finish(app, errors)
 })

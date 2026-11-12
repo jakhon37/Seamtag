@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import path from 'path'
 import sharp from 'sharp'
 import { maskOutlines } from '../src/shared/ultralytics'
+import { contrast } from './contrast'
 import { BASE, doc, finish, H, launch, project, square, W } from './helpers'
 
 // File > Export dataset… through the window: every format, from a folder with every kind of shape
@@ -154,6 +155,9 @@ test('export every format through the window, with a check of what goes in befor
   await expect(dialog.locator('.export-group', { hasText: "Lines and points COCO can't hold" })).toContainText('6')
   await expect(dialog.locator('.actions')).toContainText('Fix the error first')
   await expect(dialog.getByRole('button', { name: 'Export', exact: true })).toBeDisabled()
+  // The error comes first in the column, above the counts, with the button that fixes it
+  await expect(dialog.locator('.export-check > div > :first-child')).toHaveClass('export-errors')
+  await expect(error.getByRole('button', { name: 'Leave them out' })).toBeVisible()
   await page.screenshot({ path: `${SHOTS}/export-check-dark-1500.png` })
   await fits(page)
 
@@ -163,6 +167,8 @@ test('export every format through the window, with a check of what goes in befor
   await expect(dialog.locator('.export-group.is-error')).toHaveCount(0)
   await expect(dialog.locator('.export-table thead')).toContainText('trainvaltestAll')
   await expect(dialog.locator('.export-table tr', { hasText: 'Images' })).toContainText('2215')
+  await expect(dialog.locator('.export-options')).toContainText(
+    "An image's first train, val, valid, validation or test folder decides its split, and moves to the front of its path: a/val/b.jpg goes to images/val/a/b.jpg. Images under none of them go to train.")
   await answer(app, 'opens', path.join(DIR, 'inside'))
   await dialog.getByRole('button', { name: 'Choose…' }).first().click()
   await expect(dialog.locator('.bad')).toHaveText("That's inside the image folder: choose a new or empty folder outside it")
@@ -362,11 +368,13 @@ test('the Export window holds the focus through an export: Tab goes round it, Es
   const dialog = await openExport(page)
   await expect(dialog).toHaveAttribute('aria-modal', 'true')
   expect(await holds(page)).toBe(true)
-  // Tab goes round: from the last control to the first, and back with Shift+Tab
+  // No close button of its own in the title, as the app's other windows have none
+  await expect(dialog.getByRole('button', { name: 'Close' })).toHaveCount(0)
+  // Tab goes round: from the last control to the first, the chosen format, and back with Shift+Tab
   const cancel = dialog.getByRole('button', { name: 'Cancel' })
   await cancel.focus()
   await page.keyboard.press('Tab')
-  await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
+  await expect(dialog.locator('input[name="export-format"]:checked')).toBeFocused()
   await page.keyboard.press('Shift+Tab')
   await expect(cancel).toBeFocused()
   for (let k = 0; k < 20; k++) {
@@ -424,5 +432,100 @@ test('the Export window holds the focus through an export: Tab goes round it, Es
       await page.getByRole('menuitemcheckbox', { name: 'Dark mode' }).click()
     }
   }
+  await finish(app, errors)
+})
+
+/** Whether the element lies wholly inside the scrolling column's visible part */
+async function inView(column: Locator, part: Locator) {
+  const [c, r] = [await column.boundingBox(), await part.boundingBox()]
+  return !!c && !!r && r.y >= c.y - 0.5 && r.y + r.height <= c.y + c.height + 0.5
+}
+async function resize(app: ElectronApplication, page: Page, width: number, height: number) {
+  await app.evaluate(({ BrowserWindow }, [w, h]) => BrowserWindow.getAllWindows()[0].setSize(w, h), [width, height])
+  await page.setViewportSize({ width, height }).catch(() => {})
+  await page.waitForTimeout(400)
+}
+
+test('in the smallest window an error that stops the export shows first, with the button that fixes it, and the footer goes back to it', async () => {
+  // Fourteen labels, whose counts once pushed the error out of view, an AI proposal not yet accepted, a line COCO can't hold, and a posed object
+  const LABELS = ['person', 'bicycle', 'car', 'motorcycle', 'bus', 'truck', 'boat', 'bench', 'bird', 'cat', 'dog', 'horse', 'sheep', 'cow']
+  const files: Record<string, string> = {}
+  for (let i = 0; i < 10; i++) {
+    const shapes: unknown[] = [0, 1, 2].map((k) => square(LABELS[(i * 3 + k) % LABELS.length], 10 + k * 100, 10, 90 + k * 100, 90))
+    if (i === 4) shapes.push(square('person', 20, 150, 120, 250, 0.8))
+    if (i === 2) shapes.push(shape('cat', 'line', [[10, 280], [100, 280]]))
+    if (i === 8) shapes.push(shape('person', 'rectangle', [[100, 120], [200, 280]], { group_id: 1 }), shape('nose', 'point', [[150, 150]], { group_id: 1 }), shape('left_eye', 'point', [[140, 140]], { group_id: 1 }))
+    files[`img${i}`] = doc(`img${i}`, shapes)
+  }
+  const dir = await project('export-small', files)
+  mkdirSync(OUT, { recursive: true })
+  const { app, page, errors } = await launch(dir)
+  await stubDialogs(app)
+  await resize(app, page, 960, 600)
+  const dialog = await openExport(page)
+  const column = dialog.locator('.export-check')
+  const error = dialog.locator('.export-errors .export-group')
+  await expect(error).toHaveCount(1)
+  await expect(error.locator('.export-group-head')).toContainText('AI proposals not yet accepted')
+  // The error, its message and what fixes it are in view, above the counts
+  const head = error.locator('.export-group-head'), leave = error.getByRole('button', { name: 'Leave them out' })
+  for (const part of [head, error.locator('.export-rows li').first(), leave]) expect(await inView(column, part)).toBe(true)
+  await expect(dialog.getByRole('button', { name: 'Show all 14 labels' })).toBeAttached()
+  // The footer says what's wrong as a button that goes to it, and the Export button points at it
+  const status = dialog.getByRole('button', { name: 'Fix the error first' })
+  await expect(dialog.getByRole('button', { name: 'Export', exact: true })).toHaveAttribute('aria-describedby', 'export-why')
+  await expect(dialog.locator('#export-why')).toHaveText('Fix the error first')
+  await page.screenshot({ path: `${SHOTS}/export-error-dark-960.png` })
+  await column.evaluate((el) => { el.scrollTop = el.scrollHeight })
+  expect(await inView(column, head)).toBe(false)
+  await status.click()
+  await expect(head).toBeFocused()
+  expect(await inView(column, head)).toBe(true)
+  // A folder that can't be used as well: the footer names both
+  await answer(app, 'opens', dir)
+  await dialog.getByRole('button', { name: 'Choose…' }).first().click()
+  await expect(dialog.locator('.export-options .bad')).toBeVisible()
+  await expect(dialog.locator('#export-why')).toHaveText('Fix the error and choose another folder')
+
+  // The chosen format's words, and a warning's triangle, read in both themes
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)
+    expect(await contrast(dialog.locator('.export-format.on small'))).toBeGreaterThanOrEqual(4.5)
+    expect(await contrast(dialog.locator('.export-group.is-warning .export-sev'))).toBeGreaterThanOrEqual(3)
+    expect(await contrast(dialog.locator('#export-why button'))).toBeGreaterThanOrEqual(4.5)
+  }
+  await page.screenshot({ path: `${SHOTS}/export-error-light-960.png` })
+  await page.evaluate(() => { document.documentElement.dataset.theme = 'dark' })
+
+  // Leave them out: the proposal goes, and the option it stands for is ticked
+  await change(dialog, () => leave.click())
+  await expect(dialog.locator('.export-errors')).toHaveCount(0)
+  await expect(dialog.getByLabel('Leave unaccepted AI proposals out')).toBeChecked()
+  await expect(dialog.locator('#export-why')).toHaveText('Choose another folder')
+  expect(await page.evaluate(() => !!document.querySelector('.export-dialog')?.contains(document.activeElement))).toBe(true)
+
+  // YOLO pose with no keypoints file: making one is a click away in the error, in view
+  await change(dialog, () => dialog.locator('label.export-format', { hasText: 'YOLO pose' }).click())
+  const missing = dialog.locator('.export-errors .export-group', { hasText: 'No keypoints file' })
+  const make = missing.getByRole('button', { name: 'Make one…' })
+  for (const part of [missing.getByRole('button', { name: 'Choose one…' }), make]) expect(await inView(column, part)).toBe(true)
+  await page.screenshot({ path: `${SHOTS}/export-keypoints-dark-960.png` })
+  const keypoints = path.join(OUT, 'small-keypoints.yaml')
+  rmSync(keypoints, { force: true })
+  await answer(app, 'saves', keypoints)
+  await change(dialog, () => make.click())
+  await expect(dialog.locator('.export-errors')).toHaveCount(0)
+  await expect(dialog.locator('.export-options')).toContainText('person: 2 keypoints')
+
+  // On a large screen the window grows past 860 px, so the posed formats' options need no scrolling
+  await answer(app, 'opens', path.join(OUT, 'small'))
+  await dialog.getByRole('button', { name: 'Choose…' }).first().click()
+  await expect(dialog.locator('.export-options .bad')).toHaveCount(0)
+  await resize(app, page, 1920, 1080)
+  const options = await dialog.locator('.export-options').evaluate((el) => [el.scrollHeight, el.clientHeight])
+  expect(options[0]).toBeLessThanOrEqual(options[1])
+  await page.screenshot({ path: `${SHOTS}/export-pose-dark-1920.png` })
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toHaveCount(0)
   await finish(app, errors)
 })

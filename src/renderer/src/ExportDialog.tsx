@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ExportFormat, ExportOptions, ExportProgress, ExportResult, IssueGroup, KeypointsSummary, Preflight, SplitCount } from '../../main/export'
 import type { Issue, Severity } from '../../shared/dataset'
 import { useModal } from './Modal'
+import { showMore } from './Problems'
 import { type LabelFormat, plainError } from './types'
 
 // File > Export dataset…: the folder's labels as a COCO or Ultralytics YOLO dataset. A check runs
@@ -40,6 +41,8 @@ const ICONS: Record<Severity, React.ReactNode> = {
 }
 // A group's rows grow a page at a time, up to this many in the window
 const MOST = 2000
+/** A button in an error's group that fixes it, where an option of the window can */
+type Fix = { label: string; run: () => void }
 
 const n = (v: number) => v.toLocaleString('en-GB')
 const count = (v: number, one: string, many = `${one}s`) => `${n(v)} ${v === 1 ? one : many}`
@@ -78,6 +81,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   // The window's own id for the folder's read: main reads it once, and again only under a new one
   const session = useRef(`${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`)
   const box = useRef<HTMLDivElement>(null)
+  const errorsBox = useRef<HTMLDivElement>(null)
   const set = (change: Partial<Kept>) => setKept((k) => ({ ...k, ...change }))
 
   const coco = kept.format.startsWith('coco')
@@ -151,6 +155,22 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
       setError(plainError(e))
     }
   }
+  // Errors an option of the window fixes get a button for it in their group, as the option itself is
+  // often out of view in a short window
+  const fixes: Record<string, Fix[]> = {
+    'export-ai-pending': [{ label: 'Leave them out', run: () => set({ leaveAi: true }) }],
+    'export-no-keypoints': [{ label: 'Choose one…', run: () => pickKeypoints(false) }, { label: 'Make one…', run: () => pickKeypoints(true) }],
+    'export-keypoints-unreadable': [{ label: 'Choose another…', run: () => pickKeypoints(false) }],
+    'export-in-label-file': [{ label: 'Copy the images instead', run: () => set({ images: 'copy' }) }]
+  }
+  // The footer's word on what blocks the export goes to the first error, open, wherever the column is scrolled
+  const showErrors = () => {
+    const head = errorsBox.current?.querySelector<HTMLButtonElement>('.export-group-head')
+    if (!head) return
+    if (head.getAttribute('aria-expanded') === 'false') head.click()
+    head.focus({ preventScroll: true })
+    head.scrollIntoView({ block: 'nearest' })
+  }
   const run = async () => {
     if (!out || out.problem || !check || check.blocked || checking) return
     setRunning(true)
@@ -177,7 +197,14 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
 
   const ready = !!check && !check.blocked && !checking && !!out && !out.problem && !sharesBad
   const total = check ? check.splits.reduce((a, s) => a + s.images, 0) : 0
-  const why = sharesBad ? sharesBad : !check ? '' : check.blocked ? `Fix the ${check.counts.error === 1 ? 'error' : 'errors'} first` : !out ? 'Choose a folder to export to' : out.problem ? 'Choose another folder' : ''
+  // Errors stop the export, so they come first in the column, where a long label list can't push them
+  // out of a short window; the warnings and notes come after the counts
+  const errors = check ? check.groups.filter((g) => g.severity === 'error') : []
+  const rest = check ? check.groups.filter((g) => g.severity !== 'error') : []
+  const one = check?.counts.error === 1
+  const why = sharesBad ? sharesBad : !check ? ''
+    : check.blocked ? `Fix ${one ? 'the error' : 'the errors'}${out?.problem ? ' and choose another folder' : ' first'}`
+      : !out ? 'Choose a folder to export to' : out.problem ? 'Choose another folder' : ''
   // The buttons below are keyed, so the one with the focus never turns into another under it, as
   // Stop would into Close when the export ends: the window takes the focus instead
 
@@ -185,7 +212,7 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
       <div className={`dialog export-dialog ${done ? 'done' : ''}`} role="dialog" aria-modal="true" aria-label="Export dataset" tabIndex={-1} ref={box}
         onKeyDown={(e) => e.stopPropagation()}>
-        <h3>Export dataset <button className="icon" onClick={close} disabled={running} aria-label="Close"><X size={15} /></button></h3>
+        <h3>Export dataset</h3>
         {done ? <Summary result={done} /> : (
           <div className="export-body">
             <fieldset className="export-options" disabled={running}>
@@ -225,7 +252,8 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
               <p className="export-hint">
                 {kept.mode === 'none' ? (coco ? 'One annotations file, called default.' : 'images/ and labels/ hold every image.')
                   : kept.mode === 'ratio' ? 'Images are sorted by path, then shuffled with the seed: the same seed gives the same split.'
-                    : "An image's first train, val, valid, validation or test folder decides its split, and leaves its path."}
+                    : images === 'leave' ? "An image's first train, val, valid, validation or test folder decides its split. Images under none of them go to train."
+                      : "An image's first train, val, valid, validation or test folder decides its split, and moves to the front of its path: a/val/b.jpg goes to images/val/a/b.jpg. Images under none of them go to train."}
               </p>
               {sharesBad && <p className="bad">{sharesBad}</p>}
 
@@ -269,14 +297,19 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
               )}
               {check && (
                 <div className={checking || sharesBad ? 'export-stale' : ''}>
+                  {errors.length > 0 && (
+                    <div className="export-errors" ref={errorsBox}>
+                      {errors.map((g, i) => <Group key={`${check.id}:${g.key}`} id={check.id} group={g} open={i === 0} fixes={fixes[g.code]} />)}
+                    </div>
+                  )}
                   <Counts splits={check.splits} labels={check.labels} />
                   {check.notes.map((t) => <p key={t} className="export-hint">{t}</p>)}
                   <h4 className="export-issues-title">
-                    Issues
+                    Problems
                     <span className="muted">{[check.counts.error && count(check.counts.error, 'error'), check.counts.warning && count(check.counts.warning, 'warning'), check.counts.info && count(check.counts.info, 'note')].filter(Boolean).join(' · ') || 'none'}</span>
                   </h4>
-                  {check.groups.map((g, i) => <Group key={`${check.id}:${g.key}`} id={check.id} group={g} open={i === 0 && g.severity === 'error'} />)}
-                  {!check.groups.length && <p className="muted">Everything goes in as it is.</p>}
+                  {rest.map((g) => <Group key={`${check.id}:${g.key}`} id={check.id} group={g} open={false} />)}
+                  {!rest.length && <p className="muted">{errors.length ? `Once ${one ? 'the error is' : 'the errors are'} fixed, everything goes in as it is.` : 'Everything goes in as it is.'}</p>}
                 </div>
               )}
             </section>
@@ -300,9 +333,15 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
             </>
           ) : (
             <>
-              {why && <span className="export-status muted">{why}</span>}
+              {why && (
+                <span className="export-status" id="export-why">
+                  {check?.blocked && !sharesBad ? <button className="link" onClick={showErrors}>{why}</button> : <span className="muted">{why}</span>}
+                </span>
+              )}
               <button key="cancel" className="ghost" onClick={onClose}>Cancel</button>
-              <button key="export" className="primary" onClick={run} disabled={!ready}>{ready ? `Export ${count(total, 'image')}` : 'Export'}</button>
+              <button key="export" className="primary" onClick={run} disabled={!ready} aria-describedby={why ? 'export-why' : undefined}>
+                {ready ? `Export ${count(total, 'image')}` : 'Export'}
+              </button>
             </>
           )}
         </div>
@@ -351,8 +390,8 @@ function Counts({ splits, labels }: { splits: SplitCount[]; labels: { label: str
   )
 }
 
-/** A kind of issue: its title and count, opening to its messages a page at a time */
-function Group({ id, group, open: first }: { id: number; group: IssueGroup; open: boolean }) {
+/** A kind of issue: its title and count, opening to its messages a page at a time, and what fixes it */
+function Group({ id, group, open: first, fixes = [] }: { id: number; group: IssueGroup; open: boolean; fixes?: Fix[] }) {
   const [open, setOpen] = useState(first)
   const [rows, setRows] = useState<Issue[]>(group.issues)
   const [busy, setBusy] = useState(false)
@@ -377,10 +416,11 @@ function Group({ id, group, open: first }: { id: number; group: IssueGroup; open
         <ul className="export-rows">
           {rows.map((r, i) => <li key={i}>{r.message}</li>)}
           {rows.length < group.count && (rows.length < MOST
-            ? <li><button className="link" onClick={more} disabled={busy}>Show {n(Math.min(200, group.count - rows.length))} more</button></li>
+            ? <li><button className="link" onClick={more} disabled={busy}>{showMore(group.count - rows.length, 200)}</button></li>
             : <li className="muted">The first {n(rows.length)} of {n(group.count)} are shown.</li>)}
         </ul>
       )}
+      {fixes.length > 0 && <div className="export-fixes">{fixes.map((f) => <button key={f.label} className="ghost" onClick={f.run}>{f.label}</button>)}</div>}
     </div>
   )
 }
