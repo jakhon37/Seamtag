@@ -15,6 +15,7 @@ import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type Text
 import { type Args, loadConfig, type LoadedConfig, parseArgs, USAGE, USER_CONFIG } from './config'
 import { FORMAT_EXT, FORMAT_NAMES, type LabelFormat } from '../shared/formats'
 import { cacheRoot, imageData, imageDepth, imageSize, openImage, setCacheDir } from './images'
+import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImport, stopImport, writeImport } from './import'
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
 import {
   closeProject, hasLabelsIn, imagePath, labelsFile, loadLabels, openProject, type ProjectInfo, readLabelFile, rootsOpen, saveLabels,
@@ -272,6 +273,14 @@ function registerIpc() {
   ipcMain.handle('export:reveal', (_e, out: string) => {
     if (out === exported) shell.showItemInFolder(out)
   })
+
+  // File > Import dataset: reading writes nothing; writing goes through saveLabels, then the image list counts the images again
+  ipcMain.handle('import:read', (_e, root: string, req: ImportRequest) => readImport(root, req, (p) => send('import:progress', p)))
+  ipcMain.handle('import:rows', (_e, list: 'issues' | 'skipped', code: string, offset: number) => importRows(list, code, offset))
+  ipcMain.handle('import:write', (_e, policy: ImportPolicy) =>
+    writeImport(policy, (p) => send('import:progress', p), (batch) => send('project:summaries', batch)))
+  ipcMain.handle('import:stop', () => stopImport())
+  ipcMain.handle('import:close', () => closeImport())
 }
 
 function buildMenu() {

@@ -7,10 +7,12 @@ import type { Summary } from '../../shared/labels'
 import type {
   CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped
 } from '../../main/checking'
+import type { ImportPolicy, ImportPreview, ImportProgress, ImportReport, ImportRequest, IssueGroup } from '../../main/import'
 
 export type { Config, LabelDoc, LabelFormat, Shape }
 // Dataset > Check labels, Statistics and renames: one definition, in the main process
 export type { CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped }
+export type { ImportPolicy, ImportPreview, ImportProgress, ImportReport, ImportRequest, IssueGroup }
 
 export type LabelClass = { name: string; color: string }
 export type ProjectInfo = { name: string; classes: LabelClass[] }
@@ -133,6 +135,13 @@ declare global {
       exportClose(): Promise<void>
       exportReveal(out: string): Promise<void>
       onExportProgress(fn: (p: ExportProgress) => void): () => void
+      /** File > Import dataset: reads a dataset into the open folder without writing; null when stopped */
+      importRead(root: string, req: ImportRequest): Promise<ImportPreview | null>
+      importRows(list: 'issues' | 'skipped', code: string, offset: number): Promise<string[]>
+      importWrite(policy: ImportPolicy): Promise<ImportReport>
+      importStop(): Promise<void>
+      importClose(): Promise<void>
+      onImportProgress(fn: (p: ImportProgress) => void): () => void
     }
   }
 }

@@ -84,5 +84,11 @@ contextBridge.exposeInMainWorld('api', {
   exportStop: () => ipc.invoke('export:stop'),
   exportClose: () => ipc.invoke('export:close'),
   exportReveal: (out: string) => ipc.invoke('export:reveal', out),
-  onExportProgress: on('export:progress')
+  onExportProgress: on('export:progress'),
+  importRead: (root: string, req: unknown) => ipc.invoke('import:read', root, req),
+  importRows: (list: string, code: string, offset: number) => ipc.invoke('import:rows', list, code, offset),
+  importWrite: (policy: string) => ipc.invoke('import:write', policy),
+  importStop: () => ipc.invoke('import:stop'),
+  importClose: () => ipc.invoke('import:close'),
+  onImportProgress: on('import:progress')
 })
