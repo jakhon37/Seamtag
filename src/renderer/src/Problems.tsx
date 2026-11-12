@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, CircleAlert, Info, TriangleAlert, X } from 'lucide-react'
+import { ChevronDown, ChevronRight, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { Severity } from '../../shared/dataset'
 import type { CheckSummary, LabelFormat, ProblemPage, ProblemRow, Progress, RenameDone, RenamePlanView } from './types'
@@ -9,10 +9,11 @@ import type { CheckSummary, LabelFormat, ProblemPage, ProblemRow, Progress, Rena
 
 /** Rows of a group shown at first, and added by Show more, as the main process pages them */
 const PAGE = 200
+// Information, in words: notes
 const SEVERITIES: { key: Severity; one: string; many: string; icon: typeof Info }[] = [
   { key: 'error', one: 'error', many: 'errors', icon: CircleAlert },
   { key: 'warning', one: 'warning', many: 'warnings', icon: TriangleAlert },
-  { key: 'info', one: 'info', many: 'info', icon: Info }
+  { key: 'info', one: 'note', many: 'notes', icon: Info }
 ]
 const ICON = Object.fromEntries(SEVERITIES.map((s) => [s.key, s.icon])) as Record<Severity, typeof Info>
 
@@ -51,7 +52,9 @@ type Props = {
   /** A check running: a full one shows its progress with Stop, one after saves just says so */
   running: { quick: boolean; progress: Progress | null } | null
   /** Images saved since the last check: their rows are dimmed until they're checked again */
-  stale: ReadonlySet<string>
+  stale: { has: (name: string) => boolean; readonly size: number }
+  /** The open image, while it has changes that aren't saved: its rows are dimmed until they're saved and checked */
+  unsaved: string | null
   folded: boolean
   onFold: () => void
   onClose: () => void
@@ -66,13 +69,20 @@ type Props = {
   onReveal: (file: string) => void
 }
 
-export default function Problems({ root, current, summary, running, stale, folded, onFold, onClose, onCheck, onStop, onShow, onFix, onRename, onReveal }: Props) {
+/** A row, the same from one page to the next */
+const keyOf = (row: ProblemRow) => JSON.stringify([row.code, row.image, row.shape ?? null, row.message])
+
+export default function Problems({
+  root, current, summary, running, stale, unsaved, folded, onFold, onClose, onCheck, onStop, onShow, onFix, onRename, onReveal
+}: Props) {
   const [shown, setShown] = useState<Severity[]>(['error', 'warning'])
   const [only, setOnly] = useState(false)
   // Groups folded by hand, and rows asked for past the first page, by code
   const [shut, setShut] = useState<Record<string, boolean>>({})
   const [more, setMore] = useState<Record<string, number>>({})
   const [page, setPage] = useState<ProblemPage | null>(null)
+  // The row clicked last, whose message shows in full
+  const [picked, setPicked] = useState('')
   const image = only ? current ?? '' : null
 
   useEffect(() => {
@@ -86,9 +96,16 @@ export default function Problems({ root, current, summary, running, stale, folde
 
   const toggle = (severity: Severity) => setShown((list) => (list.includes(severity) ? list.filter((s) => s !== severity) : [...list, severity]))
   const time = summary ? new Date(summary.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''
-  const saved = [...stale].length
   const counts = page?.counts ?? summary?.counts
   const total = counts ? counts.error + counts.warning + counts.info : 0
+  const late = stale.size > 0 || !!unsaved
+  const lateWhy = [
+    ...(stale.size ? [`${counted(stale.size, 'image')} saved since the check at ${time}: checked again a moment after the last save.`] : []),
+    ...(unsaved ? [`${unsaved} has changes that aren't saved: they're checked once they're saved.`] : [])
+  ].join('\n')
+  const hidden = counts ? SEVERITIES.filter((s) => counts[s.key] && !shown.includes(s.key)) : []
+  const hiddenCount = counts ? hidden.reduce((n, s) => n + counts[s.key], 0) : 0
+  const dimOf = (row: ProblemRow) => (!row.image ? null : stale.has(row.image) ? 'saved' : row.image === unsaved ? 'unsaved' : null)
 
   return (
     <section className={`problems${folded ? ' folded' : ''}`} aria-label="Problems">
@@ -97,6 +114,17 @@ export default function Problems({ root, current, summary, running, stale, folde
           {folded ? <ChevronRight size={14} /> : <ChevronDown size={14} />} Problems
           {folded && summary && <span className="problems-badge">{number(summary.counts.error + summary.counts.warning)}</span>}
         </button>
+        {!folded && summary && (
+          <>
+            <span className={`problems-status ${late && !running ? 'warn-text' : 'muted'}`}
+              title={running ? undefined : late ? lateWhy : `Checked at ${time}: ${counted(summary.images, 'image')}`}>
+              {running ? 'Checking…' : late ? 'Out of date' : `Checked ${time}`}
+            </span>
+            <button className="icon" onClick={onCheck} disabled={!!running} aria-label="Check again" title="Check every label file in the folder again">
+              <RefreshCw size={13} />
+            </button>
+          </>
+        )}
         <button className="icon" onClick={onClose} title="Close the Problems dock (View > Problems opens it)" aria-label="Close Problems"><X size={14} /></button>
       </h3>
       {!folded && (
@@ -106,69 +134,59 @@ export default function Problems({ root, current, summary, running, stale, folde
               <div className="seg small problems-severities" role="group" aria-label="Show problems">
                 {SEVERITIES.map(({ key, one, many, icon: Icon }) => {
                   const on = shown.includes(key)
-                  const what = counts[key] === 1 ? one : many
+                  const them = counts[key] === 1 ? 'it' : 'them'
                   return (
                     <button key={key} className={on ? 'on' : ''} aria-pressed={on} data-severity={key} onClick={() => toggle(key)}
-                      aria-label={`${number(counts[key])} ${what}`} title={`${number(counts[key])} ${what}: ${on ? 'shown, click to hide them' : 'hidden, click to show them'}`}>
+                      aria-label={counted(counts[key], one, many)} title={`${counted(counts[key], one, many)}: ${on ? `shown, click to hide ${them}` : `hidden, click to show ${them}`}`}>
                       <Icon size={13} className={`sev-${key}`} /> {number(counts[key])}
                     </button>
                   )
                 })}
               </div>
-              <button className="ghost" onClick={onCheck} disabled={!!running}>Check again</button>
-            </div>
-          )}
-          {running && !running.quick ? (
-            <StopButton progress={running.progress} onStop={onStop} />
-          ) : summary ? (
-            <div className="problems-status">
-              <span className={saved ? 'warn-text' : 'muted'}
-                title={saved ? `${counted(saved, 'image')} saved since the check at ${time}: checked again a moment after the last save` : undefined}>
-                {running ? 'Checking again…' : saved ? 'Out of date' : `Checked at ${time}`}
-              </span>
-              <label className="check problems-only">
+              <label className="check problems-only" title="Only the problems of the image that's open">
                 <input type="checkbox" checked={only} onChange={(e) => setOnly(e.target.checked)} /> This image only
               </label>
             </div>
-          ) : (
+          )}
+          {running && !running.quick && <StopButton progress={running.progress} onStop={onStop} />}
+          {!summary && !running && (
             <div className="problems-empty">
               <p className="muted">Looks through every label file in the folder for files that can't be read, broken or doubtful shapes, and labels written several ways.</p>
               <button className="primary" onClick={onCheck}>Check labels</button>
             </div>
           )}
           {summary && counts && (
-            <>
-              <div className="problems-list" role="list" aria-label="Problems found">
-                {page?.groups.map((g) => {
-                  const Icon = ICON[g.severity]
-                  const open = !shut[g.code]
-                  return (
-                    <div key={g.code} className="problems-group" role="listitem" data-code={g.code}>
-                      <button className="problems-title" aria-expanded={open} onClick={() => setShut((s) => ({ ...s, [g.code]: open }))}>
-                        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-                        <Icon size={13} className={`sev-${g.severity}`} />
-                        <span>{g.title}</span>
-                        <b>{number(g.count)}</b>
+            <div className="problems-list" role="list" aria-label="Problems found">
+              {page?.groups.map((g) => {
+                const Icon = ICON[g.severity]
+                const open = !shut[g.code]
+                return (
+                  <div key={g.code} className="problems-group" role="listitem" data-code={g.code}>
+                    <button className="problems-title" aria-expanded={open} onClick={() => setShut((s) => ({ ...s, [g.code]: open }))}>
+                      {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                      <Icon size={13} className={`sev-${g.severity}`} />
+                      <span>{g.title}</span>
+                      <b>{number(g.count)}</b>
+                    </button>
+                    {open && g.rows.map((row, k) => (
+                      <Row key={k} row={row} dim={dimOf(row)} picked={picked === keyOf(row)} onPick={() => setPicked(keyOf(row))}
+                        onShow={onShow} onFix={onFix} onRename={onRename} onReveal={onReveal} />
+                    ))}
+                    {open && g.rows.length < g.count && (
+                      <button className="ghost problems-more" onClick={() => setMore((m) => ({ ...m, [g.code]: g.rows.length + PAGE }))}>
+                        Show {number(Math.min(PAGE, g.count - g.rows.length))} more of {number(g.count - g.rows.length)}
                       </button>
-                      {open && g.rows.map((row, k) => (
-                        <Row key={k} row={row} dim={!!row.image && stale.has(row.image)} onShow={onShow} onFix={onFix} onRename={onRename} onReveal={onReveal} />
-                      ))}
-                      {open && g.rows.length < g.count && (
-                        <button className="ghost problems-more" onClick={() => setMore((m) => ({ ...m, [g.code]: g.rows.length + PAGE }))}>
-                          Show {number(Math.min(PAGE, g.count - g.rows.length))} more of {number(g.count - g.rows.length)}
-                        </button>
-                      )}
-                    </div>
-                  )
-                })}
-                {page && !page.groups.length && (
-                  <p className="muted pad">
-                    {!total ? (only ? 'No problems in this image.' : `No problems in ${counted(summary.images, 'image')}.`)
-                      : `Nothing shown: ${SEVERITIES.filter((s) => counts[s.key] && !shown.includes(s.key)).map((s) => s.many).join(' and ')} are hidden.`}
-                  </p>
-                )}
-              </div>
-            </>
+                    )}
+                  </div>
+                )
+              })}
+              {page && !page.groups.length && (
+                <p className="muted pad">
+                  {!total ? (only ? 'No problems in this image.' : `No problems in ${counted(summary.images, 'image')}.`)
+                    : `Nothing shown: ${hidden.map((s) => counted(counts[s.key], s.one, s.many)).join(' and ')} ${hiddenCount === 1 ? 'is' : 'are'} hidden.`}
+                </p>
+              )}
+            </div>
           )}
         </>
       )}
@@ -178,19 +196,33 @@ export default function Problems({ root, current, summary, running, stale, folde
 
 /** A label a rename can start from: one written another way, or one not in the label list */
 const RENAMES = new Set(['label-variants', 'unknown-label'])
+const LATE = { saved: 'Saved since the check: this is checked again in a moment.', unsaved: "Changed since the check: this is checked again once it's saved." }
 
-function Row({ row, dim, onShow, onFix, onRename, onReveal }: { row: ProblemRow; dim: boolean } & Pick<Props, 'onShow' | 'onFix' | 'onRename' | 'onReveal'>) {
+type RowProps = {
+  row: ProblemRow
+  /** Out of date: saved since the check, or changed in the window and not saved */
+  dim: keyof typeof LATE | null
+  /** Clicked last: its message shows in full */
+  picked: boolean
+  onPick: () => void
+} & Pick<Props, 'onShow' | 'onFix' | 'onRename' | 'onReveal'>
+
+function Row({ row, dim, picked, onPick, onShow, onFix, onRename, onReveal }: RowProps) {
   const opens = !!row.image
   const act = (fn: () => void) => (e: React.MouseEvent) => {
     e.stopPropagation()
     fn()
   }
-  // The whole row opens its image to the mouse; its name is the button to the keyboard
+  // The whole row opens its image to the mouse; its name is the button to the keyboard. A row
+  // with no button takes the focus itself, so its message can be read in full from the keyboard.
   return (
-    <div className={`problem${opens ? ' opens' : ''}${dim ? ' stale' : ''}`}
-      title={dim ? `${row.message}\n\nSaved since the check: this is checked again in a moment.` : row.message} onClick={() => opens && onShow(row)}>
+    <div className={`problem${opens ? ' opens' : ''}${dim ? ' stale' : ''}${picked ? ' picked' : ''}`} tabIndex={opens || row.file ? undefined : 0}
+      title={dim ? `${row.message}\n\n${LATE[dim]}` : row.message} onClick={() => {
+        onPick()
+        if (opens) onShow(row)
+      }}>
       <div className="problem-where">
-        {opens ? <button className="name problem-open" onClick={act(() => onShow(row))}>{row.image}</button>
+        {opens ? <button className="name problem-open" onClick={act(() => { onPick(); onShow(row) })}>{row.image}</button>
           : <span className="name">{row.file ?? 'The folder'}</span>}
         {row.shape !== undefined && <span className="muted problem-shape">shape {row.shape + 1}{row.label?.trim() ? ` · ${row.label}` : ''}</span>}
         {row.fix && <button className="problem-act" onClick={act(() => onFix(row))} title="Fix it in the image: an edit that can be undone">Fix</button>}
@@ -249,7 +281,8 @@ export function RenameDialog({ root, from, to: start, prefer, labels, totals, al
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root, from, prefer])
 
-  const name = to.trim() ? to : ''
+  // A label is its name without spaces at either end, as the label dialog takes it
+  const name = to.trim()
   const refusal = !name ? '' : name === from ? `It's called “${from}” already.` : allowed && !allowed.includes(name)
     ? `“${name}” isn't in the label list, and only listed labels are allowed.` : ''
   const ready = !!plan && plan.images > 0 && !!name && !refusal && !running

@@ -8,6 +8,7 @@ import {
   statsText, stopJob, strayFile, together
 } from '../../src/main/checking'
 import { readDataset } from '../../src/main/dataset'
+import { Stale } from '../../src/renderer/src/stale'
 import { encodeMask } from '../../src/main/masks'
 import { openProject, setTrash } from '../../src/main/project'
 import { CHECKS, type CheckOptions, checkDataset } from '../../src/shared/checks'
@@ -416,6 +417,32 @@ describe('renaming: the new name and what keeps the old one', () => {
     const done = await renameRun(root, 'Cat', 'cat', 'labelme', null, () => {})
     expect(done).toMatchObject({ changed: ['d.png'], failed: [], left: 2 })
     expect(read(root, 'k.json')).toContain('"Cat"')
+  })
+})
+
+describe('out of date in the window', () => {
+  test('a check takes in the saves made before it began; one made while it ran waits for the next', () => {
+    const stale = new Stale()
+    stale.mark(['a.png', 'b.png'])
+    const first = stale.begin()
+    expect(first.names).toEqual(['a.png', 'b.png'])
+    // b is saved again while the check runs, which may have read it before
+    stale.mark(['b.png'])
+    expect(stale.settle(first.upTo)).toBe(true)
+    expect([stale.has('a.png'), stale.has('b.png'), stale.size]).toEqual([false, true, 1])
+    const second = stale.begin()
+    expect(second.names).toEqual(['b.png'])
+    expect(stale.settle(second.upTo)).toBe(false)
+    expect(stale.size).toBe(0)
+  })
+
+  test("saves made while the folder's first check runs wait for the next", () => {
+    const stale = new Stale()
+    const first = stale.begin()
+    expect(first.names).toEqual([])
+    stale.mark(['c.png'])
+    expect(stale.settle(first.upTo)).toBe(true)
+    expect(stale.begin().names).toEqual(['c.png'])
   })
 })
 
