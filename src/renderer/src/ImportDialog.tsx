@@ -259,7 +259,7 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
             {p.task && (
               <section className="import-section">
                 <h4>Task</h4>
-                <Radios label="Task" className={`import-seg ${asking ? 'ask' : ''}`} value={asking ? null : p.task.task} onChoose={chooseTask}
+                <Radios label="Task" className={`import-seg ${asking ? 'ask' : ''}`} value={asking ? null : p.task.task} start={p.task.guess} onChoose={chooseTask}
                   choices={TASKS.map((t) => ({
                     // While the window asks, no task is chosen: the guess is only marked as one, and the tasks the
                     // rows fit stand out from those they don't

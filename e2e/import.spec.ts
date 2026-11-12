@@ -223,12 +223,20 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await menu(page, 'File', 'Import dataset…')
   await dialog.getByRole('button', { name: 'YOLO dataset folder…' }).click()
   await expect(dialog).toContainText('These rows fit OBB and Segment: click the one they were made for.')
-  // Each group of choices is one Tab stop, at the choice made, the first while none is, and the arrow keys move the choice round it
+  // Each group of choices is one Tab stop, at the choice made, and the arrow keys move the choice round it
   const policy = dialog.getByRole('radiogroup', { name: 'Images that have labels' })
   const [skip, add, replace] = ['Skip them', 'Add shapes', 'Replace'].map((name) => policy.getByRole('radio', { name }))
-  const [detect, segment] = ['Detect', 'Segment'].map((name) => tasks.getByRole('radio', { name, exact: true }))
+  const [detect, segment, obb] = ['Detect', 'Segment', 'OBB (guess)'].map((name) => tasks.getByRole('radio', { name, exact: true }))
+  // Whether the dataset was read again since: the window shows its progress while it reads
+  const reread = () => page.evaluate(() => (globalThis as any).reread as boolean)
+  await page.evaluate(() => {
+    const g = globalThis as any
+    g.reread = false
+    new MutationObserver(() => { if (document.querySelector('.import-busy')) g.reread = true }).observe(document.body, { childList: true, subtree: true })
+  })
+  // While the window asks, the guess is the Tab stop
   await page.keyboard.press('Tab')
-  await expect(detect).toBeFocused()
+  await expect(obb).toBeFocused()
   await page.keyboard.press('Tab')
   await expect(skip).toBeFocused()
   await page.keyboard.press('ArrowRight')
@@ -240,14 +248,27 @@ test('import a COCO file, then a YOLO dataset, into the open folder', async () =
   await expect(replace).toHaveAttribute('aria-checked', 'true')
   await page.keyboard.press('ArrowRight')
   await expect(skip).toHaveAttribute('aria-checked', 'true')
-  // A task chosen with them is read again, and has the focus back once it's read, so the arrow keys go on from it
+  // and the arrow keys only move the focus, so the first one on the way answers nothing, and reads nothing again
   await page.keyboard.press('Shift+Tab')
+  await expect(obb).toBeFocused()
+  await page.keyboard.press('ArrowRight')
   await expect(detect).toBeFocused()
   await page.keyboard.press('ArrowRight')
+  await expect(segment).toBeFocused()
+  await page.waitForTimeout(300)
+  await expect(tasks.getByRole('radio', { checked: true })).toHaveCount(0)
+  await expect(dialog).toContainText('These rows fit OBB and Segment: click the one they were made for.')
+  expect(await reread()).toBe(false)
+  // Space chooses. A task chosen is read again, and has the focus back once it's read, so the arrow keys go on from it, choosing
+  await page.keyboard.press('Space')
   await expect(segment).toHaveAttribute('aria-checked', 'true')
   await expect(segment).toBeFocused()
   await expect(dialog).not.toContainText('These rows fit')
-  await dialog.getByRole('radio', { name: 'OBB (guess)' }).click()
+  expect(await reread()).toBe(true)
+  await page.keyboard.press('ArrowLeft')
+  await expect(detect).toHaveAttribute('aria-checked', 'true')
+  await expect(detect).toBeFocused()
+  await obb.click()
   await expect(dialog.getByRole('radio', { name: 'OBB (guess)' })).toHaveAttribute('aria-checked', 'true')
   await expect(dialog).not.toContainText('These rows fit')
   await expect(dialog.locator('.import-seg .fits')).toHaveCount(0)
