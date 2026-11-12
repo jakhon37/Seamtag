@@ -1026,9 +1026,10 @@ export async function rewriteLabels(root: string, name: string, change: ShapeCha
  * would read and write it whole, and put a copy of it in the trash, once an image. An image
  * whose labels are elsewhere now, or whose entries can't be read, fails alone; a list that
  * can't be read or written fails them all. Gives, image by image, what rewriteLabels gives, or
- * why it failed.
+ * why it failed; null when `signal` stopped it before the list was written, so none was.
  */
-export async function rewriteList(root: string, file: string, images: { name: string; read: ReadFrom }[], change: (current: Shape[]) => Shape[]): Promise<(Rewritten | Error)[]> {
+export async function rewriteList(root: string, file: string, images: { name: string; read: ReadFrom }[], change: (current: Shape[]) => Shape[],
+  signal?: AbortSignal): Promise<(Rewritten | Error)[] | null> {
   return serial(async () => {
     const base = path.basename(file)
     const results: (Rewritten | Error)[] = []
@@ -1036,6 +1037,8 @@ export async function rewriteList(root: string, file: string, images: { name: st
     // The images whose labels are in the list still, by the names it gives them
     const listed = new Map<string, number>()
     for (const [k, { name, read }] of images.entries()) {
+      // A list of tens of thousands of images takes seconds to look through, and the window's saves wait for it
+      if (signal?.aborted) return null
       try {
         const found = await stillIn(root, name, read)
         if (found.format !== 'createml' || fold(found.file) !== fold(file)) throw new Error(`${name}'s labels weren't read from ${base}, so nothing is rewritten`)
@@ -1064,6 +1067,8 @@ export async function rewriteList(root: string, file: string, images: { name: st
           results[k] = new Error(`${name}'s entries in ${base} can't be read, so they're left unchanged: ${reason(e)}`)
         }
       }
+      // The last moment a stop leaves the list as it was
+      if (signal?.aborted) return null
       if (changes.size) await writeTrashing(file, writeCreateMLEntries(text, changes))
       for (const [entry, { shapes, verified }] of changes) {
         const k = listed.get(entry)!

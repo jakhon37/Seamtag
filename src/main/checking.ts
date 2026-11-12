@@ -480,6 +480,7 @@ export async function renamePlan(root: string, from: string, prefer: LabelFormat
  * through rewriteLabels, with the old file in the trash: the images of one CreateML list
  * together, through rewriteList, so the list is written once, not once an image. The rename
  * is made to what each file holds as it's written, so nothing saved since the read is undone.
+ * A stop ends it between files, or in a list's own checks, before the list is written.
  * `allowed` is the label list when the config allows only its labels (validate_label: exact).
  * The new name is trimmed, as the window's label dialog trims a label.
  */
@@ -509,11 +510,12 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
     for (const batch of batches.values()) {
       if (signal.aborted) break
       const read = byName.get(batch[0].name)!
-      // Why each image of the batch failed, or null
+      // Why each image of the batch failed, or null; none at all when a stop came before its list was written
       const failures = read.format === 'createml'
-        ? (await rewriteList(root, read.file!, batch.map((i) => ({ name: i.name, read: byName.get(i.name)! })), renaming(from, name)))
-          .map((r) => (r instanceof Error ? r.message : null))
+        ? (await rewriteList(root, read.file!, batch.map((i) => ({ name: i.name, read: byName.get(i.name)! })), renaming(from, name), signal))
+          ?.map((r) => (r instanceof Error ? r.message : null))
         : [await rewriteLabels(root, read.name, renaming(from, name), null, read).then(() => null, reason)]
+      if (!failures) break
       batch.forEach((image, k) => {
         const failed = failures[k]
         if (failed === null) {

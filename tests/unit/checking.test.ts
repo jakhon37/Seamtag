@@ -1,8 +1,8 @@
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { copyFileSync, mkdirSync, mkdtempSync, promises as fsp, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
-import { afterAll, beforeAll, describe, expect, test } from 'vitest'
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest'
 import {
   checkFolder, type CheckSummary, fixShapes, folderStats, forgetChecks, issuesOf, problemPage, type ProblemQuery, type Progress, renamePlan, renameRun,
   statsFileName, statsText, stopJob, strayFile, together
@@ -465,6 +465,35 @@ describe('renaming: the new name and what keeps the old one', () => {
     expect(trashed).toEqual([list])
     expect(JSON.parse(readFileSync(list, 'utf8')).map((e: { annotations: { label: string }[] }) => e.annotations[0].label)).toEqual(['cat', 'cat', 'cat'])
     expect(progress.filter((p) => p.phase === 'write')).toEqual([{ phase: 'write', done: 3, total: 3 }])
+  })
+
+  test("a stop while a CreateML list's images are looked up ends the rename before the list is written", async () => {
+    const root = folder()
+    const names = ['a.png', 'b.png', 'c.png']
+    for (const name of names) await png(path.join(root, name))
+    const list = path.join(root, '_annotations.createml.json')
+    const text = JSON.stringify(names.map((image) => ({ image, verified: false, annotations: [{ label: 'Cat', coordinates: { x: 9, y: 9, width: 6, height: 6 } }] })))
+    writeFileSync(list, text)
+    await openProject(root, list)
+    trashed = []
+    // Once the folder is read, the list is opened again for each image, to see it still has its labels: Stop comes at the second
+    let folderRead = false, opened = 0
+    const open = fsp.open.bind(fsp)
+    vi.spyOn(fsp, 'open').mockImplementation(async (file, ...rest) => {
+      if (folderRead && path.basename(String(file)) === path.basename(list) && ++opened === 2) stopJob(root, 'rename')
+      return open(file, ...rest)
+    })
+    try {
+      const done = await renameRun(root, 'Cat', 'cat', 'createml', null, (p) => {
+        if (p.phase === 'read' && p.done === p.total) folderRead = true
+      })
+      expect(opened).toBe(2)
+      expect(done).toEqual({ stopped: true, shapes: 0, changed: [], skipped: 0, failed: [], left: 3 })
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(trashed).toEqual([])
+    expect(readFileSync(list, 'utf8')).toBe(text)
   })
 })
 

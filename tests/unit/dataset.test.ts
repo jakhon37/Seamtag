@@ -13,7 +13,7 @@ import { closeProject, openProject, setTrash } from '../../src/main/project'
 import { checkDataset, fixIssue, renameLabel, renaming, shapeArea } from '../../src/shared/checks'
 import type { DatasetImage } from '../../src/shared/dataset'
 import { readCreateML, readVoc } from '../../src/shared/formats'
-import { newShape, parseLabelFile } from '../../src/shared/labelfile'
+import { newShape, parseLabelFile, type Shape } from '../../src/shared/labelfile'
 import { datasetStats } from '../../src/shared/stats'
 
 // Whole folders read with real images, made by sharp as e2e/helpers.ts makes them, and label
@@ -764,6 +764,7 @@ test("the images of one CreateML list are changed in one rewrite of it, with one
   }
   expect(trashed).toEqual([list])
   expect(readFileSync(binned.get(list)!, 'utf8')).toBe(before)
+  if (!results) throw new Error('stopped')
   expect(results.flatMap((r, k) => (r instanceof Error ? [[images[k].name, r.message]] : []))).toEqual([
     ['i5.png', 'labels.json no longer lists i5.png, so nothing is rewritten: check the folder again'],
     ['i6.png', "i6.png's entries in labels.json can't be read, so they're left unchanged: Annotation 1 of i6.png needs a label and coordinates x, y, width and height"]
@@ -776,8 +777,36 @@ test("the images of one CreateML list are changed in one rewrite of it, with one
   // A list that can't be read is left as it is, for every image
   writeFileSync(list, '[{"image": "i0.png"')
   const unread = await rewriteList(root, list, images.slice(0, 2).map((i) => ({ name: i.name, read: i })), renaming('cat', 'lynx'))
-  expect(unread.map((r) => (r as Error).message)).toEqual(Array(2).fill(expect.stringMatching(/^labels\.json can't be read as CreateML, so it's left unchanged: /)))
+  expect(unread?.map((r) => (r as Error).message)).toEqual(Array(2).fill(expect.stringMatching(/^labels\.json can't be read as CreateML, so it's left unchanged: /)))
   expect(read(path.dirname(list), 'labels.json')).toBe('[{"image": "i0.png"')
+})
+
+test('a stop that comes before a CreateML list is written leaves it as it was, as its images are looked up or as its new text is made', async () => {
+  const root = folder()
+  const tiny = await sharp({ create: { width: 40, height: 30, channels: 3, background: '#406080' } }).png().toBuffer()
+  for (const k of [0, 1, 2]) writeFileSync(path.join(root, `i${k}.png`), tiny)
+  const list = path.join(folder(), 'labels.json')
+  const text = JSON.stringify([0, 1, 2].map((k) => entry(`i${k}.png`, ['dog'])))
+  writeFileSync(list, text)
+  await openProject(root, list)
+  const images = (await readDataset(root)).map((i) => ({ name: i.name, read: i }))
+  trashed = []
+  const stopped = new AbortController()
+  stopped.abort()
+  expect(await rewriteList(root, list, images, renaming('dog', 'puppy'), stopped.signal)).toBeNull()
+  const late = new AbortController()
+  const rename = renaming('dog', 'puppy')
+  const stopping = (shapes: Shape[]) => {
+    late.abort()
+    return rename(shapes)
+  }
+  expect(await rewriteList(root, list, images, stopping, late.signal)).toBeNull()
+  expect(trashed).toEqual([])
+  expect(readFileSync(list, 'utf8')).toBe(text)
+  // Not stopped, it's written
+  const done = await rewriteList(root, list, images, rename, new AbortController().signal)
+  expect(done?.map((r) => (r instanceof Error ? r.message : r.item.classes))).toEqual(Array(3).fill({ puppy: 1 }))
+  expect(trashed).toEqual([list])
 })
 
 test('an image with label files in two formats has only the one that was read rewritten, and nothing once its labels are elsewhere', async () => {
