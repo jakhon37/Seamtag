@@ -3,6 +3,9 @@ import { existsSync, promises as fs, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import { pathToFileURL } from 'url'
 import { cancelDownload, download, listModels, release, removeModel } from './ai'
+import {
+  checkFolder, fixShapes, folderStats, forgetChecks, problemPage, renamePlan, renameRun, statsFileName, statsText, stopJob, strayFile
+} from './checking'
 import { forgetDataset } from './dataset'
 import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
@@ -116,6 +119,7 @@ function registerIpc() {
   ipcMain.handle('project:close', (_e, root: string) => {
     // What the dataset reader keeps of the folder goes with it
     forgetDataset(root)
+    forgetChecks(root)
     return closeProject(root)
   })
   ipcMain.handle('project:save', (_e, root: string, project: ProjectInfo) => saveProjectFile(root, project))
@@ -173,6 +177,39 @@ function registerIpc() {
   ipcMain.handle('prelabel:run', (_e, root: string, model: string, names: string[], classes: string[]) =>
     prelabel(root, model, names, classes, loaded?.config.prelabel.min_area ?? 20, (p) => send('prelabel:progress', p)))
   ipcMain.handle('prelabel:stop', () => stopPrelabel())
+  // Dataset > Check labels, Statistics and renaming a label across the folder (checking.ts)
+  ipcMain.handle('check:run', (_e, root: string, req) => checkFolder(root, req, (p) => send('check:progress', { root, ...p })))
+  ipcMain.handle('check:stop', (_e, root: string) => stopJob(root, 'check'))
+  ipcMain.handle('check:view', (_e, root: string, query) => problemPage(root, query))
+  ipcMain.handle('check:fix', (_e, root: string, issue, shapes) => fixShapes(root, issue, shapes))
+  // Only a label file the last check found without its image
+  ipcMain.handle('check:reveal', (_e, root: string, file: string) => {
+    const full = strayFile(root, file)
+    if (full) shell.showItemInFolder(full)
+  })
+  ipcMain.handle('rename:plan', (_e, root: string, from: string, prefer: LabelFormat) =>
+    renamePlan(root, from, prefer, (p) => send('rename:progress', { root, ...p })))
+  ipcMain.handle('rename:run', async (_e, root: string, from: string, to: string, prefer: LabelFormat) => {
+    const config = loaded?.config
+    const done = await renameRun(root, from, to, prefer, config?.validate_label === 'exact' ? config.labels : null, (p) => send('rename:progress', { root, ...p }))
+    // The image list counts the changed images again and takes in the new label; the rename stands either way
+    if (done.changed.length) {
+      await summarizeAll(root, (b) => send('project:summaries', b), config?.label_format, done.changed).catch((e) =>
+        send('app:error', `Some renamed label files couldn't be counted again: ${e.message}`))
+    }
+    return done
+  })
+  ipcMain.handle('rename:stop', (_e, root: string) => stopJob(root, 'rename'))
+  ipcMain.handle('stats:read', (_e, root: string, req) => folderStats(root, req, (p) => send('stats:progress', { root, ...p })))
+  ipcMain.handle('stats:stop', (_e, root: string) => stopJob(root, 'stats'))
+  ipcMain.handle('stats:save', async (_e, root: string) => {
+    const text = statsText(root)
+    if (text === null) throw new Error('Count the folder first')
+    const r = await dialog.showSaveDialog(win!, { title: 'Save statistics as CSV', defaultPath: statsFileName(root), filters: [{ name: 'CSV files', extensions: ['csv'] }] })
+    if (r.canceled || !r.filePath) return null
+    await fs.writeFile(r.filePath, text)
+    return r.filePath
+  })
 }
 
 function buildMenu() {

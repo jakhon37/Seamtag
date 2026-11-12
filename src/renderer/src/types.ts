@@ -2,8 +2,13 @@ import type { AiOutput, Config } from '../../shared/config'
 import type { LabelFormat } from '../../shared/formats'
 import type { LabelDoc, Shape } from '../../shared/labelfile'
 import type { Summary } from '../../shared/labels'
+import type {
+  CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped
+} from '../../main/checking'
 
 export type { Config, LabelDoc, LabelFormat, Shape }
+// Dataset > Check labels, Statistics and renames: one definition, in the main process
+export type { CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped }
 
 export type LabelClass = { name: string; color: string }
 export type ProjectInfo = { name: string; classes: LabelClass[] }
@@ -102,6 +107,20 @@ declare global {
       prelabelRun(root: string, model: string, names: string[], classes: string[]): Promise<{ done: number; total: number; stopped: boolean; failed: string[]; error?: string }>
       prelabelStop(): Promise<void>
       onPrelabel(fn: (p: { root: string; name: string; shapes: Shape[] | null; done: number; total: number }) => void): () => void
+      checkRun(root: string, req: CheckRequest): Promise<CheckSummary | Stopped>
+      checkStop(root: string): Promise<void>
+      checkView(root: string, query: ProblemQuery): Promise<ProblemPage | null>
+      checkFix(root: string, issue: Pick<ProblemRow, 'code' | 'image' | 'shape'>, shapes: Shape[]): Promise<Shape[] | null>
+      checkReveal(root: string, file: string): Promise<void>
+      onCheck(fn: (p: Progress & { root: string }) => void): () => void
+      renamePlan(root: string, from: string, prefer: LabelFormat): Promise<RenamePlanView | Stopped>
+      renameRun(root: string, from: string, to: string, prefer: LabelFormat): Promise<RenameDone>
+      renameStop(root: string): Promise<void>
+      onRename(fn: (p: Progress & { root: string }) => void): () => void
+      statsRead(root: string, req: StatsRequest): Promise<StatsView | Stopped>
+      statsStop(root: string): Promise<void>
+      statsSave(root: string): Promise<string | null>
+      onStats(fn: (p: Progress & { root: string }) => void): () => void
     }
   }
 }

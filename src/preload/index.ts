@@ -60,5 +60,19 @@ contextBridge.exposeInMainWorld('api', {
   prelabelRun: (root: string, model: string, names: string[], classes: string[]) =>
     ipc.invoke('prelabel:run', root, model, names, classes),
   prelabelStop: () => ipc.invoke('prelabel:stop'),
-  onPrelabel: on('prelabel:progress')
+  onPrelabel: on('prelabel:progress'),
+  checkRun: (root: string, req: unknown) => ipc.invoke('check:run', root, req),
+  checkStop: (root: string) => ipc.invoke('check:stop', root),
+  checkView: (root: string, query: unknown) => ipc.invoke('check:view', root, query),
+  checkFix: (root: string, issue: unknown, shapes: unknown) => ipc.invoke('check:fix', root, issue, shapes),
+  checkReveal: (root: string, file: string) => ipc.invoke('check:reveal', root, file),
+  onCheck: on('check:progress'),
+  renamePlan: (root: string, from: string, prefer: string) => ipc.invoke('rename:plan', root, from, prefer),
+  renameRun: (root: string, from: string, to: string, prefer: string) => ipc.invoke('rename:run', root, from, to, prefer),
+  renameStop: (root: string) => ipc.invoke('rename:stop', root),
+  onRename: on('rename:progress'),
+  statsRead: (root: string, req: unknown) => ipc.invoke('stats:read', root, req),
+  statsStop: (root: string) => ipc.invoke('stats:stop', root),
+  statsSave: (root: string) => dialog('stats:save', root),
+  onStats: on('stats:progress')
 })
