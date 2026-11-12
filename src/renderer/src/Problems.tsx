@@ -172,7 +172,19 @@ export default function Problems({
     if (!now || now === document.body) handOn(listBox.current, at).focus()
   }, [page])
 
-  const toggle = (severity: Severity) => setShown((list) => (list.includes(severity) ? list.filter((s) => s !== severity) : [...list, severity]))
+  // The dock is as tall as what it lists, up to half the column, so a short list leaves the Labels list its room. While
+  // it's filtered, with a severity hidden or shown, one image's problems shown or a group folded, it keeps the height
+  // it had before, so nothing moves under the pointer that did it.
+  const [pin, setPin] = useState(0)
+  const plain = !only && shown.length === 2 && !shown.includes('info') && !page?.groups.some((g) => shut[g.code])
+  const hold = () => {
+    if (plain && dock.current) setPin(dock.current.getBoundingClientRect().height)
+  }
+  const pinned = !plain && !folded && pin > 0
+  const toggle = (severity: Severity) => {
+    hold()
+    setShown((list) => (list.includes(severity) ? list.filter((s) => s !== severity) : [...list, severity]))
+  }
   const time = summary ? new Date(summary.at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''
   const counts = page?.counts ?? summary?.counts
   const total = counts ? counts.error + counts.warning + counts.info : 0
@@ -184,11 +196,10 @@ export default function Problems({
   const hidden = counts ? SEVERITIES.filter((s) => counts[s.key] && !shown.includes(s.key)) : []
   const hiddenCount = counts ? hidden.reduce((n, s) => n + counts[s.key], 0) : 0
   const lateOf = (row: ProblemRow) => (!row.image ? null : stale.has(row.image) ? 'saved' : row.image === unsaved ? 'unsaved' : null)
-  // Nothing found in the whole folder: the dock is no taller than its words
-  const clean = !!summary && !(summary.counts.error + summary.counts.warning + summary.counts.info)
 
   return (
-    <section className={`problems${folded ? ' folded' : ''}${clean ? ' clean' : ''}`} aria-label="Problems" ref={dock}>
+    <section className={`problems${folded ? ' folded' : ''}`} aria-label="Problems" ref={dock}
+      style={pinned ? { flex: `0 1 ${pin}px`, maxHeight: 'none' } : undefined}>
       <h3 className="problems-head">
         <button className="problems-fold" onClick={onFold} aria-expanded={!folded} title={folded ? 'Show the problems' : 'Fold the problems'}>
           {folded ? <ChevronRight size={14} /> : <ChevronDown size={14} />} Problems
@@ -224,7 +235,7 @@ export default function Problems({
                 })}
               </div>
               <label className="check problems-only" title="Only the problems of the image that's open">
-                <input type="checkbox" checked={only} onChange={(e) => setOnly(e.target.checked)} /> This image only
+                <input type="checkbox" checked={only} onChange={(e) => { hold(); setOnly(e.target.checked) }} /> This image only
               </label>
             </div>
           )}
@@ -244,7 +255,7 @@ export default function Problems({
                 const seen = new Map<string, number>()
                 return (
                   <div key={g.code} className="problems-group" role="listitem" data-code={g.code}>
-                    <button className="problems-title" aria-expanded={open} onClick={() => setShut((s) => ({ ...s, [g.code]: open }))}>
+                    <button className="problems-title" aria-expanded={open} onClick={() => { hold(); setShut((s) => ({ ...s, [g.code]: open })) }}>
                       {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                       <Icon size={13} className={`sev-${g.severity}`} />
                       <span>{g.title}</span>

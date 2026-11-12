@@ -893,6 +893,87 @@ test('on a short window the Shapes list keeps off the Problems dock, open or fol
   await finish(app, errors)
 })
 
+/** The dock: its height, where This image only and the list begin, the room under the list's last group, and whether the list scrolls; and the Labels list's rows */
+const dockAt = (page: Page) => page.evaluate(() => {
+  const dock = document.querySelector('section.problems')!, list = dock.querySelector('.problems-list')!, box = list.getBoundingClientRect()
+  const classes = document.querySelector('.panel.right .classes')!
+  return {
+    height: Math.round(dock.getBoundingClientRect().height), only: Math.round(dock.querySelector('.problems-only')!.getBoundingClientRect().top),
+    list: Math.round(box.top), room: Math.max(0, Math.round(box.bottom - list.lastElementChild!.getBoundingClientRect().bottom)),
+    scrolls: list.scrollHeight > list.clientHeight + 1,
+    labelRows: classes.clientHeight / classes.querySelector('.class')!.getBoundingClientRect().height
+  }
+})
+
+test("a short list of problems leaves the Labels list its room, and the dock keeps its height while it's filtered", async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const files: Record<string, string | null> = {
+    // Two problems: an exact copy of a shape, and a label not in the list; the list's labels no shape uses are notes, hidden
+    a: doc('a', [square('dog', 20, 20, 120, 120), square('dog', 20, 20, 120, 120), square('cat', 150, 150, 250, 250)]),
+    b: doc('b', [square('zebra', 60, 60, 160, 160)]),
+    c: doc('c', [square('car', 60, 60, 160, 160), square('bus', 200, 60, 300, 160)])
+  }
+  const dir = await project('dataset-short', files)
+  await paint(dir, Object.keys(files))
+  const { app, page, errors } = await launch(dir, ['--labels', VOC])
+  await menu(page, 'Dataset', 'Check labels')
+  const dock = page.getByRole('region', { name: 'Problems' })
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  await expect(dock.locator('.problem')).toHaveCount(2)
+  // With room for both problems, the dock is as tall as they are, and the Labels list takes the rest: 3.9 rows at
+  // 1280 x 800 and 5.5 at 1500 x 940 when the dock kept half the column whatever it listed
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [1280, 800]]) {
+      await resize(app, page, width, height)
+      const at = await dockAt(page)
+      expect([at.room, at.scrolls]).toEqual([0, false])
+      expect(at.labelRows).toBeGreaterThanOrEqual(7)
+      expect(await fits(page, '.panel.right')).toEqual({ inside: true, page: true, onScreen: true })
+      await shot(page, `dock-short-${width}-${theme}.png`)
+    }
+    if (theme === 'dark') await darkMode(page)
+  }
+  // Showing one image's problems, hiding or showing a severity and folding a group move nothing under the pointer: the
+  // dock keeps its height, its list scrolling when it shows more, until it shows what it did at first
+  await resize(app, page, 1500, 940)
+  const before = await dockAt(page)
+  const still = async () => expect(await dockAt(page)).toMatchObject({ height: before.height, only: before.only, list: before.list })
+  const only = dock.getByLabel('This image only')
+  const severity = (key: string) => dock.locator(`.problems-severities [data-severity="${key}"]`)
+  await only.click()
+  await expect(dock.locator('.problem')).toHaveCount(1)
+  await still()
+  await severity('warning').click()
+  await expect(dock.locator('.problems-list')).toHaveText(/^Nothing shown: 1 warning/)
+  await still()
+  await severity('warning').click()
+  await only.click()
+  await severity('info').click()
+  await expect(dock.locator('.problems-group[data-code="unused-label"]')).toHaveCount(1)
+  await still()
+  expect((await dockAt(page)).scrolls).toBe(true)
+  await severity('info').click()
+  await dock.locator('.problems-title').first().click()
+  await expect(dock.locator('.problem')).toHaveCount(1)
+  await still()
+  await dock.locator('.problems-title').first().click()
+  await expect(dock.locator('.problem')).toHaveCount(2)
+  expect(await dockAt(page)).toEqual(before)
+
+  // At 960 x 600 the two fill the dock's half of the column; once one is fixed, the other leaves the Labels list four rows
+  await resize(app, page, 960, 600)
+  expect((await dockAt(page)).scrolls).toBe(true)
+  await dock.locator('.problems-group[data-code="duplicate-shape"]').getByRole('button', { name: 'Fix', exact: true }).click()
+  await expect(dock.locator('.problem')).toHaveCount(1)
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  const after = await dockAt(page)
+  expect([after.room, after.scrolls]).toEqual([0, false])
+  expect(after.labelRows).toBeGreaterThanOrEqual(4)
+  expect(await fits(page, '.panel.right')).toEqual({ inside: true, page: true, onScreen: true })
+  await shot(page, 'dock-short-960-fixed-light.png')
+  await finish(app, errors)
+})
+
 test('a Labels list of one label is as tall as its row, with the dock open, at any window size', async () => {
   mkdirSync(SHOTS, { recursive: true })
   const dir = await project('dataset-one-label', { a: doc('a', [square('cat', 20, 20, 120, 120), square('cat', 20, 20, 120, 120)]) })

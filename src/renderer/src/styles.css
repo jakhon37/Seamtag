@@ -225,14 +225,12 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 
 /* Dataset > Check labels: the Problems dock under the Shapes list, sharing the column's height with it and the Labels list */
 .panel.right section.problems { flex: 2 1 0; min-height: 170px; max-height: max-content; border-top: 1px solid var(--line); padding-top: 8px; }
-/* With the dock open, the problems take half the column, and the Labels and Shapes lists a quarter each, down to
-   two rows at the smallest; what one needn't, the others take, so a short list leaves the problems room at 960 x 600 */
+/* With the dock open, the problems take up to half the column, and the Labels and Shapes lists a quarter each, down to
+   two rows at the smallest; what one needn't, the others take, so a short list of shapes leaves the problems room at
+   960 x 600, and a short list of problems leaves the labels room. Problems.tsx keeps the dock's height while it's filtered */
 .panel.right:has(> section.problems:not(.folded)) > section.grow,
 .panel.right:has(> section.problems:not(.folded)) > section[aria-label="Labels"]:has(> .classes > .class + .class) { flex: 1 1 0; max-height: max-content; }
 .panel.right section.problems.folded { flex: none; min-height: 0; }
-/* While it lists what a check found, the dock keeps its share whatever it shows, so hiding some of the problems, or
-   showing one image's, moves nothing under the pointer; with nothing found in the folder, it's as tall as its words */
-.panel.right section.problems:has(> .problems-list):not(.clean) { max-height: none; }
 .problems-head { margin: 0; gap: 6px; }
 .problems-fold { display: flex; align-items: center; gap: 4px; min-height: 24px; margin: -3px 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; }
 .problems-badge { color: var(--text); background: var(--raised); border-radius: 8px; padding: 0 6px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
