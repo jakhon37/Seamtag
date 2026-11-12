@@ -4,7 +4,7 @@
 
 <h1 align="center">Seamtag</h1>
 
-<p align="center"><b>Label images in LabelMe, Pascal VOC, YOLO or CreateML format, with labelme 7's and LabelImg's tools, a brush and eraser, AI that finds objects from a click, a box or words, and review of a model's proposals. For Windows, macOS and Linux.</b></p>
+<p align="center"><b>Label images in LabelMe, Pascal VOC, YOLO or CreateML format, with labelme 7's and LabelImg's tools, a brush and eraser, AI that finds objects from a click, a box or words, and review of a model's proposals. Check a whole folder's labels, and export it to COCO or Ultralytics YOLO, or import from them. For Windows, macOS and Linux.</b></p>
 
 <p align="center">
   <a href="https://github.com/jakhon37/Seamtag/actions/workflows/ci.yml"><img src="https://github.com/jakhon37/Seamtag/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -38,6 +38,10 @@ Seamtag is the labelling half of [Seamline](https://github.com/jakhon37/Seamline
 **Labels that are hard to lose.** Saves go through one queue to a temporary file and then into place. A label file that can't be read is shown read-only and never written over, and closing the window saves first, or asks when saving isn't automatic.
 
 ![labelme's label dialog, with flags for the person label, a group ID and a description](docs/media/dialog.webp)
+
+**Check a folder's labels.** Dataset → Check labels reads every label file in the folder and lists what it finds in a Problems panel under the shapes, as errors, warnings and notes: label files or images that can't be read, label files that give another image size, shapes with no label, the wrong number of points or no area, repeated points, polygons that cross themselves, shapes reaching outside the image, exact and near copies, one label written several ways (`Cat` and `cat`) or missing from the label list, AI proposals not yet accepted, label files without their image, and identical images: 23 checks in all. Clicking a problem opens its image with the shape selected. Repeated points, exact copies and boxes past the image's edge have a Fix, undone like any edit, and a label can be renamed in every label file of the folder, with the old files sent to the trash. An image is checked again as it's saved, and the image list can show only the images with problems. Dataset → Statistics counts images by state, objects by label and shape type, objects per image, object sizes as COCO ranges them at full size and at a training size, and image sizes, and saves the table as CSV.
+
+**COCO and YOLO datasets.** File → Export dataset writes the folder as COCO (objects, or objects with keypoints) or Ultralytics YOLO (detect, segment, pose or rotated boxes, with its `data.yaml`): whole, split by ratio with a seed, or split as its folders already are, with the images copied, hard-linked or, for COCO, left where they are. Everything is checked before anything is written, including what each format can't hold, and the dataset appears in its folder only once it's complete. File → Import dataset reads a COCO file or a YOLO dataset (Ultralytics', Roboflow's or CVAT's layout) into each image's own label file: images are matched by their paths and never guessed, and images that already have labels are skipped, added to or replaced, with their old files sent to the trash. The image's own label file stays the one you work on; datasets are made from it and read into it.
 
 ## Install
 
@@ -122,7 +126,7 @@ Any ONNX model that takes an image as `[1, 3, H, W]` and returns scores per clas
 
 Without `classes`, the label list names the classes, in order. Images bigger than `tile` go through tile by tile, and each shape's score is the model's mean confidence inside it, useful for ranking rather than as a probability.
 
-## Working with labelme and LabelImg
+## Working with labelme, LabelImg, COCO and YOLO
 
 The point is that files go both ways, so it's tested from both sides:
 
@@ -134,12 +138,15 @@ The point is that files go both ways, so it's tested from both sides:
 - labelme 7.9.1's whole default config loads with every key known, and labelme 5.8.1's migrates as labelme 7 migrates it.
 - Pascal VOC, YOLO and CreateML files are written as LabelImg writes them, byte for byte: down to Python's rounding of halves, its number format, and LabelImg's rule that saved boxes are whole pixels starting from 1. Unit tests compare them with files LabelImg 1.8.6 and its master branch wrote, and read those files back as LabelImg reads them.
 - In CI, LabelImg 1.8.6 and its master branch read every Pascal VOC, YOLO and CreateML file the app writes, and write the same bytes for the same boxes. The one difference is CreateML's verified mark, which master writes and 1.8.6 leaves out.
+- COCO's numbers, the runs of its masks, their areas and boxes, are ported from pycocotools 2.0.11's C code and compared with it on 251 masks, polygons and boxes, to the pixel and the byte. Objects are made from labelme's shapes as labelme 7.9.1's `labelme2coco` makes them. In CI, pycocotools loads every COCO file the app writes, from the unit tests and from the Export dataset window, decodes each mask and scores the export against itself: AP 1.0 for boxes, masks and keypoints.
+- In CI, Ultralytics 8.4.211's own label check (`verify_image_label`) accepts every YOLO dataset the app writes, for all four tasks, and its YAML reader gives back the class names Seamtag wrote. An object of several parts becomes one row, joined as Ultralytics' `merge_multi_segment` joins COCO's. Ultralytics' code is fetched for the test, checked against its hash, and isn't kept here.
+- Import is tested on what `labelme2coco` writes, on CVAT's and X-AnyLabeling's COCO, and on Ultralytics', Roboflow's and CVAT's YOLO layouts.
 
 labelme's export scripts in [examples/](examples) (to VOC or COCO) work on these files with `pip install labelme`.
 
 ## How it's built
 
-An Electron app in TypeScript. The main process reads and writes files, builds tile pyramids with libvips (through sharp), and runs ONNX models with onnxruntime, so no Python is needed. The window is React, drawing on a canvas; the LabelMe format lives in one shared module, [`src/shared/labelfile.ts`](src/shared/labelfile.ts), and LabelImg's three in [`src/shared/formats.ts`](src/shared/formats.ts), ported from its Python. labelme 7's AI pipeline (masks to shapes, the removal of repeats, non-maximum suppression, CLIP's tokenizer) is ported in [`src/main`](src/main) beside the models. Unit tests (Vitest) cover the formats, config, geometry, the AI pipeline and the resize; end-to-end tests (Playwright) drive the real app on Windows, macOS and Linux, each launch with a home folder and profile of its own. Installers are built by electron-builder on each system.
+An Electron app in TypeScript. The main process reads and writes files, builds tile pyramids with libvips (through sharp), and runs ONNX models with onnxruntime, so no Python is needed. The window is React, drawing on a canvas; the LabelMe format lives in one shared module, [`src/shared/labelfile.ts`](src/shared/labelfile.ts), and LabelImg's three in [`src/shared/formats.ts`](src/shared/formats.ts), ported from its Python. labelme 7's AI pipeline (masks to shapes, the removal of repeats, non-maximum suppression, CLIP's tokenizer) is ported in [`src/main`](src/main) beside the models. COCO with its mask runs, and Ultralytics' YOLO, are in [`src/shared/coco.ts`](src/shared/coco.ts), [`rle.ts`](src/shared/rle.ts) and [`ultralytics.ts`](src/shared/ultralytics.ts), and the folder's checks and statistics in [`checks.ts`](src/shared/checks.ts) and [`stats.ts`](src/shared/stats.ts); the main process reads a whole folder's labels with a cache, and reads COCO files in a worker of their own. Unit tests (Vitest) cover the formats, config, geometry, the AI pipeline and the resize; end-to-end tests (Playwright) drive the real app on Windows, macOS and Linux, each launch with a home folder and profile of its own. Installers are built by electron-builder on each system.
 
 ## History
 
@@ -147,6 +154,6 @@ This repository continues [LabelMeV2](https://github.com/jakhon37/LabelMeV2), a 
 
 ## License
 
-GPL-3.0, as labelme. The Pascal VOC, YOLO and CreateML code is ported from LabelImg, under its MIT licence, whose notice is kept in [`src/shared/formats.ts`](src/shared/formats.ts). CLIP's tokenizer vocabulary, in [`resources/clip`](resources/clip), is OpenAI's, under the MIT licence beside it. The AI models are downloaded from their authors' releases under their own licences: SAM2 and EfficientSAM are Apache-2.0, YOLO-World is GPL-3.0.
+GPL-3.0, as labelme. The Pascal VOC, YOLO and CreateML code is ported from LabelImg, under its MIT licence, whose notice is kept in [`src/shared/formats.ts`](src/shared/formats.ts). COCO's mask code in [`src/shared/rle.ts`](src/shared/rle.ts) is ported from pycocotools, under its Simplified BSD licence, whose notice it keeps. CLIP's tokenizer vocabulary, in [`resources/clip`](resources/clip), is OpenAI's, under the MIT licence beside it. The AI models are downloaded from their authors' releases under their own licences: SAM2 and EfficientSAM are Apache-2.0, YOLO-World is GPL-3.0.
 
 Thanks to Kentaro Wada for [labelme](https://github.com/wkentaro/labelme) and [osam](https://github.com/wkentaro/osam), and to Tzutalin and LabelImg's contributors for [LabelImg](https://github.com/HumanSignal/labelImg).

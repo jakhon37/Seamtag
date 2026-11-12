@@ -5,6 +5,28 @@ All notable changes to Seamtag, and before it LabelMeV2, are documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Datasets: a check of the whole folder's labels, statistics, and COCO and Ultralytics YOLO export and import.
+
+### Added
+- Dataset → Check labels: 23 checks over every label file in the folder, listed as errors, warnings and notes in a Problems panel under the shapes (View → Problems). A problem opens its image with the shape selected, and This image only narrows the list to the open image. Repeated points, exact copies and boxes past the image's edge have a Fix, undone like any edit. An image is checked again as it's saved.
+- Renaming a label in every label file of the folder, from the Problems panel: the window lists the files first, the old files go to the trash, and the label list follows once no file has the old name.
+- A Problems filter in the image list.
+- Dataset → Statistics: images by state, objects by label and shape type (shapes sharing a label and group ID count once, as the exports count them), objects per image, object sizes as COCO ranges them at full size and at a training size, and image sizes; Save as CSV, which Excel reads with any label.
+- File → Export dataset (also under Dataset): COCO instances and keypoints, and Ultralytics YOLO detect, segment, pose and rotated boxes with `data.yaml`. Whole, split by ratio with a seed, or split as the folders are; images copied, hard-linked or, for COCO, left in place. Everything is checked before anything is written, and AI proposals not yet accepted, or label files that give another image size, stop the export until they're dealt with. The dataset is written into a hidden folder and moved into place at the end. labelme's `__ignore__` and `_background_` are left out, as labelme's own exports leave them. Make a keypoints file writes X-AnyLabeling's pose file from the folder's posed objects.
+- File → Import dataset (also under Dataset): a COCO file (pycocotools', CVAT's, X-AnyLabeling's or labelme2coco's), or a YOLO dataset in Ultralytics', Roboflow's or CVAT's layout, read into each image's own label file as LabelMe JSON. Images are matched by path, never guessed; images that already have labels are skipped, added to, or replaced with their old files in the trash. COCO files are read in a worker with a memory limit of its own, and datasets from elsewhere are kept within bounds, so a file too big or malformed is refused with a reason instead of taking the app down.
+- CI: pycocotools 2.0.11 and Ultralytics 8.4.211's own label check read what the app exports, from the unit tests and from the Export dataset window.
+
+### Changed
+- Windows over the page (About, Keyboard shortcuts, AI models, Brightness and contrast, and the new ones) keep the keyboard inside them: Tab goes round them, Escape closes them, and the page behind takes no clicks, keys or dropped files until they close.
+- Tab skips to the next AI proposal when the image has the focus; in the panels it moves the focus, as in other apps.
+- A YOLO label file holding Ultralytics' outline, rotated box or keypoint rows says so when it opens, and points to File → Import dataset.
+- Closing the window while an import, a rename or an export is writing stops it and waits for the file being written.
+
+### Fixed
+- Saving a label file on Windows no longer fails when an antivirus scanner, the search indexer or OneDrive holds it for a moment: the rename is tried again for a few seconds.
+
 ## [3.2.0] - 2026-11-10
 
 labelme 7's tools, AI and settings, and two fixes: the mouse no longer locks on Linux (X11) when an AI tool asks to download its model, and SAM, which closed the app when chosen, is gone.
