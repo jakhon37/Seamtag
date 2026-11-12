@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { existsSync, promises as fs } from 'fs'
+import { constants, existsSync, promises as fs } from 'fs'
 import path from 'path'
 import {
   FORMAT_EXT, FORMAT_NAMES, type LabelFormat, looksLikeCreateML, readClasses, readCreateML, readVoc, readYolo, removeCreateML, writeClasses,
@@ -303,12 +303,47 @@ export async function renameRetrying(from: string, to: string, patience = 5000) 
 export async function writeAtomic(file: string, text: string) {
   await fs.mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-  await fs.writeFile(tmp, text)
   try {
+    await fs.writeFile(tmp, text)
     await renameRetrying(tmp, file)
   } catch (e) {
     await fs.rm(tmp, { force: true })
     throw e
+  }
+}
+
+/**
+ * Writes a file in place of one that goes to the trash, where it can be restored from. The new
+ * text is written beside the old file first, so a full disk leaves that as it was; then the old
+ * file goes to the trash and the new one takes its name. Should something hold the new file
+ * past renameRetrying's patience, it's copied into place instead, which needs only to read it:
+ * the image is never left with its labels in the trash alone.
+ */
+export async function writeTrashing(file: string, text: string) {
+  const base = path.basename(file)
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  try {
+    await fs.writeFile(tmp, text)
+  } catch (e) {
+    await fs.rm(tmp, { force: true })
+    throw new Error(`${base}'s new labels couldn't be written, so it's left unchanged: ${(e as Error).message}`)
+  }
+  try {
+    await trash(file)
+  } catch (e) {
+    await fs.rm(tmp, { force: true })
+    throw new Error(`${base} couldn't go to the trash, so it's left unchanged: ${(e as Error).message}`)
+  }
+  try {
+    await renameRetrying(tmp, file)
+  } catch (e) {
+    try {
+      // Never over a file that has taken the name since
+      await fs.copyFile(tmp, file, constants.COPYFILE_EXCL)
+    } catch {
+      throw new Error(`${base} is in the trash, but its new labels couldn't take its name: they're in ${tmp} (${(e as Error).message})`)
+    }
+    await fs.rm(tmp, { force: true, maxRetries: 3 }).catch(() => {})
   }
 }
 
@@ -519,6 +554,13 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
     const imageData = fromImage.imageData ? await fromImage.imageData() : req.imageData
     const text = await readText(file)
     let replaced: string | undefined
+    // A file of the other format that has the name gives way: it goes to the trash once the new one is written beside it
+    let givesWay = false
+    const put = async (out: string) => {
+      if (!givesWay) return writeAtomic(file, out)
+      await writeTrashing(file, out)
+      replaced = file
+    }
     if (format === 'labelme') {
       let doc: LabelDoc | null = null
       if (text !== null && looksLikeCreateML(text)) {
@@ -530,8 +572,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
           throw unreadable(file, e)
         }
         if (rest !== null) throw new Error(`${path.basename(file)} holds CreateML labels of other images too, so it's left unchanged`)
-        await trash(file)
-        replaced = file
+        givesWay = true
       } else if (text !== null) {
         try {
           doc = parseLabelFile(text)
@@ -542,7 +583,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
       const other = { ...(doc?.other ?? {}) }
       if (verified) other.verified = true
       else delete other.verified
-      await writeAtomic(file, serializeLabelFile({
+      await put(serializeLabelFile({
         version: doc?.version ?? FORMAT_VERSION,
         flags: req.flags,
         shapes: req.shapes,
@@ -592,8 +633,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
         } catch (e) {
           throw unreadable(file, e)
         }
-        await trash(file)
-        replaced = file
+        givesWay = true
       }
       let out: string
       try {
@@ -601,7 +641,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
       } catch (e) {
         throw unreadable(file, e, ' as CreateML')
       }
-      await writeAtomic(file, out)
+      await put(out)
     }
     // Switched to another format: one image, one label file, so which one opens is never in doubt
     let kept: string | undefined

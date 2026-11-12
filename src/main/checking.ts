@@ -5,15 +5,16 @@
 // window's own requests a turn between slices.
 import path from 'path'
 import {
-  CHECKS, type CheckCode, checkDataset, type CheckOptions, type Clash, fixIssue, FIXES, type OrphanFile, renameLabel, renaming, tallyLabels
+  CHECKS, type CheckCode, checkDataset, type CheckOptions, type Clash, fixIssue, FIXES, type OrphanFile, renameLabel, type RenamePlan, renaming, tallyLabels
 } from '../shared/checks'
 import type { DatasetImage, Issue, MaskBits, Severity } from '../shared/dataset'
 import { type LabelFormat, pyRound } from '../shared/formats'
 import { isAi, SHAPE_TYPES, type Shape, type ShapeType } from '../shared/labelfile'
 import { datasetStats, type DatasetStats, type LabelStats, statsCsv } from '../shared/stats'
-import { findDuplicateImages, labelFileClashes, orphanLabels, readDataset, rewriteLabels } from './dataset'
+import { findDuplicateImages, labelFileClashes, orphanLabels, readDataset, rewriteLabels, rewriteList } from './dataset'
 import { imageSize } from './images'
 import { decodeMask } from './masks'
+import { nameKey } from './names'
 import { folderOf } from './project'
 
 /** A pass the window can stop; one of each kind runs on a folder at a time */
@@ -476,10 +477,11 @@ export async function renamePlan(root: string, from: string, prefer: LabelFormat
 
 /**
  * Renames a label in every label file of the folder that has it, each in its own format
- * through rewriteLabels, with the old file in the trash. The rename is made to what each file
- * holds as it's written, so nothing saved since the read is undone. `allowed` is the label
- * list when the config allows only its labels (validate_label: exact). The new name is
- * trimmed, as the window's label dialog trims a label.
+ * through rewriteLabels, with the old file in the trash: the images of one CreateML list
+ * together, through rewriteList, so the list is written once, not once an image. The rename
+ * is made to what each file holds as it's written, so nothing saved since the read is undone.
+ * `allowed` is the label list when the config allows only its labels (validate_label: exact).
+ * The new name is trimmed, as the window's label dialog trims a label.
  */
 export async function renameRun(root: string, from: string, to: string, prefer: LabelFormat, allowed: string[] | null,
   send: (p: Progress) => void): Promise<RenameDone> {
@@ -494,16 +496,33 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
     const plan = renameLabel(images, from, name, labelFileClashes(images))
     done.skipped = plan.skipped.length
     const byName = new Map(images.map((i) => [i.name, i]))
-    for (const [k, image] of plan.images.entries()) {
+    // The images of one CreateML list go together, by its path; any other image's file is its own
+    const batches = new Map<string, RenamePlan['images']>()
+    for (const image of plan.images) {
+      const read = byName.get(image.name)!
+      const key = read.format === 'createml' && read.file ? nameKey(read.file) : image.name
+      const batch = batches.get(key)
+      if (batch) batch.push(image)
+      else batches.set(key, [image])
+    }
+    let written = 0
+    for (const batch of batches.values()) {
       if (signal.aborted) break
-      try {
-        await rewriteLabels(root, image.name, renaming(from, name), null, byName.get(image.name)!)
-        done.changed.push(image.name)
-        done.shapes += image.renamed
-      } catch (e) {
-        done.failed.push({ name: image.name, reason: reason(e) })
-      }
-      report({ phase: 'write', done: k + 1, total: plan.images.length })
+      const read = byName.get(batch[0].name)!
+      // Why each image of the batch failed, or null
+      const failures = read.format === 'createml'
+        ? (await rewriteList(root, read.file!, batch.map((i) => ({ name: i.name, read: byName.get(i.name)! })), renaming(from, name)))
+          .map((r) => (r instanceof Error ? r.message : null))
+        : [await rewriteLabels(root, read.name, renaming(from, name), null, read).then(() => null, reason)]
+      batch.forEach((image, k) => {
+        const failed = failures[k]
+        if (failed === null) {
+          done.changed.push(image.name)
+          done.shapes += image.renamed
+        } else done.failed.push({ name: image.name, reason: failed })
+      })
+      written += batch.length
+      report({ phase: 'write', done: written, total: plan.images.length })
     }
     done.stopped = signal.aborted
     // A file that can't be read is left alone too, but what it holds isn't known

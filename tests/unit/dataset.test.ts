@@ -1,10 +1,10 @@
-import { linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
+import { linkSync, mkdirSync, mkdtempSync, promises as fsp, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
 import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest'
 import {
-  findDuplicateImages, forgetDataset, labelFileClashes, orphanLabels, readDataset, rewriteLabels
+  findDuplicateImages, forgetDataset, labelFileClashes, orphanLabels, readDataset, rewriteLabels, rewriteList
 } from '../../src/main/dataset'
 import { setFolding } from '../../src/main/names'
 import { setCacheDir } from '../../src/main/images'
@@ -715,6 +715,69 @@ describe('rewriting labels', () => {
     expect(read(root, 'a.json')).toBe(text)
     expect(readdirSync(root).filter((f) => f.endsWith('.tmp'))).toEqual([])
   })
+
+  test('a new file something holds once the old one is in the trash is copied into its place, so the image keeps its labels', async () => {
+    write(root, { 'a.json': labelme('a.png', [shape('owl', 'point', [[3, 3]])]) })
+    const images = await readDataset(root)
+    // As an antivirus scanner or OneDrive can hold a new file on Windows, past renameRetrying's patience
+    const rename = fsp.rename.bind(fsp)
+    vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      if (String(from).endsWith('.tmp')) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+      return rename(from, to)
+    })
+    trashed = []
+    try {
+      await rewriteLabels(root, 'a.png', renaming('owl', 'lynx'), null, of(images, 'a.png'))
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(trashed).toEqual([path.join(root, 'a.json')])
+    expect(parseLabelFile(read(root, 'a.json')).shapes.map((s) => s.label)).toEqual(['lynx'])
+    expect(readdirSync(root).filter((f) => f.endsWith('.tmp'))).toEqual([])
+  })
+})
+
+test("the images of one CreateML list are changed in one rewrite of it, with one copy in the trash; an image whose entries changed since fails alone", async () => {
+  const root = folder()
+  const N = 200
+  const tiny = await sharp({ create: { width: 40, height: 30, channels: 3, background: '#406080' } }).png().toBuffer()
+  for (let k = 0; k < N; k++) writeFileSync(path.join(root, `i${k}.png`), tiny)
+  const list = path.join(folder(), 'labels.json')
+  const entries = Array.from({ length: N }, (_, k) => entry(`i${k}.png`, ['dog', 'cat']))
+  writeFileSync(list, JSON.stringify(entries))
+  await openProject(root, list)
+  const images = await readDataset(root)
+  // Since the read: i5's entries are gone from the list, and i6's dog has lost its coordinates
+  entries.splice(5, 1)
+  delete (entries[5].annotations[0] as Partial<(typeof entries)[0]['annotations'][0]>).coordinates
+  const before = JSON.stringify(entries)
+  writeFileSync(list, before)
+  trashed = []
+  const parse = vi.spyOn(JSON, 'parse')
+  let results: Awaited<ReturnType<typeof rewriteList>>
+  try {
+    results = await rewriteList(root, list, images.map((i) => ({ name: i.name, read: i })), renaming('dog', 'puppy'))
+    // The whole list is read a few times, not once an image
+    expect(parse.mock.calls.filter(([text]) => typeof text === 'string' && text.length > 10000).length).toBeLessThanOrEqual(3)
+  } finally {
+    parse.mockRestore()
+  }
+  expect(trashed).toEqual([list])
+  expect(readFileSync(binned.get(list)!, 'utf8')).toBe(before)
+  expect(results.flatMap((r, k) => (r instanceof Error ? [[images[k].name, r.message]] : []))).toEqual([
+    ['i5.png', 'labels.json no longer lists i5.png, so nothing is rewritten: check the folder again'],
+    ['i6.png', "i6.png's entries in labels.json can't be read, so they're left unchanged: Annotation 1 of i6.png needs a label and coordinates x, y, width and height"]
+  ])
+  expect(results[7]).toMatchObject({ file: list, format: 'createml', item: { name: 'i7.png', classes: { puppy: 1, cat: 1 } } })
+  const after = readFileSync(list, 'utf8')
+  for (const k of [0, 7, N - 1]) expect(readCreateML(after, `i${k}.png`).shapes.map((s) => s.label)).toEqual(['puppy', 'cat'])
+  expect(readCreateML(after, 'i5.png').found).toBe(false)
+  expect(JSON.parse(after).find((e: { image: string }) => e.image === 'i6.png')).toEqual(entries[5])
+  // A list that can't be read is left as it is, for every image
+  writeFileSync(list, '[{"image": "i0.png"')
+  const unread = await rewriteList(root, list, images.slice(0, 2).map((i) => ({ name: i.name, read: i })), renaming('cat', 'lynx'))
+  expect(unread.map((r) => (r as Error).message)).toEqual(Array(2).fill(expect.stringMatching(/^labels\.json can't be read as CreateML, so it's left unchanged: /)))
+  expect(read(path.dirname(list), 'labels.json')).toBe('[{"image": "i0.png"')
 })
 
 test('an image with label files in two formats has only the one that was read rewritten, and nothing once its labels are elsewhere', async () => {

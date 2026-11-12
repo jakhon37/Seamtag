@@ -449,6 +449,23 @@ describe('renaming: the new name and what keeps the old one', () => {
     expect(done).toMatchObject({ changed: ['d.png'], failed: [], left: 2 })
     expect(read(root, 'k.json')).toContain('"Cat"')
   })
+
+  test("the images of one CreateML list, as Roboflow's _annotations.createml.json holds them, are renamed in one rewrite of it", async () => {
+    const root = folder()
+    const names = ['a.png', 'b.png', 'c.png']
+    for (const name of names) await png(path.join(root, name))
+    const list = path.join(root, '_annotations.createml.json')
+    writeFileSync(list, JSON.stringify(names.map((image) => ({ image, verified: false, annotations: [{ label: 'Cat', coordinates: { x: 9, y: 9, width: 6, height: 6 } }] }))))
+    await openProject(root, list)
+    trashed = []
+    const progress: Progress[] = []
+    const done = await renameRun(root, 'Cat', 'cat', 'createml', null, (p) => progress.push(p))
+    expect(done).toEqual({ stopped: false, shapes: 3, changed: names, skipped: 0, failed: [], left: 0 })
+    // One copy of the list in the trash, as it was, not one an image
+    expect(trashed).toEqual([list])
+    expect(JSON.parse(readFileSync(list, 'utf8')).map((e: { annotations: { label: string }[] }) => e.annotations[0].label)).toEqual(['cat', 'cat', 'cat'])
+    expect(progress.filter((p) => p.phase === 'write')).toEqual([{ phase: 'write', done: 3, total: 3 }])
+  })
 })
 
 describe('out of date in the window', () => {

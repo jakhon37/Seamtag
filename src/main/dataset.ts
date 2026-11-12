@@ -1,14 +1,14 @@
 // A whole folder's labels, read against each image's real size for exporting, checking and
 // counting them. Each image's own label file stays the working copy: nothing here writes a
-// label file except rewriteLabels, which sends the old one to the trash first.
+// label file except rewriteLabels and rewriteList, which put the old one in the trash.
 import { createHash } from 'crypto'
 import { createReadStream, promises as fs, type Stats } from 'fs'
 import path from 'path'
 import type { Clash, OrphanFile } from '../shared/checks'
 import type { DatasetImage, MaskBits } from '../shared/dataset'
 import {
-  boxOf, type LabelFormat, looksLikeCreateML, parseXml, pyRound, readClasses, readCreateML, readVoc, readYolo, writeClasses, writeCreateML, writeVoc,
-  writeYolo, type XmlElement, YOLO_CLASSES
+  boxOf, type LabelFormat, looksLikeCreateML, parseXml, pyRound, readClasses, readCreateML, readVoc, readYolo, writeClasses, writeCreateML,
+  writeCreateMLEntries, writeVoc, writeYolo, type XmlElement, YOLO_CLASSES
 } from '../shared/formats'
 import { LabelFileError, parseLabelFile, serializeLabelFile, type Shape } from '../shared/labelfile'
 import { summarize } from '../shared/labels'
@@ -17,7 +17,7 @@ import { decodeMask } from './masks'
 import { nameKey } from './names'
 import {
   findLabels, folderOf, type Found, type ImageItem, imagePath, isEmbedded, labelPath, type Labels, nameOrder, opening, outputFileOf, readLabels, readText,
-  sendToTrash, serial, sharesStem, writeAtomic
+  serial, sharesStem, writeAtomic, writeTrashing
 } from './project'
 
 const posix = (p: string) => p.split(path.sep).join('/')
@@ -961,11 +961,38 @@ export type Rewritten = { file: string; format: LabelFormat; item: ImageItem }
 /** The label file an image's labels were read from, as readDataset gives it (a DatasetImage will do): rewriteLabels writes there and nowhere else */
 export type ReadFrom = Pick<DatasetImage, 'file' | 'format' | 'stamp'>
 
+/** Where readDataset found an image's labels, if they're there still: a file other images share is never written */
+async function stillIn(root: string, name: string, read: ReadFrom): Promise<Found> {
+  const { file, format } = read
+  if (!file || !format) throw new Error(`${name} had no label file when its labels were read, so there's nothing to rewrite`)
+  const base = path.basename(file)
+  const found = await findLabels(root, name, format).catch((e) => {
+    throw unreadable(file, e)
+  })
+  if (!found || fold(found.file) !== fold(file) || found.format !== format) {
+    throw new Error(`${base} was read as ${name}'s labels, but ${found ? `they're in ${path.basename(found.file)} now` : "it's gone"}, so nothing is rewritten: check the folder again`)
+  }
+  if (found.format !== 'createml' && sharesFile(root, name, found)) throw new Error(`${base} holds the labels of other images too, so it's left unchanged`)
+  return found
+}
+
+/** A label file's text, to rewrite it */
+async function textOf(file: string) {
+  let text: string | null
+  try {
+    text = await readText(file)
+  } catch (e) {
+    throw unreadable(file, e)
+  }
+  if (text === null) throw new Error(`${path.basename(file)} is gone, so there's nothing to rewrite`)
+  return text
+}
+
 /**
  * Saves an image's labels in the format its label file is in, by the rules saveLabels
  * follows, with the old file in the trash to restore it from: the new file is written beside
- * the old one, the old one goes to the trash, then the new one takes its name. A file that
- * can't be read, or that other images share, is never written over.
+ * the old one, the old one goes to the trash, then the new one takes its name (writeTrashing).
+ * A file that can't be read, or that other images share, is never written over.
  *
  * `read` is where readDataset found the labels: only that file is written, and when the
  * image's labels are elsewhere now (the window's format picker can read either of two files),
@@ -978,48 +1005,74 @@ export type ReadFrom = Pick<DatasetImage, 'file' | 'format' | 'stamp'>
  */
 export async function rewriteLabels(root: string, name: string, change: ShapeChange, flags: Record<string, boolean> | null, read: ReadFrom): Promise<Rewritten> {
   return serial(async () => {
-    const { file, format } = read
-    if (!file || !format) throw new Error(`${name} had no label file when its labels were read, so there's nothing to rewrite`)
-    const base = path.basename(file)
-    const found = await findLabels(root, name, format).catch((e) => {
-      throw unreadable(file, e)
-    })
-    if (!found || fold(found.file) !== fold(file) || found.format !== format) {
-      throw new Error(`${base} was read as ${name}'s labels, but ${found ? `they're in ${path.basename(found.file)} now` : "it's gone"}, so nothing is rewritten: check the folder again`)
-    }
-    if (found.format !== 'createml' && sharesFile(root, name, found)) throw new Error(`${base} holds the labels of other images too, so it's left unchanged`)
-    let text: string | null
-    try {
-      text = await readText(found.file)
-    } catch (e) {
-      throw unreadable(base, e)
-    }
-    if (text === null) throw new Error(`${base} is gone, so there's nothing to rewrite`)
+    const found = await stillIn(root, name, read)
+    const text = await textOf(found.file)
     const next = await rewritten(root, name, found, text, change, flags)
     // After reading, so a change made meanwhile shows as one
     if (Array.isArray(change) && (await versionNow(root, name, found, text)) !== read.stamp) {
-      throw new Error(`${base} has changed since ${name}'s labels were read, so it's left unchanged: check the folder again`)
+      throw new Error(`${path.basename(found.file)} has changed since ${name}'s labels were read, so it's left unchanged: check the folder again`)
     }
     if ('classes' in next && next.classes) await writeAtomic(next.classes.file, next.classes.text)
-    const tmp = `${found.file}.${process.pid}.${Date.now()}.tmp`
-    try {
-      await fs.writeFile(tmp, next.text)
-    } catch (e) {
-      await fs.rm(tmp, { force: true })
-      throw new Error(`${base}'s new labels couldn't be written, so it's left unchanged: ${reason(e)}`)
-    }
-    try {
-      await sendToTrash(found.file)
-    } catch (e) {
-      await fs.rm(tmp, { force: true })
-      throw new Error(`${base} couldn't go to the trash, so it's left unchanged: ${reason(e)}`)
-    }
-    try {
-      await fs.rename(tmp, found.file)
-    } catch (e) {
-      throw new Error(`${base} is in the trash, but its new labels couldn't take its name: they're in ${tmp} (${reason(e)})`)
-    }
+    await writeTrashing(found.file, next.text)
     const item: ImageItem = { ...summarize(next.shapes, true), name, embedded: isEmbedded(root, name) || undefined, verified: next.verified || undefined }
     return { file: found.file, format: found.format, item }
+  })
+}
+
+/**
+ * rewriteLabels for the images of one CreateML list, as every image has its labels in one -O
+ * labels.json or Roboflow's _annotations.createml.json, with a change such as a rename: the
+ * list is read and written once, with one copy of it in the trash, where an image at a time
+ * would read and write it whole, and put a copy of it in the trash, once an image. An image
+ * whose labels are elsewhere now, or whose entries can't be read, fails alone; a list that
+ * can't be read or written fails them all. Gives, image by image, what rewriteLabels gives, or
+ * why it failed.
+ */
+export async function rewriteList(root: string, file: string, images: { name: string; read: ReadFrom }[], change: (current: Shape[]) => Shape[]): Promise<(Rewritten | Error)[]> {
+  return serial(async () => {
+    const base = path.basename(file)
+    const results: (Rewritten | Error)[] = []
+    const failure = (e: unknown) => (e instanceof Error ? e : new Error(reason(e)))
+    // The images whose labels are in the list still, by the names it gives them
+    const listed = new Map<string, number>()
+    for (const [k, { name, read }] of images.entries()) {
+      try {
+        const found = await stillIn(root, name, read)
+        if (found.format !== 'createml' || fold(found.file) !== fold(file)) throw new Error(`${name}'s labels weren't read from ${base}, so nothing is rewritten`)
+        listed.set(entryName(outputFileOf(root), name), k)
+      } catch (e) {
+        results[k] = failure(e)
+      }
+    }
+    if (!listed.size) return results
+    try {
+      const text = await textOf(file)
+      const list = indexed(text)
+      if (list.error) throw unreadable(base, list.error, ' as CreateML')
+      const changes = new Map<string, { shapes: Shape[]; verified: boolean }>()
+      for (const [entry, k] of listed) {
+        const { name } = images[k]
+        const own = list.entries.get(entry)
+        if (own === undefined) {
+          results[k] = new Error(`${base} no longer lists ${name}, so nothing is rewritten: check the folder again`)
+          continue
+        }
+        try {
+          const { shapes, verified } = readCreateML(own, entry)
+          changes.set(entry, { shapes: change(shapes), verified })
+        } catch (e) {
+          results[k] = new Error(`${name}'s entries in ${base} can't be read, so they're left unchanged: ${reason(e)}`)
+        }
+      }
+      if (changes.size) await writeTrashing(file, writeCreateMLEntries(text, changes))
+      for (const [entry, { shapes, verified }] of changes) {
+        const k = listed.get(entry)!
+        const { name } = images[k]
+        results[k] = { file, format: 'createml', item: { ...summarize(shapes, true), name, embedded: isEmbedded(root, name) || undefined, verified: verified || undefined } }
+      }
+    } catch (e) {
+      for (const k of listed.values()) results[k] ??= failure(e)
+    }
+    return results
   })
 }

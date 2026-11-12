@@ -366,6 +366,14 @@ function parsePython(text: string): unknown {
  * place of its old one, or added. Entries for other images stay as they were.
  */
 export function writeCreateML(existing: string | null, image: string, shapes: Shape[], verified: boolean): string {
+  return writeCreateMLEntries(existing, new Map([[image, { shapes, verified }]]))
+}
+
+/**
+ * writeCreateML for several images of one list at once, by the names the list gives them: the
+ * list is read and written once, however many images change in it
+ */
+export function writeCreateMLEntries(existing: string | null, images: Map<string, { shapes: Shape[]; verified: boolean }>): string {
   let list: unknown = []
   if (existing !== null) {
     try {
@@ -375,7 +383,24 @@ export function writeCreateML(existing: string | null, image: string, shapes: Sh
     }
     if (!Array.isArray(list)) fail("It isn't a CreateML file: the top level must be a list")
   }
-  const entry = {
+  const entries = list as unknown[]
+  // Each image's first entry, found in one pass
+  const first = new Map<string, number>()
+  entries.forEach((e, k) => {
+    if (isObject(e) && typeof e.image === 'string' && images.has(e.image) && !first.has(e.image)) first.set(e.image, k)
+  })
+  for (const [image, { shapes, verified }] of images) {
+    const entry = createmlEntry(image, shapes, verified)
+    const at = first.get(image)
+    if (at === undefined) entries.push(entry)
+    else entries[at] = entry
+  }
+  return pyDumps(entries)
+}
+
+/** An image's entry, as LabelImg's CreateMLWriter makes it */
+function createmlEntry(image: string, shapes: Shape[], verified: boolean) {
+  return {
     image,
     verified,
     annotations: shapes.map((s) => {
@@ -391,11 +416,6 @@ export function writeCreateML(existing: string | null, image: string, shapes: Sh
       }
     })
   }
-  const entries = list as unknown[]
-  const at = entries.findIndex((e) => isObject(e) && e.image === image)
-  if (at >= 0) entries[at] = entry
-  else entries.push(entry)
-  return pyDumps(entries)
 }
 
 /** Takes this image's entries out of a CreateML list; null when nothing else is left in it */
