@@ -148,9 +148,13 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
         {stats && (
           <>
             <div className="stats-tiles">
-              {TILES.map((t) => (
-                <div key={t.key} className={`stats-tile${(t.key === 'broken' || t.key === 'unreadable') && stats.images[t.key] ? ' bad-tile' : ''}`} title={t.title} data-tile={t.key}>
-                  <b>{number(stats.images[t.key])}</b><span>{t.name}</span>
+              {[TILES.slice(0, 4), TILES.slice(4)].map((half, k) => (
+                <div key={k} className="stats-half">
+                  {half.map((t) => (
+                    <div key={t.key} className={`stats-tile${(t.key === 'broken' || t.key === 'unreadable') && stats.images[t.key] ? ' bad-tile' : ''}`} title={t.title} data-tile={t.key}>
+                      <b>{number(stats.images[t.key])}</b><span>{t.name}</span>
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>

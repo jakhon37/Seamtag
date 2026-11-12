@@ -1169,6 +1169,15 @@ test("Statistics keeps its buttons clear and its bars' numbers whole, and scroll
       ends: [...new Set(columns.map((c) => Math.round(c.querySelector('span:last-child')!.getBoundingClientRect().bottom)))].length
     }
   })
+  /** Rows of tiles, whether each count and name shows whole and inside the window, and whether the window scrolls sideways */
+  const tiles = () => stats.evaluate((dialog) => {
+    const box = dialog.getBoundingClientRect(), all = [...dialog.querySelectorAll('.stats-tile')]
+    return {
+      rows: new Set(all.map((t) => Math.round(t.getBoundingClientRect().top))).size,
+      whole: all.every((t) => [...t.children].every((words) => words.scrollWidth <= words.clientWidth) && t.getBoundingClientRect().right <= box.right),
+      sideways: dialog.scrollWidth > dialog.clientWidth
+    }
+  })
   for (const theme of ['dark', 'light']) {
     for (const [width, height] of [[1500, 940], [1280, 800], [1000, 640], [960, 600]]) {
       await resize(app, page, width, height)
@@ -1186,6 +1195,14 @@ test("Statistics keeps its buttons clear and its bars' numbers whole, and scroll
         }
       }
       await shot(page, `stats-layout-${width}-${theme}.png`)
+      // The tiles share a row; with counts of a folder of millions of images, they go four a row and stay whole
+      expect(await tiles()).toEqual({ rows: 1, whole: true, sideways: false })
+      const counts = stats.locator('.stats-tile b')
+      const were = await counts.allTextContents()
+      await counts.evaluateAll((els) => els.forEach((el) => { el.textContent = '1,234,567' }))
+      expect(await tiles()).toEqual({ rows: 2, whole: true, sideways: false })
+      await shot(page, `stats-tiles-millions-${width}-${theme}.png`)
+      await counts.evaluateAll((els, texts) => els.forEach((el, k) => { el.textContent = texts[k] }), were)
     }
     if (theme === 'dark') {
       await stats.getByRole('button', { name: 'Close' }).click()
