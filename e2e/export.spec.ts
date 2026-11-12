@@ -589,6 +589,8 @@ test("a label file that can't be read stops the export, says how to clear it, an
   const dialog = await openExport(page)
   const error = dialog.locator('.export-errors .export-group')
   const said = /^b\.png: its label file, b\.json, can't be read \(.+\), so its labels can't be exported: repair or delete the label file, then check again$/
+  // b isn't counted, as a background or otherwise, while its labels can't be exported
+  const backgrounds = dialog.locator('.export-table tr', { hasText: 'Backgrounds' }).locator('td').nth(1)
   for (const format of ['COCO', 'YOLO detect']) {
     if (format !== 'COCO') await choose(dialog, format)
     await expect(error).toHaveCount(1)
@@ -596,6 +598,8 @@ test("a label file that can't be read stops the export, says how to clear it, an
     await expect(error.locator('.export-rows li')).toHaveText(said)
     await expect(error.getByRole('button', { name: 'Check again' })).toBeVisible()
     await expect(dialog.locator('#export-why')).toHaveText('Fix the error first')
+    await expect(dialog.locator('.export-lead')).toHaveText('1 image and 1 object')
+    await expect(backgrounds).toHaveText('0')
   }
   for (const theme of ['dark', 'light']) {
     await page.evaluate((t) => { document.documentElement.dataset.theme = t }, theme)

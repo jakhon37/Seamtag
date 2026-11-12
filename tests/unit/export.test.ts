@@ -774,6 +774,24 @@ describe('what stops an export', () => {
     expect(nothing.groups[0].issues[0].message).toBe('None of the images has labels to export: label some, or include the 2 never-labelled images as backgrounds')
   })
 
+  test("an image whose label file, or the image itself, can't be read isn't counted in what the export holds, as it stops the export", async () => {
+    const dir = await folderWith({ 'a.png': [square('cat', 1, 1)], 'b.png': null, 'c.png': [square('dog', 1, 1)] })
+    writeFileSync(path.join(dir, 'b.json'), '{ not json')
+    writeFileSync(path.join(dir, 'c.png'), 'not an image')
+    await openProject(dir, null)
+    for (const format of ['coco', 'yolo-detect'] as const) {
+      const check = await preflight(dir, options({ format }), { read: 'one' })
+      expect(codes(check).filter(([s]) => s === 'error').map(([, code]) => code).sort()).toEqual(
+        format === 'coco' ? ['coco-broken-labels', 'coco-unreadable-image'] : ['yolo-broken', 'yolo-no-size'])
+      // Neither is a background, nor are c's shapes objects
+      expect(check.splits).toEqual([expect.objectContaining({ images: 1, objects: 1, backgrounds: 0 })])
+      expect(check.labels).toEqual([{ label: 'cat', objects: [1] }, { label: 'dog', objects: [0] }])
+    }
+    // Repaired, b is counted
+    writeFileSync(path.join(dir, 'b.json'), labelme('b.png', [square('cat', 1, 1)]))
+    expect((await preflight(dir, options(), { read: 'two' })).splits[0]).toMatchObject({ images: 2, objects: 2, backgrounds: 0 })
+  })
+
   test('a label file that gives another image size stops it, as the Check calls it an error, naming both sizes', async () => {
     const dir = await folderWith({ 'a.png': [square('cat', 1, 1)], 'c.png': [square('cat', 20, 20, 40)] }, [200, 100])
     // As if its shapes were drawn on a copy twice the size

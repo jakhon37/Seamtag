@@ -763,6 +763,8 @@ type Tally = {
   /** No object written */
   background: boolean
   posed: number
+  /** Taken by the writers: not when its label file, or the image itself, can't be read, which stops the export */
+  held: boolean
 }
 
 // COCO's own names, which CVAT 2.83's COCO export also writes: annotations/instances_<split>.json beside images/<split>/
@@ -779,11 +781,13 @@ const globalIssues = (g: Gathered): Issue[] => TASKS[g.options.format] ? []
 function yoloRows(g: Gathered, i: Item): { text: string; tally: Tally } {
   const task = TASKS[g.options.format]!
   // With no keypoints file there are no pose rows to make: the check says so, and nothing is exported
-  if (task === 'pose' && !g.schema) return { text: '', tally: { issues: [], objects: [], background: false, posed: 0 } }
+  if (task === 'pose' && !g.schema) return { text: '', tally: { issues: [], objects: [], background: false, posed: 0, held: true } }
   const rows = labelRows(i.image, task, g.classes, g.schema ?? undefined)
   const objects: string[] = []
   for (const line of rows.text.split('\n')) if (line) objects.push(g.classes[Number(line.slice(0, line.indexOf(' ')))])
-  return { text: rows.text, tally: { issues: unique(rows.issues.map((f) => renumbered(f, i.map))), objects, background: !rows.rows, posed: task === 'pose' ? rows.rows : 0 } }
+  // The rows' writer takes no image whose label file or size can't be read
+  const held = !i.image.broken && i.image.width > 0 && i.image.height > 0
+  return { text: rows.text, tally: { issues: unique(rows.issues.map((f) => renumbered(f, i.map))), objects, background: !rows.rows, posed: task === 'pose' ? rows.rows : 0, held } }
 }
 
 /**
@@ -793,7 +797,7 @@ function yoloRows(g: Gathered, i: Item): { text: string; tally: Tally } {
 function cocoChunk(g: Gathered, part: Item[], names: string[], info: CocoInfo, global: Map<string, Issue>) {
   const entries = part.map((i, k): CocoEntry => ({ image: i.image, fileName: names[k], poses: i.poses }))
   const at = new Map(part.map((i, k) => [i.image.name, k]))
-  const tallies: Tally[] = part.map(() => ({ issues: [], objects: [], background: true, posed: 0 }))
+  const tallies: Tally[] = part.map(() => ({ issues: [], objects: [], background: true, posed: 0, held: false }))
   const datasets: [CocoTask, CocoDataset][] = []
   for (const task of cocoTasks(g)) {
     const { dataset, issues } = writeCoco(entries, { task, labels: g.classes, info, schema: g.schema ?? undefined })
@@ -807,6 +811,7 @@ function cocoChunk(g: Gathered, part: Item[], names: string[], info: CocoInfo, g
     let k = 0
     for (const im of dataset.images) {
       while (k < names.length && names[k] !== im.file_name) k++
+      if (k < names.length) tallies[k].held = true
       of.set(im.id, k++)
     }
     for (const a of dataset.annotations) {
@@ -866,6 +871,9 @@ async function summed(g: Gathered, tallies: Tally[], global: Issue[], turn: Turn
   for (const [k, item] of g.items.entries()) {
     await turn()
     const t = tallies[k], at = g.splits.indexOf(item.split), split = splits.get(item.split)!
+    for (const f of t.issues) issues.push(f)
+    // An image the writers can't take isn't in the export, which its error stops until it's repaired
+    if (!t.held) continue
     split.images++
     split.objects += t.objects.length
     split.posed += t.posed
@@ -875,7 +883,6 @@ async function summed(g: Gathered, tallies: Tally[], global: Issue[], turn: Turn
       if (!row) labels.set(label, (row = g.splits.map(() => 0)))
       row[at]++
     }
-    for (const f of t.issues) issues.push(f)
   }
   for (const f of unique(global)) issues.push(f)
   return { splits: [...splits.values()], labels: [...labels].map(([label, objects]): LabelCount => ({ label, objects })), issues }
