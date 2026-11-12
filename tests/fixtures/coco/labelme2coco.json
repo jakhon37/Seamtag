@@ -1,0 +1,778 @@
+{
+ "labelme": "7.9.1",
+ "pycocotools": "2.0.11",
+ "labels": [
+  "cat",
+  "dog",
+  "ball",
+  "plate",
+  "blob"
+ ],
+ "files": {
+  "a.json": {
+   "version": "5.5.0",
+   "flags": {},
+   "shapes": [
+    {
+     "label": "cat",
+     "points": [
+      [
+       5.5,
+       4.25
+      ],
+      [
+       25.0,
+       6.0
+      ],
+      [
+       20.75,
+       24.5
+      ],
+      [
+       7.0,
+       20.0
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "polygon",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "dog",
+     "points": [
+      [
+       40.0,
+       30.0
+      ],
+      [
+       30.5,
+       10.25
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "rectangle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "ball",
+     "points": [
+      [
+       50.0,
+       38.0
+      ],
+      [
+       54.0,
+       41.0
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "circle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "plate",
+     "points": [
+      [
+       13.26007853819427,
+       27.01809858523952
+      ],
+      [
+       25.47608260841108,
+       31.464360448473208
+      ],
+      [
+       22.739921461805732,
+       38.98190141476048
+      ],
+      [
+       10.523917391588919,
+       34.535639551526785
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "oriented_rectangle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "dog",
+     "points": [
+      [
+       2.0,
+       40.0
+      ],
+      [
+       12.0,
+       40.0
+      ],
+      [
+       8.0,
+       46.0
+      ]
+     ],
+     "group_id": 1,
+     "description": "",
+     "shape_type": "polygon",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "cat",
+     "points": [
+      [
+       30.0,
+       40.0
+      ],
+      [
+       36.0,
+       40.0
+      ],
+      [
+       33.0,
+       46.0
+      ]
+     ],
+     "group_id": 1,
+     "description": "",
+     "shape_type": "polygon",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "dog",
+     "points": [
+      [
+       14.0,
+       41.0
+      ],
+      [
+       20.0,
+       46.0
+      ]
+     ],
+     "group_id": 1,
+     "description": "",
+     "shape_type": "rectangle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "blob",
+     "points": [
+      [
+       44.0,
+       2.0
+      ],
+      [
+       53.0,
+       9.0
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "mask",
+     "flags": {},
+     "mask": "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAICAAAAADlkTFqAAAALElEQVR4nCXKsQ0AMBCDwOP339kpIhcgZCl/H8nRgq4JzWmg3Re49vO6/xseTxULGSPM4bIAAAAASUVORK5CYII="
+    }
+   ],
+   "imagePath": "a.png",
+   "imageData": null,
+   "imageHeight": 48,
+   "imageWidth": 64
+  },
+  "b.json": {
+   "version": "5.5.0",
+   "flags": {},
+   "shapes": [
+    {
+     "label": "ball",
+     "points": [
+      [
+       80.0,
+       60.0
+      ],
+      [
+       80.0,
+       5.0
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "circle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "blob",
+     "points": [
+      [
+       10.0,
+       10.0
+      ],
+      [
+       19.0,
+       17.0
+      ]
+     ],
+     "group_id": 2,
+     "description": "",
+     "shape_type": "mask",
+     "flags": {},
+     "mask": "iVBORw0KGgoAAAANSUhEUgAAAAoAAAAICAAAAADlkTFqAAAAKElEQVR4nFXIsQkAMAzAMDn//5xOhVaLwZT0p2xgZ13TnY1HqmRoLToLuwccN63RBAAAAABJRU5ErkJggg=="
+    },
+    {
+     "label": "blob",
+     "points": [
+      [
+       15.0,
+       15.0
+      ],
+      [
+       30.0,
+       15.0
+      ],
+      [
+       30.0,
+       30.0
+      ],
+      [
+       15.0,
+       30.0
+      ]
+     ],
+     "group_id": 2,
+     "description": "",
+     "shape_type": "polygon",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "ball",
+     "points": [
+      [
+       30.3,
+       90.7
+      ],
+      [
+       38.1,
+       95.2
+      ]
+     ],
+     "group_id": null,
+     "description": "",
+     "shape_type": "circle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "plate",
+     "points": [
+      [
+       98.45477118706076,
+       84.09916032842
+      ],
+      [
+       131.22085295862044,
+       61.15610287437815
+      ],
+      [
+       141.54522881293926,
+       75.90083967158
+      ],
+      [
+       108.77914704137957,
+       98.84389712562185
+      ]
+     ],
+     "group_id": 5,
+     "description": "",
+     "shape_type": "oriented_rectangle",
+     "flags": {},
+     "mask": null
+    },
+    {
+     "label": "plate",
+     "points": [
+      [
+       100.0,
+       100.0
+      ],
+      [
+       130.0,
+       100.0
+      ],
+      [
+       115.0,
+       115.0
+      ]
+     ],
+     "group_id": 5,
+     "description": "",
+     "shape_type": "polygon",
+     "flags": {},
+     "mask": null
+    }
+   ],
+   "imagePath": "b.png",
+   "imageData": null,
+   "imageHeight": 120,
+   "imageWidth": 160
+  }
+ },
+ "masks": {
+  "a.json": {
+   "7": [
+    "1011010101",
+    "0101011010",
+    "0110111011",
+    "1011111101",
+    "1101111110",
+    "0101111110",
+    "1010111101",
+    "1011010101"
+   ]
+  },
+  "b.json": {
+   "1": [
+    "0110101011",
+    "1010110101",
+    "1101111110",
+    "0101111110",
+    "1011111101",
+    "1011111101",
+    "0101111010",
+    "0110101011"
+   ]
+  }
+ },
+ "coco": {
+  "info": {
+   "description": null,
+   "url": null,
+   "version": null,
+   "year": 2026,
+   "contributor": null,
+   "date_created": "2026-11-12 00:00:00.000000"
+  },
+  "licenses": [
+   {
+    "url": null,
+    "id": 0,
+    "name": null
+   }
+  ],
+  "type": "instances",
+  "images": [
+   {
+    "license": 0,
+    "url": null,
+    "file_name": "JPEGImages/a.jpg",
+    "height": 48,
+    "width": 64,
+    "date_captured": null,
+    "id": 0
+   },
+   {
+    "license": 0,
+    "url": null,
+    "file_name": "JPEGImages/b.jpg",
+    "height": 120,
+    "width": 160,
+    "date_captured": null,
+    "id": 1
+   }
+  ],
+  "categories": [
+   {
+    "supercategory": null,
+    "id": 0,
+    "name": "_background_"
+   },
+   {
+    "supercategory": null,
+    "id": 1,
+    "name": "cat"
+   },
+   {
+    "supercategory": null,
+    "id": 2,
+    "name": "dog"
+   },
+   {
+    "supercategory": null,
+    "id": 3,
+    "name": "ball"
+   },
+   {
+    "supercategory": null,
+    "id": 4,
+    "name": "plate"
+   },
+   {
+    "supercategory": null,
+    "id": 5,
+    "name": "blob"
+   }
+  ],
+  "annotations": [
+   {
+    "id": 0,
+    "image_id": 0,
+    "category_id": 1,
+    "segmentation": [
+     [
+      5.5,
+      4.25,
+      25.0,
+      6.0,
+      20.75,
+      24.5,
+      7.0,
+      20.0
+     ]
+    ],
+    "area": 304.0,
+    "bbox": [
+     5.0,
+     4.0,
+     21.0,
+     21.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 1,
+    "image_id": 0,
+    "category_id": 2,
+    "segmentation": [
+     [
+      30.5,
+      10.25,
+      40.0,
+      10.25,
+      40.0,
+      30.0,
+      30.5,
+      30.0
+     ]
+    ],
+    "area": 231.0,
+    "bbox": [
+     30.0,
+     10.0,
+     11.0,
+     21.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 2,
+    "image_id": 0,
+    "category_id": 3,
+    "segmentation": [
+     [
+      55.0,
+      38.0,
+      54.33012701892219,
+      40.5,
+      52.5,
+      42.33012701892219,
+      50.0,
+      43.0,
+      47.5,
+      42.33012701892219,
+      45.66987298107781,
+      40.5,
+      45.0,
+      38.0,
+      45.6698729810778,
+      35.5,
+      47.5,
+      33.66987298107781,
+      50.0,
+      33.0,
+      52.5,
+      33.6698729810778,
+      54.33012701892219,
+      35.5
+     ]
+    ],
+    "area": 97.0,
+    "bbox": [
+     45.0,
+     33.0,
+     11.0,
+     11.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 3,
+    "image_id": 0,
+    "category_id": 4,
+    "segmentation": [
+     [
+      13.26007853819427,
+      27.01809858523952,
+      25.47608260841108,
+      31.464360448473208,
+      22.739921461805732,
+      38.98190141476048,
+      10.523917391588919,
+      34.535639551526785
+     ]
+    ],
+    "area": 108.0,
+    "bbox": [
+     10.0,
+     27.0,
+     16.0,
+     12.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 4,
+    "image_id": 0,
+    "category_id": 2,
+    "segmentation": [
+     [
+      2.0,
+      40.0,
+      12.0,
+      40.0,
+      8.0,
+      46.0
+     ],
+     [
+      14.0,
+      41.0,
+      20.0,
+      41.0,
+      20.0,
+      46.0,
+      14.0,
+      46.0
+     ]
+    ],
+    "area": 84.0,
+    "bbox": [
+     2.0,
+     40.0,
+     19.0,
+     7.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 5,
+    "image_id": 0,
+    "category_id": 1,
+    "segmentation": [
+     [
+      30.0,
+      40.0,
+      36.0,
+      40.0,
+      33.0,
+      46.0
+     ]
+    ],
+    "area": 25.0,
+    "bbox": [
+     30.0,
+     40.0,
+     7.0,
+     7.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 6,
+    "image_id": 0,
+    "category_id": 5,
+    "segmentation": {
+     "size": [
+      48,
+      64
+     ],
+     "counts": "RR2121O0X10hN0Y1OgN110V10iN10NY14O30N0KiN4W1MhN0Y1OgN110T`0"
+    },
+    "area": 54.0,
+    "bbox": [
+     44.0,
+     2.0,
+     10.0,
+     8.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 7,
+    "image_id": 1,
+    "category_id": 3,
+    "segmentation": [
+     [
+      135.0,
+      60.0,
+      133.12592044589877,
+      74.23504748063864,
+      127.63139720814414,
+      87.5,
+      118.89087296526012,
+      98.89087296526012,
+      107.5,
+      107.63139720814412,
+      94.23504748063866,
+      113.12592044589874,
+      80.0,
+      115.0,
+      65.76495251936137,
+      113.12592044589876,
+      52.500000000000014,
+      107.63139720814414,
+      41.10912703473989,
+      98.89087296526012,
+      32.368602791855885,
+      87.50000000000001,
+      26.87407955410125,
+      74.23504748063866,
+      25.0,
+      60.00000000000001,
+      26.874079554101236,
+      45.76495251936138,
+      32.368602791855864,
+      32.500000000000014,
+      41.10912703473986,
+      21.109127034739906,
+      52.49999999999997,
+      12.368602791855892,
+      65.76495251936132,
+      6.874079554101257,
+      79.99999999999999,
+      5.0,
+      94.23504748063861,
+      6.874079554101236,
+      107.49999999999997,
+      12.36860279185585,
+      118.8908729652601,
+      21.109127034739878,
+      127.63139720814411,
+      32.49999999999997,
+      133.12592044589874,
+      45.764952519361316
+     ]
+    ],
+    "area": 9657.0,
+    "bbox": [
+     25.0,
+     5.0,
+     111.0,
+     111.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 8,
+    "image_id": 1,
+    "category_id": 5,
+    "segmentation": {
+     "size": [
+      120,
+      160
+     ],
+     "counts": "kU1210a3O_L110^30bL0OOa34O30<B]OnLb0S31O]OnL10>R3BoL?V3O00000000000000000000YS?"
+    },
+    "area": 301.0,
+    "bbox": [
+     10.0,
+     10.0,
+     21.0,
+     21.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 9,
+    "image_id": 1,
+    "category_id": 3,
+    "segmentation": [
+     [
+      39.30499861188218,
+      90.7,
+      38.09855755893358,
+      95.20249930594109,
+      34.80249930594109,
+      98.49855755893358,
+      30.3,
+      99.70499861188219,
+      25.79750069405891,
+      98.49855755893358,
+      22.501442441066427,
+      95.2024993059411,
+      21.295001388117818,
+      90.7,
+      22.501442441066423,
+      86.19750069405892,
+      25.797500694058904,
+      82.90144244106644,
+      30.3,
+      81.69500138811782,
+      34.80249930594108,
+      82.90144244106642,
+      38.09855755893357,
+      86.1975006940589
+     ]
+    ],
+    "area": 277.0,
+    "bbox": [
+     21.0,
+     81.0,
+     19.0,
+     19.0
+    ],
+    "iscrowd": 0
+   },
+   {
+    "id": 10,
+    "image_id": 1,
+    "category_id": 4,
+    "segmentation": [
+     [
+      98.45477118706076,
+      84.09916032842,
+      131.22085295862044,
+      61.15610287437815,
+      141.54522881293926,
+      75.90083967158,
+      108.77914704137957,
+      98.84389712562185
+     ],
+     [
+      100.0,
+      100.0,
+      130.0,
+      100.0,
+      115.0,
+      115.0
+     ]
+    ],
+    "area": 986.0,
+    "bbox": [
+     98.0,
+     61.0,
+     44.0,
+     55.0
+    ],
+    "iscrowd": 0
+   }
+  ]
+ }
+}

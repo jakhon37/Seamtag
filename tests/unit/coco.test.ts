@@ -1,0 +1,603 @@
+import { mkdirSync, readFileSync, writeFileSync } from 'fs'
+import path from 'path'
+import { describe, expect, test } from 'vitest'
+import {
+  type CocoAnnotation, type CocoEntry, type CocoImage, type CocoRle, cocoLabels, matchCocoImages, readCoco, writeCoco
+} from '../../src/shared/coco'
+import type { DatasetImage, KeypointSchema, MaskBits, PoseInstance } from '../../src/shared/dataset'
+import { newShape, parseLabelFile, type Shape } from '../../src/shared/labelfile'
+import { circlePolygon } from '../../src/shared/outline'
+import { rleArea, rleDecode, rleFrMaskBits, rleFrPoly, rleFrString, rleMerge, rleToBbox, rleToString } from '../../src/shared/rle'
+
+const INFO = { description: 'Seamtag test', version: '3.3.0', year: 2026, date_created: '2026-11-12 00:00:00' }
+
+const image = (name: string, width: number, height: number, shapes: Shape[], masks: (MaskBits | null)[] = []): DatasetImage => ({
+  name, width, height, file: name.replace(/\.\w+$/, '.json'), format: 'labelme', shapes, masks: shapes.map((_, i) => masks[i] ?? null), flags: {}, verified: false
+})
+
+// Rows of 0 and 1 to a mask shape's pixels with its top-left pixel at x, y
+function bits(x: number, y: number, rows: string[]): MaskBits {
+  const height = rows.length, width = rows[0].length
+  const data = new Uint8Array(width * height)
+  rows.forEach((row, j) => { for (let i = 0; i < width; i++) data[j * width + i] = row[i] === '1' ? 1 : 0 })
+  return { x, y, width, height, data }
+}
+
+const decode = (seg: CocoRle) => rleDecode(rleFrString(seg.counts as string, seg.size[0], seg.size[1]))
+const instancesOf = (entries: CocoEntry[], labels: string[] = []) => writeCoco(entries, { task: 'instances', labels, info: INFO })
+
+// The four corners of a box of half-size hw x hh at cx, cy, turned by some degrees
+function rotated(cx: number, cy: number, hw: number, hh: number, degrees: number) {
+  const t = (degrees * Math.PI) / 180, c = Math.cos(t), s = Math.sin(t)
+  return [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([dx, dy]) => [cx + dx * c - dy * s, cy + dx * s + dy * c])
+}
+
+describe("as labelme 7.9.1's labelme2coco writes the same LabelMe files", () => {
+  // tests/fixtures/coco/make_labelme2coco.py runs labelme2coco itself
+  const fx = JSON.parse(readFileSync(path.join(__dirname, '../fixtures/coco/labelme2coco.json'), 'utf8'))
+  const files = Object.keys(fx.files).sort()
+  const entries = files.map((file): CocoEntry => {
+    const doc = parseLabelFile(JSON.stringify(fx.files[file]))
+    // labelme's rule for a mask with a whole-pixel box: its top-left corner, both corners in
+    const masks = doc.shapes.map((s, i) => (fx.masks[file][i] ? bits(s.points[0][0], s.points[0][1], fx.masks[file][i]) : null))
+    return { image: image(file.replace('.json', '.png'), doc.imageWidth!, doc.imageHeight!, doc.shapes, masks), fileName: `images/${file.replace('.json', '.png')}` }
+  })
+  const { dataset: ours, issues } = instancesOf(entries, fx.labels)
+  const theirs = fx.coco
+  const nameOf = (cats: { id: number; name: string }[], id: number) => cats.find((c) => c.id === id)!.name
+  const pairsOf = () => files.map((_, k) => [
+    ours.annotations.filter((a) => a.image_id === k + 1),
+    theirs.annotations.filter((a: CocoAnnotation) => a.image_id === k),
+    entries[k].image
+  ] as [CocoAnnotation[], CocoAnnotation[], DatasetImage])
+  // The shape type behind each polygon of one of our annotations
+  const typesOf = (a: CocoAnnotation): string[] => {
+    const r = a.attributes ?? {}
+    if (Array.isArray(r.shapes)) return r.shapes.map((s: { shape_type?: string }) => s.shape_type ?? 'polygon')
+    return [(r.shape_type as string) ?? 'polygon']
+  }
+
+  test('the fixture comes from labelme 7.9.1 and pycocotools 2.0.11', () => {
+    expect([fx.labelme, fx.pycocotools]).toEqual(['7.9.1', '2.0.11'])
+    expect(issues).toEqual([])
+  })
+
+  test('shapes sharing a label and a group_id are one object, in the same order, of the same categories', () => {
+    for (const [mine, its] of pairsOf()) {
+      expect(mine.map((a) => nameOf(ours.categories, a.category_id))).toEqual(its.map((a) => nameOf(theirs.categories, a.category_id)))
+      expect(mine.map((a) => (Array.isArray(a.segmentation) ? a.segmentation.length : 'mask'))).toEqual(
+        its.map((a) => (Array.isArray(a.segmentation) ? a.segmentation.length : 'mask')))
+    }
+  })
+
+  test('polygons, rectangles and rotated boxes are the same numbers; circles the same vertices to 1e-9', () => {
+    let circles = 0
+    for (const [mine, its] of pairsOf()) {
+      mine.forEach((a, k) => {
+        if (!Array.isArray(a.segmentation)) return
+        const types = typesOf(a)
+        a.segmentation.forEach((poly, p) => {
+          const want = (its[k].segmentation as number[][])[p]
+          expect(poly.length).toBe(want.length)
+          if (types[p] !== 'circle') return expect(poly).toEqual(want)
+          circles++
+          poly.forEach((v, i) => expect(Math.abs(v - want[i])).toBeLessThan(1e-9))
+        })
+      })
+    }
+    expect(circles).toBe(3)
+  })
+
+  test('a mask is the same pixels; a mask with a polygon holds both', () => {
+    let masks = 0
+    for (const [mine, its, im] of pairsOf()) {
+      mine.forEach((a, k) => {
+        if (Array.isArray(a.segmentation)) return
+        masks++
+        const ourPixels = decode(a.segmentation), theirPixels = decode(its[k].segmentation as CocoRle)
+        if (typesOf(a).length === 1) return expect(ourPixels).toEqual(theirPixels)
+        // labelme2coco draws the polygon with Pillow, which takes in its edge pixels too
+        expect(ourPixels.every((v, i) => !v || theirPixels[i])).toBe(true)
+        const own = decode({ size: [im.height, im.width], counts: rleToString(rleFrMaskBits(im.masks.find((m) => m)!, im.height, im.width)) })
+        expect(own.every((v, i) => !v || ourPixels[i])).toBe(true)
+        // and the polygon's pixels besides
+        expect(ourPixels.reduce((n, v) => n + v, 0)).toBeGreaterThan(own.reduce((n, v) => n + v, 0))
+      })
+    }
+    expect(masks).toBe(2)
+  })
+})
+
+describe('writing COCO', () => {
+  test('ids count from 1, and categories follow the label list, then labels found past it', () => {
+    const entries = [
+      { image: image('a.png', 40, 30, [newShape('dog', 'polygon', [[1, 1], [9, 1], [5, 8]]), newShape('emu', 'rectangle', [[2, 2], [8, 9]])]), fileName: 'images/a.png' },
+      { image: image('b.png', 40, 30, [newShape('cat', 'rectangle', [[2, 2], [8, 9]]), newShape('fox', 'circle', [[20, 15], [24, 15]])]), fileName: 'images/b.png' }
+    ]
+    const { dataset, issues } = instancesOf(entries, ['cat', 'dog'])
+    expect(dataset.images.map((i) => [i.id, i.file_name])).toEqual([[1, 'images/a.png'], [2, 'images/b.png']])
+    expect(dataset.annotations.map((a) => [a.id, a.image_id, a.category_id])).toEqual([[1, 1, 2], [2, 1, 3], [3, 2, 1], [4, 2, 4]])
+    expect(dataset.categories).toEqual([
+      { id: 1, name: 'cat', supercategory: '' }, { id: 2, name: 'dog', supercategory: '' },
+      { id: 3, name: 'emu', supercategory: '' }, { id: 4, name: 'fox', supercategory: '' }
+    ])
+    expect(issues.map((i) => i.message)).toEqual([
+      "“emu” isn't in the label list, so it's category 3, after the list",
+      "“fox” isn't in the label list, so it's category 4, after the list"
+    ])
+    expect(cocoLabels(['cat', 'dog'], entries)).toEqual(['cat', 'dog', 'emu', 'fox'])
+  })
+
+  test('info and licences are written as given, with no clock read, so the same labels give the same file', () => {
+    const entries = [{ image: image('a.png', 40, 30, [newShape('dog', 'polygon', [[1, 1], [9, 1], [5, 8]])]), fileName: 'a.png' }]
+    const one = instancesOf(entries).json, two = instancesOf(entries).json
+    expect(one).toBe(two)
+    const data = JSON.parse(one)
+    expect(Object.keys(data)).toEqual(['info', 'licenses', 'images', 'annotations', 'categories'])
+    expect(data.info).toEqual({ description: 'Seamtag test', url: '', version: '3.3.0', year: 2026, contributor: '', date_created: '2026-11-12 00:00:00' })
+    expect(data.licenses).toEqual([])
+  })
+
+  test("areas are pycocotools' pixel counts and polygon boxes their corners'", () => {
+    const shapes = [
+      newShape('a', 'rectangle', [[10, 10], [20, 20]]),
+      newShape('a', 'rectangle', [[10.2, 10.2], [19.7, 19.7]]),
+      newShape('a', 'polygon', [[0, 0], [10, 0], [0, 10]])
+    ]
+    const { dataset } = instancesOf([{ image: image('a.png', 40, 40, shapes), fileName: 'a.png' }])
+    expect(dataset.annotations.map((a) => [a.area, a.bbox])).toEqual([
+      [100, [10, 10, 10, 10]], [100, [10.2, 10.2, 19.7 - 10.2, 19.7 - 10.2]], [45, [0, 0, 10, 10]]
+    ])
+    expect(dataset.annotations[0].segmentation).toEqual([[10, 10, 20, 10, 20, 20, 10, 20]])
+  })
+
+  test('a mask is compressed runs of the whole image, with its box and area from them, not a crowd', () => {
+    const m = bits(5, 3, ['0110', '1111', '0100'])
+    const { dataset } = instancesOf([{ image: image('a.png', 12, 8, [newShape('blob', 'mask', [[5, 3], [8, 5]])], [m]), fileName: 'a.png' }])
+    const [a] = dataset.annotations
+    const want = rleFrMaskBits(m, 8, 12)
+    expect(a.segmentation).toEqual({ size: [8, 12], counts: rleToString(want) })
+    expect([a.area, a.bbox, a.iscrowd]).toEqual([7, [5, 3, 4, 3], 0])
+    expect(a.attributes).toEqual({ shape_type: 'mask', points: [[5, 3], [8, 5]] })
+  })
+
+  test('an object with a mask in it is one mask: the mask and its other shapes filled as pycocotools fills polygons', () => {
+    const m = bits(1, 1, ['11', '11'])
+    const shapes = [newShape('blob', 'mask', [[1, 1], [2, 2]], { group_id: 4 }), newShape('blob', 'polygon', [[5, 5], [9, 5], [9, 9]], { group_id: 4 })]
+    const { dataset } = instancesOf([{ image: image('a.png', 12, 12, shapes, [m]), fileName: 'a.png' }])
+    const [a] = dataset.annotations
+    const union = rleMerge([rleFrMaskBits(m, 12, 12), rleFrPoly([5, 5, 9, 5, 9, 9], 12, 12)])
+    expect((a.segmentation as CocoRle).counts).toBe(rleToString(union))
+    expect([a.area, a.bbox]).toEqual([rleArea(union), rleToBbox(union)])
+    expect((a.attributes!.shapes as unknown[]).length).toBe(2)
+  })
+
+  test('shapes with no inside, too few points, no radius or an unreadable mask are left out, each with a reason', () => {
+    const shapes = [
+      newShape('rope', 'line', [[1, 1], [9, 9]]), newShape('path', 'linestrip', [[1, 1], [9, 9], [3, 7]]), newShape('nose', 'point', [[4, 4]]),
+      newShape('dots', 'points', [[1, 1], [2, 2], [3, 3]]), newShape('bad', 'polygon', [[1, 1], [9, 9]]), newShape('ball', 'circle', [[5, 5], [5, 5]]),
+      newShape('blob', 'mask', [[1, 1], [4, 4]]), newShape('box', 'rectangle', [[1, 1]])
+    ]
+    const { dataset, issues } = instancesOf([{ image: image('sub/a.png', 20, 20, shapes), fileName: 'a.png' }])
+    expect(dataset.annotations).toEqual([])
+    expect(issues.map((i) => [i.severity, i.code, i.image, i.shape])).toEqual([
+      ['warning', 'coco-no-inside', 'sub/a.png', 0], ['warning', 'coco-no-inside', 'sub/a.png', 1], ['warning', 'coco-no-inside', 'sub/a.png', 2],
+      ['warning', 'coco-no-inside', 'sub/a.png', 3], ['warning', 'coco-too-few-points', 'sub/a.png', 4], ['warning', 'coco-no-radius', 'sub/a.png', 5],
+      ['warning', 'coco-mask-unreadable', 'sub/a.png', 6], ['warning', 'coco-bad-shape', 'sub/a.png', 7]
+    ])
+    expect(issues[0].message).toBe("sub/a.png: shape 1, a line labelled “rope”, has no inside for COCO to hold, so it's left out")
+    expect(issues[4].message).toBe("sub/a.png: shape 5, a polygon labelled “bad”, has 2 points, and COCO needs 3, so it's left out")
+    expect(issues[7].message).toBe("sub/a.png: shape 8, a rectangle labelled “box”, has 1 point, not 2, so it's left out")
+  })
+
+  test('points past the image are moved onto its edges, and mask pixels past it left out, each noted', () => {
+    const m = bits(17, 18, ['1111', '1111'])
+    const shapes = [newShape('cat', 'polygon', [[-5, 10], [12, -3], [25, 15]]), newShape('blob', 'mask', [[17, 18], [20, 19]], { group_id: 2 })]
+    const { dataset, issues } = instancesOf([{ image: image('a.png', 20, 19, shapes, [null, m]), fileName: 'a.png' }], ['cat', 'blob'])
+    expect(dataset.annotations[0].segmentation).toEqual([[0, 10, 12, 0, 20, 15]])
+    expect(dataset.annotations[0].bbox).toEqual([0, 0, 20, 15])
+    expect(dataset.annotations[1].area).toBe(3)
+    expect(issues.map((i) => [i.severity, i.code, i.shape])).toEqual([['info', 'coco-outside', 0], ['info', 'coco-outside', 1]])
+    expect(issues[1].message).toBe("a.png: shape 2, a mask labelled “blob”, has 5 pixels past the image, so they're left out")
+  })
+
+  test('an object that covers no whole pixel is left out', () => {
+    const shapes = [newShape('dust', 'polygon', [[3.1, 3.1], [3.9, 3.2], [3.5, 3.4]]), newShape('cat', 'polygon', [[-9, 2], [-3, 2], [-6, 8]])]
+    const { dataset, issues } = instancesOf([{ image: image('a.png', 20, 20, shapes), fileName: 'a.png' }])
+    expect(dataset.annotations).toEqual([])
+    expect(issues.filter((i) => i.code === 'coco-no-pixels').map((i) => i.message)).toEqual([
+      "a.png: “dust” (shape 1) covers no whole pixel, so it's left out", "a.png: “cat” (shape 2) covers no whole pixel, so it's left out"
+    ])
+  })
+
+  test('images whose label file or pixels can\'t be read are left out with an error', () => {
+    const broken = { ...image('a.png', 20, 20, []), broken: "It isn't valid JSON" }
+    const unread = { ...image('b.png', 0, 0, []), unreadable: 'Input file is missing' }
+    const { dataset, issues } = instancesOf([{ image: broken, fileName: 'a.png' }, { image: unread, fileName: 'b.png' }, { image: image('c.png', 5, 5, []), fileName: 'c.png' }])
+    expect(dataset.images).toEqual([{ id: 1, width: 5, height: 5, file_name: 'c.png' }])
+    expect(issues.map((i) => [i.severity, i.message])).toEqual([
+      ['error', "a.png: its label file can't be read (It isn't valid JSON), so the image is left out"],
+      ['error', "b.png can't be read (Input file is missing), so it's left out"]
+    ])
+  })
+})
+
+// A posed person: a box, a polygon of another, and one made of its points alone
+const SCHEMA: KeypointSchema = {
+  classes: { person: ['nose', 'left_eye', 'right_eye', 'left_ear'] },
+  skeleton: { person: [['nose', 'left_eye'], ['nose', 'right_eye'], ['left_eye', 'left_ear']] }
+}
+function posed() {
+  const shapes = [
+    newShape('person', 'rectangle', [[10, 10], [40, 60]], { group_id: 7 }),
+    newShape('nose', 'point', [[20, 15]], { group_id: 7 }),
+    newShape('left_eye', 'point', [[18.5, 13.25]], { group_id: 7, flags: { difficult: true } }),
+    newShape('left_ear', 'point', [[16, 14]], { group_id: 7 }),
+    newShape('person', 'polygon', [[50, 10], [70, 12], [66, 40], [52, 38]], { group_id: 8 }),
+    newShape('nose', 'point', [[60, 20]], { group_id: 8 }),
+    newShape('right_eye', 'point', [[95, 20]], { group_id: 8 }),
+    newShape('nose', 'point', [[30, 70]], { group_id: 9 }),
+    newShape('left_eye', 'point', [[38, 77]], { group_id: 9 })
+  ]
+  const poses: PoseInstance[] = [
+    { label: 'person', group: 7, box: [10, 10, 40, 60], keypoints: [[20, 15, 2], [18.5, 13.25, 1], null, [16, 14, 2]], shapes: [0, 1, 2, 3] },
+    { label: 'person', group: 8, box: [50, 10, 70, 40], keypoints: [[60, 20, 2], null, [95, 20, 2], null], shapes: [4, 5, 6] },
+    { label: 'person', group: 9, box: [30, 70, 38, 77], keypoints: [[30, 70, 2], [38, 77, 2], null, null], shapes: [7, 8] }
+  ]
+  return { image: image('people.png', 90, 80, shapes), fileName: 'images/people.png', poses }
+}
+
+describe('writing COCO keypoints', () => {
+  const entry = posed()
+  const { dataset, issues } = writeCoco([entry], { task: 'keypoints', labels: ['car', 'person'], info: INFO, schema: SCHEMA })
+
+  test("categories keep the instances file's ids, with keypoint names and a skeleton counted from 1", () => {
+    expect(dataset.categories).toEqual([{
+      id: 2, name: 'person', supercategory: '', keypoints: ['nose', 'left_eye', 'right_eye', 'left_ear'], skeleton: [[1, 2], [1, 3], [2, 4]]
+    }])
+  })
+
+  test('keypoints are triplets with 0, 0, 0 for those not labelled, and num_keypoints on every annotation', () => {
+    expect(dataset.annotations.map((a) => [a.keypoints, a.num_keypoints, a.attributes])).toEqual([
+      [[20, 15, 2, 18.5, 13.25, 1, 0, 0, 0, 16, 14, 2], 3, { group_id: 7 }],
+      [[60, 20, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0], 1, { group_id: 8 }],
+      [[30, 70, 2, 38, 77, 2, 0, 0, 0, 0, 0, 0], 2, { group_id: 9 }]
+    ])
+    expect(issues.map((i) => i.message)).toEqual(["people.png: keypoint “right_eye” of “person” (group 8) lies past the image, so it's written as not labelled"])
+  })
+
+  test('the area is the outline\'s pixel count when the object has one, else its box\'s width x height', () => {
+    const [box, polygon, points] = dataset.annotations
+    expect([box.area, box.bbox, box.segmentation]).toEqual([1500, [10, 10, 30, 50], [[10, 10, 40, 10, 40, 60, 10, 60]]])
+    expect(polygon.area).toBe(rleArea(rleFrPoly([50, 10, 70, 12, 66, 40, 52, 38], 80, 90)))
+    expect(polygon.bbox).toEqual([50, 10, 20, 30])
+    expect([points.area, points.bbox, points.segmentation]).toEqual([56, [30, 70, 8, 7], [[30, 70, 38, 70, 38, 77, 30, 77]]])
+  })
+
+  test("the instances file leaves a posed object's points to the keypoints file", () => {
+    const { dataset: objects, issues: notes } = instancesOf([entry], ['car', 'person'])
+    expect(objects.annotations.map((a) => a.category_id)).toEqual([2, 2])
+    expect(notes).toEqual([])
+  })
+
+  test('posed objects of a class with no keypoint names, or the wrong number of keypoints, are left out', () => {
+    const bad = { ...entry, poses: [{ ...entry.poses[0], label: 'dog' }, { ...entry.poses[1], keypoints: [null] }] }
+    const out = writeCoco([bad], { task: 'keypoints', labels: ['person'], info: INFO, schema: SCHEMA })
+    expect(out.dataset.annotations).toEqual([])
+    expect(out.issues.map((i) => i.message)).toEqual([
+      "people.png: “dog” (group 7) has no keypoint names in the keypoints file, so it's left out",
+      "people.png: “person” (group 8) has 1 keypoint where the keypoints file names 4, so it's left out"
+    ])
+  })
+})
+
+// Every kind of shape Seamtag keeps, and what makes them hard to give back
+function everything() {
+  const m1 = bits(44, 2, ['1101100000', '1111111111', '0011111100', '0001111000', '0000110000', '1000000001', '1100000011', '1111111111'])
+  const m2 = bits(30, 31, ['01110', '11111', '01010', '00100', '11011', '10001'])
+  const m3 = bits(58, 40, Array.from({ length: 11 }, (_, j) => (j < 8 ? '1111100000' : '0000000000')))
+  const m4 = bits(2, 30, ['111', '101', '111'])
+  const m5 = bits(5, 5, ['1111', '1111', '1111'])
+  const shapes: Shape[] = [
+    newShape('cat', 'polygon', [[5.5, 4.25], [25, 6], [20.75, 24.5], [7, 20]], { description: 'tabby', flags: { difficult: true, truncated: false } }),
+    newShape('dog', 'rectangle', [[40, 30], [30.5, 10.25]]),
+    newShape('dog', 'rectangle', [[2, 2], [9.5, 8]]),
+    newShape('ball', 'circle', [[50, 38], [54, 41]]),
+    newShape('plate', 'oriented_rectangle', rotated(18, 33, 6.5, 4, 20)),
+    newShape('dog', 'polygon', [[2, 40], [12, 40], [8, 46]], { group_id: 1 }),
+    newShape('cat', 'polygon', [[-5, 10], [12, -3], [15, 15]]),
+    newShape('dog', 'rectangle', [[14, 41], [20, 46]], { group_id: 1 }),
+    newShape('rope', 'line', [[1, 1], [9, 9]]),
+    newShape('blob', 'mask', [[44, 2], [53, 9]]),
+    newShape('dog', 'circle', [[25, 44], [27, 44]], { group_id: 1 }),
+    newShape('blob', 'mask', [[30.4, 30.6], [35.2, 34.9]]),
+    newShape('blob', 'mask', [[58, 40], [67, 50]], { group_id: 6 }),
+    newShape('blob', 'mask', [[2, 30], [4, 32]], { group_id: 3 }),
+    newShape('nose', 'point', [[4, 4]]),
+    newShape('blob', 'polygon', [[6, 30], [12, 30], [9, 36]], { group_id: 3 }),
+    newShape('crowd', 'mask', [[5, 5], [8, 7]], { other: { iscrowd: 1 } }),
+    newShape('cat', 'polygon', [[30, 2], [38, 2], [34, 8]], { locked: true, flags: { ai: true }, other: { score: 0.93, source: 'sam' } }),
+    newShape('plate', 'oriented_rectangle', rotated(60, 20, 8, 3, -35).map(([x, y]) => [x + 3, y]), { group_id: 9 })
+  ]
+  const masks = [null, null, null, null, null, null, null, null, null, m1, null, m2, m3, m4, null, null, m5, null, null]
+  return { image: image('all.png', 64, 48, shapes, masks) }
+}
+
+describe('reading back what Seamtag wrote', () => {
+  test('gives back the same shapes, mask pixels and all, objects in the order they were first met', () => {
+    const { image: all } = everything()
+    const { json } = instancesOf([{ image: all, fileName: 'images/all.png' }], ['cat', 'dog'])
+    const read = readCoco(json, 'instances_default.json')
+    expect(read.issues.map((i) => i.code)).toEqual(['coco-crowd'])
+    const got = read.results.get(1)!
+    const want = inCocoOrder(all).filter(({ s }) => s.shape_type !== 'line' && s.shape_type !== 'point')
+    expect(got.shapes).toEqual(want.map(({ s }) => s))
+    expect(got.masks).toEqual(want.map(({ m }) => m))
+    expect(got.poses).toEqual([])
+  })
+
+  test('posed objects come back as their boxes and named keypoints, hidden ones marked 1', () => {
+    const { json } = writeCoco([posed()], { task: 'keypoints', labels: ['person'], info: INFO, schema: SCHEMA })
+    const read = readCoco(json, 'person_keypoints_default.json')
+    expect(read.results.get(1)!.poses).toEqual([
+      { label: 'person', group: 7, box: [10, 10, 40, 60], names: SCHEMA.classes.person, keypoints: [[20, 15, 2], [18.5, 13.25, 1], null, [16, 14, 2]] },
+      { label: 'person', group: 8, box: [50, 10, 70, 40], names: SCHEMA.classes.person, keypoints: [[60, 20, 2], null, null, null] },
+      { label: 'person', group: 9, box: [30, 70, 38, 77], names: SCHEMA.classes.person, keypoints: [[30, 70, 2], [38, 77, 2], null, null] }
+    ])
+    expect(read.results.get(1)!.shapes).toEqual([])
+  })
+})
+
+// A seeded random image of shapes of every kind with an inside: some grouped, some partly past
+// the image, masks with boxes past it or at fractions of a pixel. Mask pixels stay inside, so
+// nothing is cut and every shape can come back as it was.
+function randomImage(seed: number) {
+  let state = seed
+  const random = () => (state = (state * 16807) % 2147483647) / 2147483647
+  const int = (a: number, b: number) => a + Math.floor(random() * (b - a + 1))
+  const w = int(20, 80), h = int(20, 80)
+  const shapes: Shape[] = [], masks: (MaskBits | null)[] = []
+  for (let k = int(1, 9); k > 0; k--) {
+    const label = random() < 0.5 ? 'a' : 'b'
+    const extra: Partial<Shape> = { group_id: [null, null, 1, 2][int(0, 3)] }
+    if (random() < 0.2) extra.description = `note ${k}`
+    if (random() < 0.2) extra.flags = { difficult: random() < 0.5 }
+    if (random() < 0.1) extra.locked = true
+    if (random() < 0.1) extra.other = { score: Math.round(random() * 100) / 100 }
+    const cx = random() * w, cy = random() * h
+    const kind = int(0, 4)
+    let bitsOf: MaskBits | null = null
+    if (kind === 0) {
+      const n = int(3, 8), r = 2 + random() * Math.min(w, h) / 2
+      const angles = Array.from({ length: n }, () => random() * 2 * Math.PI).sort((p, q) => p - q)
+      shapes.push(newShape(label, 'polygon', angles.map((t) => [cx + r * (0.4 + random() * 0.6) * Math.cos(t), cy + r * (0.4 + random() * 0.6) * Math.sin(t)]), extra))
+    } else if (kind === 1) {
+      const hw = 1 + random() * w / 3, hh = 1 + random() * h / 3
+      const corners = [[cx - hw, cy - hh], [cx + hw, cy + hh]]
+      shapes.push(newShape(label, 'rectangle', random() < 0.5 ? corners : [corners[1], corners[0]], extra))
+    } else if (kind === 2) {
+      const r = 2 + random() * Math.min(w, h) / 2, t = random() * 2 * Math.PI
+      shapes.push(newShape(label, 'circle', [[cx, cy], [cx + r * Math.cos(t), cy + r * Math.sin(t)]], extra))
+    } else if (kind === 3) {
+      shapes.push(newShape(label, 'oriented_rectangle', rotated(cx, cy, 1.5 + random() * w / 4, 1.5 + random() * h / 4, random() * 180), extra))
+    } else {
+      const bw = int(2, 12), bh = int(2, 12), x = int(-3, w - 1), y = int(-3, h - 1)
+      const data = new Uint8Array(bw * bh)
+      for (let j = 0; j < bh; j++) for (let i = 0; i < bw; i++) data[j * bw + i] = x + i >= 0 && y + j >= 0 && x + i < w && y + j < h && random() < 0.6 ? 1 : 0
+      // One pixel at least, inside the image
+      data[(Math.max(0, -y)) * bw + Math.max(0, -x)] = 1
+      bitsOf = { x, y, width: bw, height: bh, data }
+      const fraction = random() < 0.3
+      const points = fraction ? [[x + 0.3, y - 0.2], [x + bw - 1.4, y + bh - 0.6]] : [[x, y], [x + bw - 1, y + bh - 1]]
+      if (extra.group_id === null && random() < 0.2) extra.other = { iscrowd: 1 }
+      shapes.push(newShape(label, 'mask', points, extra))
+    }
+    masks.push(bitsOf)
+  }
+  return image(`random/${seed}.png`, w, h, shapes, masks)
+}
+
+// The shapes COCO holds, in its order: by object, objects as first met
+function inCocoOrder(im: DatasetImage) {
+  const key = (s: Shape, i: number) => (s.group_id === null ? `#${i}` : `${s.label}/${s.group_id}`)
+  const first = new Map<string, number>()
+  im.shapes.forEach((s, i) => { if (!first.has(key(s, i))) first.set(key(s, i), i) })
+  return im.shapes.map((s, i) => ({ s, i, m: im.masks[i] }))
+    .sort((a, b) => first.get(key(a.s, a.i))! - first.get(key(b.s, b.i))! || a.i - b.i)
+}
+
+test('random images of every closed shape come back from COCO as they went in', () => {
+  let checked = 0
+  for (let seed = 1; seed <= 300; seed++) {
+    const im = randomImage(seed)
+    const { json, issues } = instancesOf([{ image: im, fileName: im.name }], ['a', 'b'])
+    // A thin sliver can cover no whole pixel and is left out; such images prove nothing here
+    if (issues.some((i) => i.code === 'coco-no-pixels')) continue
+    const got = readCoco(json, 'random.json').results.get(1)!
+    const want = inCocoOrder(im)
+    expect(got.shapes, `seed ${seed}`).toEqual(want.map(({ s }) => s))
+    expect(got.masks, `seed ${seed}`).toEqual(want.map(({ m }) => m))
+    checked++
+  }
+  expect(checked).toBeGreaterThan(250)
+})
+
+// A COCO file as other tools write them
+function coco(annotations: Record<string, unknown>[], extra: Record<string, unknown> = {}) {
+  return JSON.stringify({
+    images: [{ id: 0, width: 10, height: 8, file_name: 'train/a.jpg' }, { id: 7, width: 20, height: 20, file_name: 'b.jpg' }],
+    categories: [{ id: 0, name: 'background', supercategory: '' }, { id: 3, name: 'cat', supercategory: 'animal' }, { id: 9, name: 'person', keypoints: ['nose', 'eye'], skeleton: [[1, 2]] }],
+    annotations, ...extra
+  })
+}
+
+describe('reading COCO from other tools', () => {
+  test("pycocotools' compressed masks and CVAT's lists of runs become mask shapes with their pixels", () => {
+    const m = new Uint8Array(80)
+    for (const i of [11, 12, 13, 19, 20, 21, 30]) m[i] = 1
+    const runs = [11, 3, 5, 3, 8, 1, 49]
+    const text = coco([
+      { id: 1, image_id: 0, category_id: 3, segmentation: { size: [8, 10], counts: rleToString({ h: 8, w: 10, counts: runs }) }, area: 7, bbox: [1, 3, 3, 4], iscrowd: 0 },
+      { id: 2, image_id: 0, category_id: 3, segmentation: { size: [8, 10], counts: runs }, area: 7, bbox: [1, 3, 3, 4], iscrowd: 1, attributes: { occluded: false, rotation: 0 } }
+    ])
+    const read = readCoco(text, 'instances.json')
+    const got = read.results.get(0)!
+    expect(got.shapes).toEqual([
+      newShape('cat', 'mask', [[1, 3], [3, 6]]),
+      newShape('cat', 'mask', [[1, 3], [3, 6]], { other: { iscrowd: 1 } })
+    ])
+    // Columns of 8 from the left: pixels 11-13 are x 1, y 3-5; 19-21 x 2, y 3-5; 30 x 3, y 6
+    const want = { x: 1, y: 3, width: 3, height: 4, data: Uint8Array.from([1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1]) }
+    expect(got.masks).toEqual([want, want])
+    expect(read.issues.map((i) => [i.severity, i.code])).toEqual([['info', 'coco-crowd']])
+  })
+
+  test('polygons become polygons, an object of several sharing a new group_id; a box alone becomes a rectangle', () => {
+    const text = coco([
+      { id: 1, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [1, 1, 4, 3], iscrowd: 0 },
+      { id: 2, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4], [10, 10, 15, 10, 12, 18]], area: 9, bbox: [1, 1, 14, 17], iscrowd: 0 },
+      { id: 3, image_id: 7, category_id: 3, segmentation: [], area: 12, bbox: [2, 3, 4, 3], iscrowd: 0 },
+      { id: 4, image_id: 7, category_id: 3, segmentation: [[]], area: 12, bbox: [2.5, 3, 4, 3], iscrowd: 0 },
+      { id: 5, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [1, 1, 4, 3], iscrowd: 0, attributes: { group_id: 4 } }
+    ])
+    const read = readCoco(text, 'instances.json')
+    expect(read.results.get(7)!.shapes).toEqual([
+      newShape('cat', 'polygon', [[1, 1], [5, 1], [3, 4]]),
+      newShape('cat', 'polygon', [[1, 1], [5, 1], [3, 4]], { group_id: 5 }),
+      newShape('cat', 'polygon', [[10, 10], [15, 10], [12, 18]], { group_id: 5 }),
+      newShape('cat', 'rectangle', [[2, 3], [6, 6]]),
+      newShape('cat', 'rectangle', [[2.5, 3], [6.5, 6]]),
+      newShape('cat', 'polygon', [[1, 1], [5, 1], [3, 4]], { group_id: 4 })
+    ])
+    expect(read.issues.map((i) => i.message)).toEqual(['instances.json: 2 annotations hold only a box, so they become rectangles'])
+  })
+
+  test('keypoints not labelled are left out, hidden ones kept as 1, and a crowd is read as its outline', () => {
+    const text = coco([
+      { id: 1, image_id: 7, category_id: 9, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [1, 1, 8, 9], iscrowd: 0, keypoints: [2, 3, 2, 0, 0, 0], num_keypoints: 1 },
+      { id: 2, image_id: 7, category_id: 9, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [1, 1, 8, 9], iscrowd: 0, keypoints: [2, 3, 1, 4, 5, 2], num_keypoints: 2 },
+      { id: 3, image_id: 7, category_id: 9, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [0, 0, 0, 0], iscrowd: 0, keypoints: [2, 3, 2, 6, 9, 2], num_keypoints: 2 },
+      { id: 4, image_id: 7, category_id: 9, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [1, 1, 4, 3], iscrowd: 1, keypoints: [0, 0, 0, 0, 0, 0], num_keypoints: 0 },
+      { id: 5, image_id: 7, category_id: 9, segmentation: [[1, 1, 5, 1, 3, 4]], area: 6, bbox: [1, 1, 4, 3], iscrowd: 0, keypoints: [2, 3] }
+    ])
+    const read = readCoco(text, 'person_keypoints.json')
+    const got = read.results.get(7)!
+    expect(got.poses).toEqual([
+      { label: 'person', group: 1, box: [1, 1, 9, 10], names: ['nose', 'eye'], keypoints: [[2, 3, 2], null] },
+      { label: 'person', group: 2, box: [1, 1, 9, 10], names: ['nose', 'eye'], keypoints: [[2, 3, 1], [4, 5, 2]] },
+      { label: 'person', group: 3, box: [2, 3, 6, 9], names: ['nose', 'eye'], keypoints: [[2, 3, 2], [6, 9, 2]] }
+    ])
+    expect(got.shapes).toEqual([
+      newShape('person', 'polygon', [[1, 1], [5, 1], [3, 4]], { other: { iscrowd: 1 } }),
+      newShape('person', 'polygon', [[1, 1], [5, 1], [3, 4]])
+    ])
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "b.jpg: annotation 5 (“person”) has 2 keypoint numbers where its 2 keypoints need 6, so it's imported without them",
+      'person_keypoints.json: 1 keypoint is marked not labelled (visibility 0), so it\'s left out',
+      'person_keypoints.json: 1 annotation is a crowd region (iscrowd 1): the shapes made from it keep iscrowd, so an export writes it as a crowd again'
+    ])
+  })
+
+  test('what can\'t be read is left out with a reason: unknown ids, short or odd polygons, masks of the wrong size', () => {
+    const text = coco([
+      { id: 1, image_id: 3, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4]], bbox: [1, 1, 4, 3] },
+      { id: 2, image_id: 7, category_id: 4, segmentation: [[1, 1, 5, 1, 3, 4]], bbox: [1, 1, 4, 3] },
+      { id: 3, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1], [1, 1, 5, 1, 3, 4, 9]], bbox: [1, 1, 4, 3] },
+      { id: 4, image_id: 7, category_id: 3, segmentation: { size: [10, 20], counts: [200] }, bbox: [1, 1, 4, 3] },
+      { id: 5, image_id: 7, category_id: 3, segmentation: { size: [20, 20], counts: '3!1' }, bbox: [1, 1, 4, 3] },
+      { id: 6, image_id: 7, category_id: 3, segmentation: { size: [20, 20], counts: [100, 5] }, bbox: [1, 1, 4, 3] },
+      { id: 7, image_id: 7, category_id: 3, segmentation: [[1, 1, 5, 1, 3, 4]], bbox: [1, 1, 4, 3], attributes: { shape_type: 'circle' } },
+      { id: 8, image_id: 7, category_id: 3, bbox: [1, 1, 0, 3] }
+    ])
+    const read = readCoco(text, 'instances.json')
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "instances.json: annotation 1 is of image 3, which isn't in its images list, so it's left out",
+      "b.jpg: annotation 2 is of category 4, which isn't in the categories list, so it's left out",
+      "b.jpg: annotation 3 (“cat”) has polygon 1 of 2 points, and a polygon needs 3, so that polygon is left out",
+      "b.jpg: annotation 3 (“cat”) has polygon 2 of an odd count of numbers (7), so that polygon is left out",
+      "b.jpg: annotation 3 (“cat”) keeps only its box, so it becomes a rectangle",
+      "b.jpg: annotation 4 (“cat”) has a 10 x 20 mask on a 20 x 20 image, so it's left out",
+      "b.jpg: annotation 5 (“cat”) has a mask that can't be read (Its counts hold \"!\", which isn't one of COCO's characters), so it's left out",
+      "b.jpg: annotation 6 (“cat”) has a mask that can't be read (Its runs cover 105 pixels, not 400), so it's left out",
+      "b.jpg: annotation 7 (“cat”) carries Seamtag's attributes, but shape 1 has no points, so it's imported from its segmentation",
+      "b.jpg: annotation 8 (“cat”) has neither a shape nor a box with an area, so it's left out"
+    ])
+    expect(read.results.get(7)!.shapes).toEqual([newShape('cat', 'rectangle', [[1, 1], [5, 4]]), newShape('cat', 'polygon', [[1, 1], [5, 1], [3, 4]])])
+  })
+
+  test('a file that isn\'t COCO is refused whole', () => {
+    expect(() => readCoco('{', 'a.json')).toThrow("a.json isn't valid JSON")
+    expect(() => readCoco('[]', 'a.json')).toThrow("a.json isn't a COCO file: the top level must be an object")
+    expect(() => readCoco('{"annotations": []}', 'a.json')).toThrow("a.json isn't a COCO file: it has no images list")
+  })
+
+  test('images without an id, a name or a size, and repeated ids, are left out', () => {
+    const text = JSON.stringify({
+      images: [{ id: 1, width: 5, height: 5, file_name: 'a.jpg' }, { width: 5, height: 5, file_name: 'b.jpg' }, { id: 2, width: 5, file_name: 'c.jpg' }, { id: 1, width: 5, height: 5, file_name: 'd.jpg' }],
+      categories: [], annotations: []
+    })
+    const read = readCoco(text, 'x.json')
+    expect(read.images.map((i) => i.file_name)).toEqual(['a.jpg'])
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "x.json: image 2 in its images list has no whole-number id, so it's left out",
+      "x.json: image 3 in its images list (c.jpg) has no width and height, so it's left out",
+      "x.json: image 4 in its images list (d.jpg) has the id 1, which an earlier image has, so it's left out"
+    ])
+  })
+})
+
+describe('matching COCO images to the folder', () => {
+  const im = (id: number, file_name: string): CocoImage => ({ id, width: 10, height: 10, file_name })
+
+  test('by path under the base folder first, then by a name only one image has on each side', () => {
+    const m = matchCocoImages(
+      [im(1, 'train/a.jpg'), im(2, 'b.jpg'), im(3, 'other/c.jpg'), im(4, '.\\train\\d.jpg')],
+      ['images/train/a.jpg', 'images/b.jpg', 'elsewhere/c.jpg', 'images/train/d.jpg', 'images/val/a.jpg'],
+      'images'
+    )
+    expect([...m.names]).toEqual([[1, 'images/train/a.jpg'], [2, 'images/b.jpg'], [3, 'elsewhere/c.jpg'], [4, 'images/train/d.jpg']])
+    expect(m.issues).toEqual([])
+  })
+
+  test('never guesses between images of one name, on either side', () => {
+    const m = matchCocoImages([im(1, 'x/a.jpg'), im(2, 'p.jpg'), im(3, 'q/p.jpg'), im(4, 'z.jpg')], ['one/a.jpg', 'two/a.jpg', 'sub/p.jpg'])
+    expect([...m.names]).toEqual([])
+    expect(m.ambiguous.map((a) => [a.image.id, a.candidates])).toEqual([[1, ['one/a.jpg', 'two/a.jpg']], [2, ['sub/p.jpg']], [3, ['sub/p.jpg']]])
+    expect(m.missing.map((i) => i.id)).toEqual([4])
+    expect(m.issues.map((i) => i.message)).toEqual([
+      "x/a.jpg isn't at that path in the folder and its name matches one/a.jpg, two/a.jpg, so its annotations are left out rather than guessed",
+      "p.jpg isn't at that path in the folder and other images in the COCO file are named p.jpg too, so its annotations are left out rather than guessed",
+      "q/p.jpg isn't at that path in the folder and other images in the COCO file are named p.jpg too, so its annotations are left out rather than guessed",
+      "z.jpg isn't in the folder, so its annotations are left out"
+    ])
+  })
+
+  test('an image listed twice gets the annotations of both, with a warning', () => {
+    const m = matchCocoImages([im(1, 'a.jpg'), im(2, './a.jpg')], ['a.jpg'])
+    expect([...m.names]).toEqual([[1, 'a.jpg'], [2, 'a.jpg']])
+    expect(m.issues.map((i) => i.message)).toEqual(['a.jpg is listed twice in the COCO file (images 1 and 2), so the annotations of both go to it'])
+  })
+})
+
+// COCO_PARITY_DIR=dir npx vitest run tests/unit/coco.test.ts, then tests/parity/coco_reads.py dir
+test.runIf(!!process.env.COCO_PARITY_DIR)('writes a sample for pycocotools to read', () => {
+  const dir = path.join(process.env.COCO_PARITY_DIR!, 'annotations')
+  mkdirSync(dir, { recursive: true })
+  const fx = JSON.parse(readFileSync(path.join(__dirname, '../fixtures/coco/labelme2coco.json'), 'utf8'))
+  const entries: CocoEntry[] = Object.keys(fx.files).sort().map((file) => {
+    const doc = parseLabelFile(JSON.stringify(fx.files[file]))
+    const masks = doc.shapes.map((s, i) => (fx.masks[file][i] ? bits(s.points[0][0], s.points[0][1], fx.masks[file][i]) : null))
+    return { image: image(file.replace('.json', '.png'), doc.imageWidth!, doc.imageHeight!, doc.shapes, masks), fileName: `images/${file.replace('.json', '.png')}` }
+  })
+  entries.push({ image: everything().image, fileName: 'images/all.png' }, posed())
+  for (const seed of [3, 5, 8, 13]) entries.push({ image: randomImage(seed), fileName: `images/random/${seed}.png` })
+  const labels = cocoLabels(['person', 'cat', 'dog'], entries)
+  writeFileSync(path.join(dir, 'instances_sample.json'), writeCoco(entries, { task: 'instances', labels, info: INFO }).json)
+  writeFileSync(path.join(dir, 'person_keypoints_sample.json'), writeCoco(entries, { task: 'keypoints', labels, info: INFO, schema: SCHEMA }).json)
+})
+
+test('circles are labelme2coco\'s polygons', () => {
+  const { dataset } = instancesOf([{ image: image('a.png', 100, 100, [newShape('ball', 'circle', [[50, 50], [50, 10]])]), fileName: 'a.png' }])
+  expect(dataset.annotations[0].segmentation).toEqual([circlePolygon([50, 50], [50, 10])!.flat()])
+  expect(dataset.annotations[0].attributes).toEqual({ shape_type: 'circle', points: [[50, 50], [50, 10]] })
+})
