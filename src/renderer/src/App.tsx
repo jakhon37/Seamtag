@@ -7,6 +7,7 @@ import ImportDialog from './ImportDialog'
 import Labeler, { type Commands, type LabelerHandle, type Settings } from './Labeler'
 import Logo from './Logo'
 import MenuBar, { ContextMenu, type MenuSpec } from './Menu'
+import Modal from './Modal'
 import { type ImageItem, type OpenProject, plainError, type ProjectInfo, type Start } from './types'
 
 const DOCS = 'https://github.com/jakhon37/Seamtag#readme'
@@ -240,11 +241,12 @@ export default function App() {
     ;(start?.recent ?? []).forEach((r, i) => (own[`recent:${i}`] = { label: r, run: () => open(r) }))
     return { ...(labeler.current?.commands ?? {}), ...own }
   }
-  // App-wide shortcuts, for when no folder is open: the labeller handles the rest
+  // App-wide shortcuts, for when no folder is open: the labeller handles the rest. A window over the
+  // page, or the context menu, keeps them from acting on the folder behind it.
   useEffect(() => {
     if (!config) return
     const onKey = (e: KeyboardEvent) => {
-      if ((e.target as HTMLElement).tagName === 'INPUT') return
+      if ((e.target as HTMLElement).tagName === 'INPUT' || document.querySelector('.modal-back, .context')) return
       for (const id of ['open', 'open_dir', 'close', 'quit', 'save_to', 'toggle_label_panel'] as const) {
         const name = commands()[id]?.shortcut
         if (name && shortcutList(config.shortcuts[name]).some((k) => matches(k, e, mac))) {
@@ -257,11 +259,18 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   })
 
-  // Drop a folder, an image or a label file anywhere to open it
+  // Drop a folder, an image or a label file anywhere to open it; not on a window over the page,
+  // which works on the folder open behind it
+  const covered = () => !!document.querySelector('.modal-back')
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (covered() && e.dataTransfer.types.includes('Files')) e.dataTransfer.dropEffect = 'none'
+  }
   const onDrop = (e: React.DragEvent) => {
     const file = e.dataTransfer.files[0]
     if (!file) return
     e.preventDefault()
+    if (covered()) return
     const p = window.api.pathForFile(file)
     if (p) open(p)
   }
@@ -281,8 +290,10 @@ export default function App() {
     )
   }
   const done = data?.images.filter((i) => i.labelled && !i.ai).length ?? 0
+  // The folder and where its label files go: the labeller and the dataset windows start over when either changes
+  const folder = data ? `${data.root}\n${data.outputDir ?? ''}` : ''
   return (
-    <div className="app" onDragOver={(e) => e.preventDefault()} onDrop={onDrop}>
+    <div className="app" onDragOver={onDragOver} onDrop={onDrop}>
       <header className="topbar">
         <div className="brand"><Logo size={22} /> Seamtag</div>
         <MenuBar menus={MENUS} commands={commands} config={config} mac={mac} />
@@ -322,48 +333,44 @@ export default function App() {
         </div>
       ) : (
         <div className="page">
-          <Labeler key={`${data.root}\n${data.outputDir ?? ''}`} ref={labeler} data={data} config={config} settings={settings} setSettings={setSettings} onChangeOutput={changeOutput} onNextToImages={nextToImages}
+          <Labeler key={folder} ref={labeler} data={data} config={config} settings={settings} setSettings={setSettings} onChangeOutput={changeOutput} onNextToImages={nextToImages}
             setProject={setProject} setImages={setImages} discovered={discovered} mac={mac} onError={showError}
             onOpenMenu={(x, y) => setContext({ x, y })} onChange={() => setTick((t) => t + 1)} />
         </div>
       )}
       {dataset === 'export' && data && (
-        <ExportDialog root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)} />
+        <ExportDialog key={folder} root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)} />
       )}
       {dataset === 'import' && data && (
-        <ImportDialog root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)}
+        <ImportDialog key={folder} root={data.root} format={settings.format} labels={listed.length ? listed : null} onClose={() => setDataset(null)}
           onImported={(names) => labeler.current?.reloadImages(names)} />
       )}
       {context && <ContextMenu at={context} items={CONTEXT} commands={commands()} config={config} mac={mac} onDone={() => setContext(null)} />}
       {about && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setAbout(false)}>
-          <div className="dialog about" role="dialog" aria-label="About">
-            <Logo size={56} />
-            <h1>Seamtag {start.version}</h1>
-            <p>Image annotation in LabelMe, Pascal VOC, YOLO or CreateML format, with brush, eraser, AI segmentation and review of model proposals.</p>
-            <p className="muted">Continues LabelMeV2, an enhanced fork of labelme by Kentaro Wada, on Seamline's desktop app. GPL-3.0. Pascal VOC, YOLO and CreateML files are read and written as LabelImg by Tzutalin does it, from its MIT-licensed code. AI models are downloaded from the addresses osam and labelme use, under their own licences.</p>
-            <div className="actions"><button className="primary" onClick={() => setAbout(false)}>Close</button></div>
-          </div>
-        </div>
+        <Modal label="About" className="about" onClose={() => setAbout(false)}>
+          <Logo size={56} />
+          <h1>Seamtag {start.version}</h1>
+          <p>Image annotation in LabelMe, Pascal VOC, YOLO or CreateML format, with brush, eraser, AI segmentation and review of model proposals.</p>
+          <p className="muted">Continues LabelMeV2, an enhanced fork of labelme by Kentaro Wada, on Seamline's desktop app. GPL-3.0. Pascal VOC, YOLO and CreateML files are read and written as LabelImg by Tzutalin does it, from its MIT-licensed code. AI models are downloaded from the addresses osam and labelme use, under their own licences.</p>
+          <div className="actions"><button className="primary" onClick={() => setAbout(false)}>Close</button></div>
+        </Modal>
       )}
       {help && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setHelp(false)}>
-          <div className="dialog shortcuts" role="dialog" aria-label="Keyboard shortcuts">
-            <h3>Keyboard shortcuts <span className="muted">change them under shortcuts: in the config file</span></h3>
-            <div className="kv">
-              {Object.entries(commands()).filter(([, c]) => c.shortcut && config.shortcuts[c.shortcut]).map(([id, c]) => (
-                <div key={id}><span>{c.label}</span><b>{shortcutList(config.shortcuts[c.shortcut!]).map((_, k) => formatKeys([config.shortcuts[c.shortcut!]].flat()[k], mac)).join('  ')}</b></div>
-              ))}
-              <div><span>Pick a label</span><b>1-9</b></div>
-              <div><span>Draw a square box</span><b>Shift or Ctrl while drawing</b></div>
-              <div><span>Copy or move shapes</span><b>Right drag on a shape</b></div>
-              <div><span>Move the selection</span><b>Arrows, Shift for 10 px</b></div>
-              <div><span>Pan</span><b>Space+drag, middle drag, right drag off shapes</b></div>
-              <div><span>Add or remove a point</span><b>Alt+click an edge or a point</b></div>
-            </div>
-            <div className="actions"><button className="primary" onClick={() => setHelp(false)}>Close</button></div>
+        <Modal label="Keyboard shortcuts" className="shortcuts" onClose={() => setHelp(false)}>
+          <h3>Keyboard shortcuts <span className="muted">change them under shortcuts: in the config file</span></h3>
+          <div className="kv">
+            {Object.entries(commands()).filter(([, c]) => c.shortcut && config.shortcuts[c.shortcut]).map(([id, c]) => (
+              <div key={id}><span>{c.label}</span><b>{shortcutList(config.shortcuts[c.shortcut!]).map((_, k) => formatKeys([config.shortcuts[c.shortcut!]].flat()[k], mac)).join('  ')}</b></div>
+            ))}
+            <div><span>Pick a label</span><b>1-9</b></div>
+            <div><span>Draw a square box</span><b>Shift or Ctrl while drawing</b></div>
+            <div><span>Copy or move shapes</span><b>Right drag on a shape</b></div>
+            <div><span>Move the selection</span><b>Arrows, Shift for 10 px</b></div>
+            <div><span>Pan</span><b>Space+drag, middle drag, right drag off shapes</b></div>
+            <div><span>Add or remove a point</span><b>Alt+click an edge or a point</b></div>
           </div>
-        </div>
+          <div className="actions"><button className="primary" onClick={() => setHelp(false)}>Close</button></div>
+        </Modal>
       )}
     </div>
   )

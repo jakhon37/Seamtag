@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, CircleAlert, FileJson, FileText, FolderOpen, Info, TriangleAlert, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { YoloTask } from '../../shared/ultralytics'
+import { useModal } from './Modal'
 import {
   type ImportPolicy, type ImportPreview, type ImportProgress, type ImportReport, type ImportRequest, type IssueGroup, type LabelFormat, plainError
 } from './types'
@@ -109,11 +110,6 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
   const [confirmed, setConfirmed] = useState(false)
   const busy = stage === 'busy'
   const box = useRef<HTMLDivElement>(null)
-  // Keys stay with the window, Escape among them, when the button that had focus goes and the one
-  // to take it is disabled (Import, while the task is asked): focus would fall to the page behind
-  useEffect(() => {
-    if (box.current && !box.current.contains(document.activeElement)) box.current.focus()
-  })
 
   useEffect(() => window.api.onImportProgress(setProgress), [])
   // What was read is let go of with the window
@@ -178,6 +174,9 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
     if (busy) void window.api.importStop()
     else onClose()
   }
+  // Keys stay with the window when the button that had the focus goes and the one to take it is
+  // disabled, as Import is while the task is asked
+  useModal(box, close)
 
   const p = preview
   const n = p ? writes(p, policy) : 0
@@ -188,7 +187,7 @@ export default function ImportDialog({ root, format, labels, onClose, onImported
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && !busy && onClose()}>
-      <div className="dialog import" role="dialog" aria-label="Import dataset" ref={box} tabIndex={-1} onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
+      <div className="dialog import" role="dialog" aria-modal="true" aria-label="Import dataset" ref={box} tabIndex={-1} onKeyDown={(e) => e.stopPropagation()}>
         <h3>Import dataset</h3>
         {stage === 'start' && (
           <div className="import-body">

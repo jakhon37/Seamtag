@@ -13,6 +13,7 @@ import { labelColor, withAlpha } from './colors'
 import { eraseShapes, paintShapes, strokeRegion } from './geometry'
 import LabelDialog, { flagsFor, type LabelChoice, type LabelRequest } from './LabelDialog'
 import { ContextMenu } from './Menu'
+import Modal from './Modal'
 import Models from './Models'
 import Problems, { counted, RenameDialog } from './Problems'
 import {
@@ -2089,8 +2090,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   labelKeyRef.current = labelKey
   const runCheck = async (quick: boolean) => {
     clearTimeout(recheckTimer.current)
-    // One after saves waits for a check that's running: that one looks again once it's done
-    if (quick && checkingRef.current) return
+    // One after saves waits for a check that's running: that one looks again once it's done. A
+    // window closed meanwhile, with its folder, checks nothing.
+    if ((quick && checkingRef.current) || !alive.current) return
     const seq = ++checkSeq.current
     const { names, upTo } = stale.current.begin()
     // The list this check is given, which a later render may have changed already
@@ -2110,7 +2112,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       checkRef.current = result
       setCheck(result)
     } catch (e) {
-      if (seq === checkSeq.current) onError(`The labels couldn't be checked: ${plainError(e)}`)
+      if (seq === checkSeq.current && alive.current) onError(`The labels couldn't be checked: ${plainError(e)}`)
     } finally {
       if (seq === checkSeq.current) {
         checkingRef.current = false
@@ -2129,8 +2131,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }, [labelKey])
   /** Label files changed: their images' problems are out of date until the check that follows a second later */
   const markStale = (names: string[]) => {
-    // Before the first check there's nothing to put out of date, unless it's running
-    if ((!checkRef.current && !checkingRef.current) || !names.length) return
+    // Before the first check there's nothing to put out of date, unless it's running; nor once the window has closed
+    if ((!checkRef.current && !checkingRef.current) || !names.length || !alive.current) return
     stale.current.mark(names)
     setTick((t) => t + 1)
     clearTimeout(recheckTimer.current)
@@ -2195,6 +2197,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     setRenaming({ from, to })
   }
   const renamed = (from: string, done: RenameDone & { to: string }) => {
+    // The folder closed while it ran: what's said and changed here would be about another one
+    if (!alive.current) return
     const { to } = done
     setRenaming(null)
     // The project's label list follows once no label file has the old name: it gives way to the new, keeping its colour
@@ -3009,24 +3013,20 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
           }} />
       )}
       {pointsPrompt && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setPointsPrompt(null)}>
-          <form className="dialog small" onSubmit={(e) => {
-            e.preventDefault()
-            const n = Math.max(1, Math.min(100, Math.round(pointsPrompt.count)))
-            const s = shapesRef.current[pointsPrompt.shape]
-            if (s) setShapes(shapesRef.current.map((q, i) => (i === pointsPrompt.shape ? addPointsToEdge(q, pointsPrompt.edge, n) : q)))
-            setPointsPrompt(null)
-          }}>
-            <label>Points to add along this edge
-              <input type="number" min={1} max={100} autoFocus value={pointsPrompt.count} onChange={(e) => setPointsPrompt({ ...pointsPrompt, count: +e.target.value })}
-                onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setPointsPrompt(null) }} />
-            </label>
-            <div className="actions">
-              <button type="button" className="ghost" onClick={() => setPointsPrompt(null)}>Cancel</button>
-              <button className="primary">Add</button>
-            </div>
-          </form>
-        </div>
+        <Modal label="Add points to edge" className="small" onClose={() => setPointsPrompt(null)} onSubmit={() => {
+          const n = Math.max(1, Math.min(100, Math.round(pointsPrompt.count)))
+          const s = shapesRef.current[pointsPrompt.shape]
+          if (s) setShapes(shapesRef.current.map((q, i) => (i === pointsPrompt.shape ? addPointsToEdge(q, pointsPrompt.edge, n) : q)))
+          setPointsPrompt(null)
+        }}>
+          <label>Points to add along this edge
+            <input type="number" min={1} max={100} autoFocus value={pointsPrompt.count} onChange={(e) => setPointsPrompt({ ...pointsPrompt, count: +e.target.value })} />
+          </label>
+          <div className="actions">
+            <button type="button" className="ghost" onClick={() => setPointsPrompt(null)}>Cancel</button>
+            <button className="primary">Add</button>
+          </div>
+        </Modal>
       )}
       {modelsOpen && models && (
         <Models models={models} progress={download} onClose={() => setModelsOpen(false)} onLink={(url) => window.api.openLink(url)}
@@ -3045,36 +3045,30 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
           }} />
       )}
       {bcOpen && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setBcOpen(false)}>
-          <div className="dialog small" role="dialog" aria-label="Brightness and contrast" onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setBcOpen(false) }}>
-            {(['brightness', 'contrast'] as const).map((k) => (
-              <label key={k} className="slider wide">{k[0].toUpperCase() + k.slice(1)}
-                <input type="range" min={0} max={3} step={0.02} value={bc[k]} aria-label={k} onChange={(e) => setBc({ ...bc, [k]: +e.target.value })} />
-                <span className="muted">{Math.round(bc[k] * 100)}%</span>
-              </label>
-            ))}
-            <div className="actions">
-              <button className="ghost" onClick={() => setBc({ brightness: 1, contrast: 1 })}>Reset</button>
-              <button className="primary" onClick={() => setBcOpen(false)}>Done</button>
-            </div>
+        <Modal label="Brightness and contrast" className="small" onClose={() => setBcOpen(false)}>
+          {(['brightness', 'contrast'] as const).map((k) => (
+            <label key={k} className="slider wide">{k[0].toUpperCase() + k.slice(1)}
+              <input type="range" min={0} max={3} step={0.02} value={bc[k]} aria-label={k} onChange={(e) => setBc({ ...bc, [k]: +e.target.value })} />
+              <span className="muted">{Math.round(bc[k] * 100)}%</span>
+            </label>
+          ))}
+          <div className="actions">
+            <button className="ghost" onClick={() => setBc({ brightness: 1, contrast: 1 })}>Reset</button>
+            <button className="primary" onClick={() => setBcOpen(false)}>Done</button>
           </div>
-        </div>
+        </Modal>
       )}
       {colorPrompt && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setColorPrompt(null)}>
-          <form className="dialog small" role="dialog" aria-label={COLOR_TITLES[colorPrompt.kind]}
-            onSubmit={(e) => { e.preventDefault(); setColor(colorPrompt.kind, colorPrompt.value) }}
-            onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setColorPrompt(null) }}>
-            <label className="slider wide">{COLOR_TITLES[colorPrompt.kind]}
-              <input type="color" value={colorPrompt.value} aria-label="Colour" autoFocus onChange={(e) => setColorPrompt({ ...colorPrompt, value: e.target.value })} />
-            </label>
-            <div className="actions">
-              <button type="button" className="ghost" onClick={() => setColor(colorPrompt.kind, null)}>Label's colour</button>
-              <button type="button" className="ghost" onClick={() => setColorPrompt(null)}>Cancel</button>
-              <button className="primary">OK</button>
-            </div>
-          </form>
-        </div>
+        <Modal label={COLOR_TITLES[colorPrompt.kind]} className="small" onClose={() => setColorPrompt(null)} onSubmit={() => setColor(colorPrompt.kind, colorPrompt.value)}>
+          <label className="slider wide">{COLOR_TITLES[colorPrompt.kind]}
+            <input type="color" value={colorPrompt.value} aria-label="Colour" autoFocus onChange={(e) => setColorPrompt({ ...colorPrompt, value: e.target.value })} />
+          </label>
+          <div className="actions">
+            <button type="button" className="ghost" onClick={() => setColor(colorPrompt.kind, null)}>Label's colour</button>
+            <button type="button" className="ghost" onClick={() => setColorPrompt(null)}>Cancel</button>
+            <button className="primary">OK</button>
+          </div>
+        </Modal>
       )}
       {statsOpen && (
         <Statistics root={root} prefer={settings.format} labels={listedLabels} colorOf={colorOf} version={labelsChanged}

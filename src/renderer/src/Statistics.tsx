@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp } from 'lucide-react'
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { ShapeType } from '../../shared/labelfile'
+import { useModal } from './Modal'
 import { counted, number, StopButton } from './Problems'
 import { type LabelFormat, plainError, type Progress, type StatsView } from './types'
 
@@ -116,6 +117,8 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
     if (busy) window.api.statsStop(root)
     onClose()
   }
+  const box = useRef<HTMLDivElement>(null)
+  useModal(box, close)
   const save = async () => {
     try {
       const file = await window.api.statsSave(root)
@@ -135,7 +138,7 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="dialog stats" role="dialog" aria-label="Statistics" onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
+      <div className="dialog stats" role="dialog" aria-modal="true" aria-label="Statistics" ref={box} tabIndex={-1} onKeyDown={(e) => e.stopPropagation()}>
         <h3>Statistics</h3>
         {busy && <StopButton progress={progress} onStop={() => window.api.statsStop(root)} label="Reading the label files" />}
         {stats && (

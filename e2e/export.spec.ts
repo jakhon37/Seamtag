@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import path from 'path'
 import sharp from 'sharp'
 import { maskOutlines } from '../src/shared/ultralytics'
-import { BASE, finish, H, launch, W } from './helpers'
+import { BASE, doc, finish, H, launch, project, square, W } from './helpers'
 
 // File > Export dataset… through the window: every format, from a folder with every kind of shape
 // in train, val and test subfolders, checked in the files written. tests/parity/coco_reads.py and
@@ -318,5 +318,111 @@ test('export every format through the window, with a check of what goes in befor
 
   // Nothing was written in the image folder
   expect(files(DIR).filter((f) => !/\.(png|json)$/.test(f))).toEqual([])
+  await finish(app, errors)
+})
+
+/** A file dropped on the element, as the system's drag and drop gives it */
+async function drop(page: Page, file: string, on: string) {
+  await page.evaluate(() => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.id = 'dropped'
+    input.hidden = true
+    document.body.append(input)
+  })
+  await page.setInputFiles('#dropped', file)
+  await page.evaluate((selector) => {
+    const data = new DataTransfer()
+    data.items.add((document.getElementById('dropped') as HTMLInputElement).files![0])
+    const target = document.querySelector(selector)!
+    target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: data }))
+    target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data }))
+    document.getElementById('dropped')!.remove()
+  }, on)
+}
+const holds = (page: Page) => page.evaluate(() => !!document.querySelector('.export-dialog')?.contains(document.activeElement))
+
+test('the Export window holds the focus through an export: Tab goes round it, Escape closes its summary, and a file dropped on it opens nothing', async () => {
+  const dir = await project('export-held', { a: doc('a', [square('cat', 20, 20, 120, 120)]), b: doc('b', [square('dog', 30, 30, 90, 90)]) })
+  const other = await project('export-held-other', { x: doc('x', [square('cow', 10, 10, 50, 50)]), y: null })
+  const out = path.join(OUT, 'held')
+  rmSync(out, { recursive: true, force: true })
+  mkdirSync(OUT, { recursive: true })
+  const { app, page, errors } = await launch(dir)
+  await stubDialogs(app)
+  // The export starts a moment late, so the window can be seen running
+  await app.evaluate(({ ipcMain }) => {
+    const handlers = (ipcMain as any)._invokeHandlers as Map<string, (...args: unknown[]) => unknown>
+    const run = handlers.get('export:run')!
+    handlers.set('export:run', async (...args: unknown[]) => {
+      await new Promise((done) => setTimeout(done, 1500))
+      return run(...args)
+    })
+  })
+  const dialog = await openExport(page)
+  await expect(dialog).toHaveAttribute('aria-modal', 'true')
+  expect(await holds(page)).toBe(true)
+  // Tab goes round: from the last control to the first, and back with Shift+Tab
+  const cancel = dialog.getByRole('button', { name: 'Cancel' })
+  await cancel.focus()
+  await page.keyboard.press('Tab')
+  await expect(dialog.getByRole('button', { name: 'Close' })).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(cancel).toBeFocused()
+  for (let k = 0; k < 20; k++) {
+    await page.keyboard.press('Tab')
+    expect(await holds(page)).toBe(true)
+  }
+  // A file dropped on the window leaves the folder open behind it as it is
+  const top = (await page.locator('.topbar .muted').first().textContent())!
+  await drop(page, path.join(other, 'x.png'), '.export-dialog')
+  await page.waitForTimeout(500)
+  await expect(page.locator('.topbar .muted').first()).toHaveText(top)
+  await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
+
+  await answer(app, 'opens', out)
+  await dialog.getByRole('button', { name: 'Choose…' }).first().click()
+  const go = dialog.getByRole('button', { name: 'Export 2 images' })
+  await expect(go).toBeEnabled()
+  await go.focus()
+  await page.keyboard.press('Enter')
+  // Export gives way to Stop: the window keeps the focus, Stop is a Shift+Tab away, and Ctrl+W waits
+  const stop = dialog.getByRole('button', { name: /Stop/ })
+  await expect(stop).toBeVisible()
+  await expect.poll(() => holds(page)).toBe(true)
+  await page.screenshot({ path: `${SHOTS}/export-running-dark-1500.png` })
+  await page.keyboard.press('Shift+Tab')
+  await expect(stop).toBeFocused()
+  await page.keyboard.press('ControlOrMeta+w')
+  await page.keyboard.press('Escape')
+  await expect(dialog.locator('.export-done')).toBeVisible({ timeout: 60000 })
+  await expect(dialog.locator('.export-lead')).toContainText('Exported 2 images and 2 objects')
+  await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
+  // The summary holds the focus too, not on its Close where Stop was, so a late press on Stop closes nothing; Escape closes it
+  expect(await holds(page)).toBe(true)
+  await expect(dialog.locator('.actions').getByRole('button', { name: 'Close' })).not.toBeFocused()
+  await page.screenshot({ path: `${SHOTS}/export-held-done-dark-1500.png` })
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  expect(files(out)).toEqual(['annotations/instances_default.json', 'images/default/a.png', 'images/default/b.png'])
+
+  // At the smallest window and a large one, dark and light, it opens holding the focus, and Escape closes it
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [960, 600]]) {
+      await app.evaluate(({ BrowserWindow }, [w, h]) => BrowserWindow.getAllWindows()[0].setSize(w, h), [width, height])
+      await page.setViewportSize({ width, height }).catch(() => {})
+      await page.waitForTimeout(400)
+      const opened = await openExport(page)
+      expect(await holds(page)).toBe(true)
+      await fits(page)
+      await page.screenshot({ path: `${SHOTS}/export-held-${theme}-${width}.png` })
+      await page.keyboard.press('Escape')
+      await expect(opened).toHaveCount(0)
+    }
+    if (theme === 'dark') {
+      await page.getByRole('menuitem', { name: 'View' }).click()
+      await page.getByRole('menuitemcheckbox', { name: 'Dark mode' }).click()
+    }
+  }
   await finish(app, errors)
 })

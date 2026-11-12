@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight, CircleAlert, Info, RefreshCw, TriangleAlert, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Severity } from '../../shared/dataset'
+import { useModal } from './Modal'
 import type { CheckSummary, LabelFormat, ProblemPage, ProblemRow, Progress, RenameDone, RenamePlanView } from './types'
 
 // The Problems dock: what Dataset > Check labels found in the folder, grouped by check, the
@@ -304,12 +305,15 @@ export function RenameDialog({ root, from, to: start, prefer, labels, totals, al
     window.api.renameStop(root)
     onClose()
   }
+  // While the rename runs its field is disabled, and the window keeps the focus that falls from it
+  const box = useRef<HTMLFormElement>(null)
+  useModal(box, close)
   const joins = name && name !== from ? totals[name] ?? 0 : 0
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <form className="dialog rename" role="dialog" aria-label="Rename a label" onSubmit={(e) => { e.preventDefault(); run() }}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
+      <form className="dialog rename" role="dialog" aria-modal="true" aria-label="Rename a label" ref={box} tabIndex={-1}
+        onSubmit={(e) => { e.preventDefault(); run() }} onKeyDown={(e) => e.stopPropagation()}>
         <h3>Rename a label</h3>
         <p className="muted">Every shape labelled <b className="rename-label">“{from}”</b> in the folder's label files gets the new name, AI proposals too.</p>
         <label>New name

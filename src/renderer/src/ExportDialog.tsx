@@ -2,6 +2,7 @@ import { ChevronDown, ChevronRight, CircleAlert, CircleCheck, FolderOpen, Info, 
 import { useEffect, useRef, useState } from 'react'
 import type { ExportFormat, ExportOptions, ExportProgress, ExportResult, IssueGroup, KeypointsSummary, Preflight, SplitCount } from '../../main/export'
 import type { Issue, Severity } from '../../shared/dataset'
+import { useModal } from './Modal'
 import { type LabelFormat, plainError } from './types'
 
 // File > Export dataset…: the folder's labels as a COCO or Ultralytics YOLO dataset. A check runs
@@ -102,11 +103,8 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
     }
   }, [kept])
   useEffect(() => window.api.onExportProgress(setProgress), [])
-  useEffect(() => {
-    box.current?.focus()
-    // A check still running when the window closes is stopped, and what the checks kept is let go
-    return () => void window.api.exportClose()
-  }, [])
+  // A check still running when the window closes is stopped, and what the checks kept is let go
+  useEffect(() => () => void window.api.exportClose(), [])
   useEffect(() => {
     if (!checkKey || running || done) return
     const at = ++seq.current
@@ -175,15 +173,18 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const close = () => {
     if (!running) onClose()
   }
+  useModal(box, close)
 
   const ready = !!check && !check.blocked && !checking && !!out && !out.problem && !sharesBad
   const total = check ? check.splits.reduce((a, s) => a + s.images, 0) : 0
   const why = sharesBad ? sharesBad : !check ? '' : check.blocked ? `Fix the ${check.counts.error === 1 ? 'error' : 'errors'} first` : !out ? 'Choose a folder to export to' : out.problem ? 'Choose another folder' : ''
+  // The buttons below are keyed, so the one with the focus never turns into another under it, as
+  // Stop would into Close when the export ends: the window takes the focus instead
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
-      <div className={`dialog export-dialog ${done ? 'done' : ''}`} role="dialog" aria-label="Export dataset" tabIndex={-1} ref={box}
-        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') close() }}>
+      <div className={`dialog export-dialog ${done ? 'done' : ''}`} role="dialog" aria-modal="true" aria-label="Export dataset" tabIndex={-1} ref={box}
+        onKeyDown={(e) => e.stopPropagation()}>
         <h3>Export dataset <button className="icon" onClick={close} disabled={running} aria-label="Close"><X size={15} /></button></h3>
         {done ? <Summary result={done} /> : (
           <div className="export-body">
@@ -287,21 +288,21 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
           {running ? (
             <>
               <span className="export-status"><Busy progress={progress} inline /></span>
-              <button className="ghost batch" onClick={() => window.api.exportStop()}>
+              <button key="stop" className="ghost batch" onClick={() => window.api.exportStop()}>
                 <i style={{ width: `${progress && progress.total ? (progress.done / progress.total) * 100 : 0}%` }} />
                 <X size={15} /> Stop
               </button>
             </>
           ) : done ? (
             <>
-              <button className="ghost" onClick={() => window.api.exportReveal(done.out)}><FolderOpen size={15} /> Show in folder</button>
-              <button className="primary" onClick={onClose}>Close</button>
+              <button key="reveal" className="ghost" onClick={() => window.api.exportReveal(done.out)}><FolderOpen size={15} /> Show in folder</button>
+              <button key="close" className="primary" onClick={onClose}>Close</button>
             </>
           ) : (
             <>
               {why && <span className="export-status muted">{why}</span>}
-              <button className="ghost" onClick={onClose}>Cancel</button>
-              <button className="primary" onClick={run} disabled={!ready}>{ready ? `Export ${count(total, 'image')}` : 'Export'}</button>
+              <button key="cancel" className="ghost" onClick={onClose}>Cancel</button>
+              <button key="export" className="primary" onClick={run} disabled={!ready}>{ready ? `Export ${count(total, 'image')}` : 'Export'}</button>
             </>
           )}
         </div>

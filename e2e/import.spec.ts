@@ -257,3 +257,84 @@ test("a COCO file too big for its reader's memory is refused plainly, and the wi
   expect(existsSync(path.join(dir, 'a.json'))).toBe(false)
   await finish(app, errors)
 })
+
+test('the Import window holds the focus: Tab goes round its controls, Escape closes it, and a file dropped on it opens nothing', async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const dir = await project('import-held', { a: null, b: doc('b', [square('cat', 20, 20, 120, 100)]) })
+  const other = await project('import-held-other', { x: null })
+  const coco = path.join(BASE, 'import-src', 'held.json')
+  mkdirSync(path.dirname(coco), { recursive: true })
+  writeFileSync(coco, JSON.stringify({
+    images: [{ id: 1, file_name: 'a.png', width: W, height: H }],
+    annotations: [{ id: 1, image_id: 1, category_id: 1, iscrowd: 0, area: 2500, bbox: [10, 10, 50, 50], segmentation: [[10, 10, 60, 10, 60, 60, 10, 60]] }],
+    categories: [{ id: 1, name: 'cat' }]
+  }))
+  const { app, page, errors } = await launch(dir)
+  const dialog = page.getByRole('dialog', { name: 'Import dataset' })
+  const holds = () => page.evaluate(() => !!document.querySelector('.dialog.import')?.contains(document.activeElement))
+  await menu(page, 'File', 'Import dataset…')
+  await expect(dialog).toHaveAttribute('aria-modal', 'true')
+  // Shift+Tab from its first control comes round to its last, and Tab from there back to the first
+  const first = dialog.getByRole('button', { name: 'COCO file…' })
+  await expect(first).toBeFocused()
+  await page.keyboard.press('Shift+Tab')
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(first).toBeFocused()
+  for (let k = 0; k < 8; k++) {
+    await page.keyboard.press('Tab')
+    expect(await holds()).toBe(true)
+  }
+  // Ctrl+W behind it waits, and Escape closes it
+  await page.keyboard.press('ControlOrMeta+w')
+  await page.waitForTimeout(300)
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
+
+  // A file dropped on the window while it shows what it read opens nothing: the import goes into this folder
+  await answer(app, coco)
+  await menu(page, 'File', 'Import dataset…')
+  await dialog.getByRole('button', { name: 'COCO file…' }).click()
+  await expect(dialog).toContainText('Its one image is in this folder')
+  await page.evaluate(() => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.id = 'dropped'
+    input.hidden = true
+    document.body.append(input)
+  })
+  await page.setInputFiles('#dropped', path.join(other, 'x.png'))
+  await page.evaluate(() => {
+    const data = new DataTransfer()
+    data.items.add((document.getElementById('dropped') as HTMLInputElement).files![0])
+    const target = document.querySelector('.dialog.import')!
+    target.dispatchEvent(new DragEvent('dragover', { bubbles: true, cancelable: true, dataTransfer: data }))
+    target.dispatchEvent(new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: data }))
+    document.getElementById('dropped')!.remove()
+  })
+  await page.waitForTimeout(500)
+  await expect(page.locator('.files .file .name')).toHaveText(['a.png', 'b.png'])
+  await dialog.getByRole('button', { name: 'Import 1 image' }).click()
+  await expect(dialog.locator('.import-result')).toHaveText('Wrote 1 label file with 1 shape.')
+  expect(await holds()).toBe(true)
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  expect(shapesIn(dir, 'a').map((s: any) => s.label)).toEqual(['cat'])
+
+  // At the smallest window and a large one, dark and light, it opens holding the focus
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [960, 600]]) {
+      await size(app, page, width, height)
+      await menu(page, 'File', 'Import dataset…')
+      await expect(first).toBeFocused()
+      await fitsIn(page, width)
+      await page.screenshot({ path: `${SHOTS}/import-held-${theme}-${width}.png` })
+      await page.keyboard.press('Escape')
+      await expect(dialog).toHaveCount(0)
+    }
+    if (theme === 'dark') await menu(page, 'View', 'Dark mode')
+  }
+  await finish(app, errors)
+})

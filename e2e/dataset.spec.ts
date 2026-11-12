@@ -78,6 +78,10 @@ const fits = (page: Page, selector: string) => page.evaluate((sel) => {
   return { inside, page: document.documentElement.scrollWidth <= innerWidth, onScreen: box.bottom <= innerHeight + 1 && box.right <= innerWidth + 1 }
 }, selector)
 const shot = (page: Page, name: string) => page.screenshot({ path: path.join(SHOTS, name) })
+/** Whether the focus is inside the element */
+const holds = (page: Page, selector: string) => page.evaluate((sel) => !!document.querySelector(sel)?.contains(document.activeElement), selector)
+/** Whether the element is inert, or inside an element that is */
+const inert = (page: Page, selector: string) => page.evaluate((sel) => !!document.querySelector(sel)?.closest('[inert]'), selector)
 // The dock's title row once a check is in
 const CHECKED = /^Checked \d\d:\d\d$/
 
@@ -502,5 +506,121 @@ test('the label list follows a rename once no label file has the old name', asyn
   await expect(page.locator('.loading.notice')).toContainText('Renamed 1 shape in 1 image from “Cat” to “cat”.')
   expect(shapesIn(dir, 'd')[0].label).toBe('cat')
   await expect.poll(classes).toEqual([{ name: 'cat', color: '#c71585' }])
+  await finish(app, errors)
+})
+
+test('Statistics and a rename over it hold the focus: Tab goes round each, Escape closes the one on top, and the page behind takes no keys', async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const dir = await planted('dataset-held')
+  const { app, page, errors } = await launch(dir, ['--labels', 'cat,dog'])
+  // Ctrl+O or Ctrl+U behind a window would ask for a file or a folder
+  await app.evaluate(({ dialog }) => {
+    const g = globalThis as any
+    g.asked = 0
+    dialog.showOpenDialog = (async () => {
+      g.asked++
+      return { canceled: true, filePaths: [] }
+    }) as any
+  })
+  const stats = page.getByRole('dialog', { name: 'Statistics' })
+  const rename = page.getByRole('dialog', { name: 'Rename a label' })
+  await menu(page, 'Dataset', 'Statistics…')
+  await expect(stats.locator('[data-tile="total"] b')).toHaveText('8')
+  await expect(stats).toHaveAttribute('aria-modal', 'true')
+  expect(await holds(page, '.dialog.stats')).toBe(true)
+  // The page behind is inert, and the app's shortcuts wait: the folder stays open
+  expect(await inert(page, '.panel.left')).toBe(true)
+  expect(await inert(page, '.topbar')).toBe(true)
+  for (const keys of ['ControlOrMeta+w', 'ControlOrMeta+o', 'ControlOrMeta+u']) await page.keyboard.press(keys)
+  await page.waitForTimeout(300)
+  await expect(stats).toBeVisible()
+  await expect(page.locator('.file')).toHaveCount(8)
+  expect(await app.evaluate(() => (globalThis as any).asked)).toBe(0)
+  // Tab goes round the window's controls and never leaves it
+  for (let k = 0; k < 14; k++) {
+    await page.keyboard.press('Tab')
+    expect(await holds(page, '.dialog.stats')).toBe(true)
+  }
+  const first = stats.getByRole('button', { name: 'Label', exact: true })
+  await first.focus()
+  await page.keyboard.press('Shift+Tab')
+  await expect(stats.getByRole('button', { name: 'Close' })).toBeFocused()
+  await page.keyboard.press('Tab')
+  await expect(first).toBeFocused()
+
+  // A row's Rename… takes the focus and the keys, and the statistics under it go inert
+  const zebra = stats.locator('.stats-labels tbody tr[data-label="zebra"]').getByRole('button', { name: 'Rename…' })
+  await zebra.click()
+  await expect(rename).toContainText('Renames 1 shape in 1 image: e.png.')
+  await expect(rename.getByLabel('New name')).toBeFocused()
+  await page.keyboard.type('pony')
+  await expect(rename.getByLabel('New name')).toHaveValue('pony')
+  expect(await inert(page, '.dialog.stats')).toBe(true)
+  for (let k = 0; k < 6; k++) {
+    await page.keyboard.press('Tab')
+    expect(await holds(page, '.dialog.rename')).toBe(true)
+  }
+  // Escape closes the rename alone, and the focus goes back to the button that opened it
+  await page.keyboard.press('Escape')
+  await expect(rename).toHaveCount(0)
+  await expect(zebra).toBeFocused()
+  expect(await inert(page, '.dialog.stats')).toBe(false)
+  await page.keyboard.press('Escape')
+  await expect(stats).toHaveCount(0)
+  expect(await page.evaluate(() => document.querySelectorAll('[inert]').length)).toBe(0)
+  expect(JSON.parse(readFileSync(path.join(dir, 'e.json'), 'utf8')).shapes[0].label).toBe('zebra')
+
+  // Both, at the smallest window and a large one, dark and light: each opens holding the focus, and Escape closes it
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [960, 600]]) {
+      await resize(app, page, width, height)
+      await menu(page, 'Dataset', 'Statistics…')
+      await expect(stats.locator('[data-tile="total"] b')).toHaveText('8')
+      expect(await holds(page, '.dialog.stats')).toBe(true)
+      await shot(page, `held-stats-${width}-${theme}.png`)
+      await zebra.click()
+      await expect(rename).toContainText('Renames 1 shape in 1 image: e.png.')
+      await shot(page, `held-rename-${width}-${theme}.png`)
+      await page.keyboard.press('Escape')
+      await page.keyboard.press('Escape')
+      await expect(stats).toHaveCount(0)
+    }
+    if (theme === 'dark') await darkMode(page)
+  }
+  await finish(app, errors)
+})
+
+test('a rename holds its window while it runs: Ctrl+W and Escape wait for it, and the folder stays open', async () => {
+  const files: Record<string, string> = {}
+  for (let i = 0; i < 30; i++) files[`r${i}`] = doc(`r${i}`, [square('dgo', 20, 20, 120, 120)])
+  const dir = await project('dataset-rename-held', files)
+  const { app, page, errors } = await launch(dir, ['--labels', 'cat,dog'])
+  // A trash that takes its time, so the rename is still running when the keys come
+  await app.evaluate(({ shell }) => {
+    const fs = process.mainModule!.require('fs')
+    shell.trashItem = (async (file: string) => {
+      await new Promise((done) => setTimeout(done, 100))
+      fs.rmSync(file)
+    }) as any
+  })
+  await menu(page, 'Dataset', 'Check labels')
+  const dock = page.getByRole('region', { name: 'Problems' })
+  await dock.locator('.problems-group[data-code="unknown-label"]').getByRole('button', { name: 'Rename…', exact: true }).first().click()
+  const rename = page.getByRole('dialog', { name: 'Rename a label' })
+  await expect(rename).toContainText('Renames 30 shapes in 30 images')
+  await rename.getByLabel('New name').fill('dog')
+  await page.keyboard.press('Enter')
+  await expect(rename.getByRole('button', { name: /^Stop/ })).toBeVisible()
+  // The field it ran from is disabled: the window keeps the focus, so the keys stay with it
+  await expect.poll(() => holds(page, '.dialog.rename')).toBe(true)
+  await page.keyboard.press('ControlOrMeta+w')
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(300)
+  await expect(rename).toBeVisible()
+  await expect(rename).toHaveCount(0, { timeout: 30000 })
+  await expect(page.locator('.loading.notice')).toContainText('Renamed 30 shapes in 30 images from “dgo” to “dog”.')
+  await expect(page.locator('.file')).toHaveCount(30)
+  for (let i = 0; i < 30; i++) expect(shapesIn(dir, `r${i}`)[0].label).toBe('dog')
+  await expect(page.locator('.error')).toHaveCount(0)
   await finish(app, errors)
 })
