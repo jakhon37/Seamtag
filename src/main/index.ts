@@ -7,6 +7,9 @@ import {
   checkFolder, fixShapes, folderStats, forgetChecks, problemPage, renamePlan, renameRun, statsFileName, statsText, stopJob, strayFile
 } from './checking'
 import { forgetDataset } from './dataset'
+import {
+  type ExportOptions, type ExportProgress, folderProblem, keypointsFromFolder, moreIssues, preflight, readKeypoints, runExport, saveKeypoints
+} from './export'
 import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
 import { type Args, loadConfig, type LoadedConfig, parseArgs, USAGE, USER_CONFIG } from './config'
@@ -209,6 +212,54 @@ function registerIpc() {
     if (r.canceled || !r.filePath) return null
     await fs.writeFile(r.filePath, text)
     return r.filePath
+  })
+
+  // File > Export dataset…: one job at a time, a check or an export, and a new one stops the last.
+  // The folder is checked again before anything is written to it, and only keypoints files main's
+  // own dialogs gave are read.
+  let exporting: AbortController | null = null
+  let exported: string | null = null
+  const keypointFiles = new Set<string>()
+  const exportJob = () => {
+    exporting?.abort()
+    return { signal: (exporting = new AbortController()).signal, onProgress: (p: ExportProgress) => send('export:progress', p), version: app.getVersion() }
+  }
+  const exportOptions = (options: ExportOptions) => {
+    if (options.keypoints && !keypointFiles.has(options.keypoints)) throw new Error('Choose the keypoints file again')
+    return { ...options, labels: options.labels ?? [] }
+  }
+  const keypointsFilter = [{ name: 'Keypoints files', extensions: ['yaml', 'yml'] }]
+  ipcMain.handle('export:check', (_e, root: string, options: ExportOptions) => preflight(root, exportOptions(options), exportJob()))
+  ipcMain.handle('export:issues', (_e, id: number, key: string, from: number) => moreIssues(id, key, from))
+  ipcMain.handle('export:folder', async (_e, root: string) => {
+    const r = await dialog.showOpenDialog(win!, { title: 'Export to a new or empty folder', defaultPath: path.dirname(root), properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return { path: r.filePaths[0], problem: await folderProblem(root, r.filePaths[0]) }
+  })
+  ipcMain.handle('export:keypoints', async () => {
+    const r = await dialog.showOpenDialog(win!, { title: 'Choose a keypoints file', properties: ['openFile'], filters: keypointsFilter })
+    if (r.canceled || !r.filePaths[0]) return null
+    const { summary } = await readKeypoints(r.filePaths[0])
+    keypointFiles.add(summary.file)
+    return summary
+  })
+  ipcMain.handle('export:make-keypoints', async (_e, root: string, prefer: LabelFormat) => {
+    const schema = await keypointsFromFolder(root, prefer)
+    if (!schema) throw new Error('The folder has no posed objects to make a keypoints file from: give a box and its points one group_id')
+    const r = await dialog.showSaveDialog(win!, { title: 'Save the keypoints file', defaultPath: path.join(path.dirname(root), `${path.basename(root)}-keypoints.yaml`), filters: keypointsFilter })
+    if (r.canceled || !r.filePath) return null
+    const summary = await saveKeypoints(r.filePath, schema)
+    keypointFiles.add(summary.file)
+    return summary
+  })
+  ipcMain.handle('export:run', async (_e, root: string, options: ExportOptions, out: string) => {
+    const result = await runExport(root, exportOptions(options), out, exportJob())
+    if (!result.stopped) exported = result.out
+    return result
+  })
+  ipcMain.handle('export:stop', () => exporting?.abort())
+  ipcMain.handle('export:reveal', (_e, out: string) => {
+    if (out === exported) shell.showItemInFolder(out)
   })
 }
 
