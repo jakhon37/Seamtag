@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync 
 import path from 'path'
 import sharp from 'sharp'
 import { contrast } from './contrast'
-import { BASE, doc, finish, H, launch, open, project, read, saved, shapesIn, square, W } from './helpers'
+import { BASE, doc, finish, H, launch, onImage, open, project, read, saved, shapesIn, square, W } from './helpers'
 
 // Dataset > Check labels, the Problems dock, its fixes and renames, and Dataset > Statistics,
 // on a folder with one of each planted problem
@@ -718,6 +718,43 @@ test('Tab moves through the Problems dock, and skips to an AI shape only from th
   await finish(app, errors)
 })
 
+test("Space+drag pans the image after a click on a problem's image name, which leaves the focus in the dock", async () => {
+  const dir = await project('dataset-pan', {
+    a: doc('a', [square('cat', 150, 100, 250, 200)]),
+    // Two copies of one shape: the row opens b.png with the copy picked, in Edit
+    b: doc('b', [square('cat', 150, 100, 250, 200), square('cat', 150, 100, 250, 200)])
+  })
+  await paint(dir, ['a', 'b'])
+  const { app, page, errors } = await launch(dir)
+  await menu(page, 'Dataset', 'Check labels')
+  const dock = page.getByRole('region', { name: 'Problems' })
+  await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
+  const name = dock.locator('.problems-group[data-code="duplicate-shape"] .problem-open')
+  await name.click()
+  await expect(page.locator('.file.on')).toContainText('b.png')
+  await expect(page.locator('.loading', { hasText: 'Preparing' })).toHaveCount(0)
+  await expect(page.locator('.shape.on')).toHaveCount(1)
+  await expect(name).toBeFocused()
+  const before = shapesIn(dir, 'b').map((s: { points: number[][] }) => s.points)
+  // Space held over the name, a drag on the picked shape pans the image rather than moving the shape
+  const from = await onImage(page, 200, 150), to = await onImage(page, 260, 200)
+  await page.mouse.move(...from)
+  await page.keyboard.down('Space')
+  await page.mouse.down()
+  await page.mouse.move(...to, { steps: 8 })
+  await page.mouse.up()
+  await page.keyboard.up('Space')
+  await expect(page.getByTestId('canvas')).toBeFocused()
+  // The point the drag began on came along under the pointer
+  await page.mouse.move(to[0], to[1] + 2)
+  await page.mouse.move(...to)
+  await expect(page.locator('.status')).toContainText('200, 150')
+  await page.keyboard.press('ControlOrMeta+s')
+  await saved(page)
+  expect(shapesIn(dir, 'b').map((s: { points: number[][] }) => s.points)).toEqual(before)
+  await finish(app, errors)
+})
+
 // labelme's label list for its instance segmentation example (examples/instance_segmentation/labels.txt): it fills the Labels list
 const VOC = '__ignore__,_background_,aeroplane,bicycle,bird,boat,bottle,bus,car,cat,chair,cow,diningtable,dog,horse,motorbike,person,potted plant,sheep,sofa,train,tv/monitor'
 
@@ -793,6 +830,32 @@ test('on a short window the Shapes list keeps off the Problems dock, open or fol
     // As it began: the dock open
     await dock.locator('.problems-fold').click()
     if (theme === 'dark') await darkMode(page)
+  }
+  await finish(app, errors)
+})
+
+test('a Labels list of one label is as tall as its row, with the dock open, at any window size', async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const dir = await project('dataset-one-label', { a: doc('a', [square('cat', 20, 20, 120, 120), square('cat', 20, 20, 120, 120)]) })
+  const { app, page, errors } = await launch(dir)
+  await menu(page, 'Dataset', 'Check labels')
+  await expect(page.getByRole('region', { name: 'Problems' }).locator('.problems-status')).toHaveText(CHECKED)
+  await expect(page.locator('section[aria-label="Labels"] .class')).toHaveCount(1)
+  for (const [width, height] of [[1500, 940], [960, 600]]) {
+    await resize(app, page, width, height)
+    // Nothing under the row, and nothing under New label but its own margin
+    const { list, row, under, margin } = await page.evaluate(() => {
+      const section = document.querySelector('section[aria-label="Labels"]')!, add = section.querySelector('.add')!
+      return {
+        list: section.querySelector('.classes')!.getBoundingClientRect().height,
+        row: section.querySelector('.class')!.getBoundingClientRect().height,
+        under: section.getBoundingClientRect().bottom - add.getBoundingClientRect().bottom,
+        margin: parseFloat(getComputedStyle(add).marginBottom)
+      }
+    })
+    expect(Math.abs(list - row)).toBeLessThan(1)
+    expect(Math.abs(under - margin)).toBeLessThan(1)
+    await shot(page, `labels-one-${width}.png`)
   }
   await finish(app, errors)
 })
@@ -935,7 +998,9 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
   const cells = (label: string) => stats.locator(`.stats-labels tbody tr[data-label="${label}"] td`)
   await expect(stats.locator('.stats-labels thead th')).toHaveText(['Label', 'Objects', 'Images', 'Polygon', 'Point', ''])
   await expect(cells('cat')).toHaveText(['cat', '1', '1', '2', '0', 'Rename…'])
-  await expect(stats.getByText('Objects are counted as the exports count them')).toBeVisible()
+  await expect(stats.getByText(/^Objects are grouped as the exports group them/)).toHaveText('Objects are grouped as the exports group them: shapes with one label and ' +
+    'one group ID are one object, and points grouped with a box are its keypoints, not objects. Lines and other points count as objects here, ' +
+    'though the COCO and YOLO exports leave them out. The columns by shape type count shapes.')
   // The cat and the dog are two objects, the person and its keypoints one
   await expect(stats.locator('.stats-column[title="1 image with 2 objects"]')).toHaveCount(1)
   await expect(stats.locator('.stats-column[title="1 image with 1 object"]')).toHaveCount(1)

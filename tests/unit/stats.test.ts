@@ -67,8 +67,8 @@ test("shapes sharing a label and a group_id are one object, as the exports take 
       part('cat', 0, 0, 10, 10, 1), part('cat', 20, 0, 30, 10, 1), box('cat', 50, 50, 60, 60), part('dog', 100, 100, 110, 110, 1),
       // A pose: its box, and points that are its keypoints
       part('person', 0, 100, 50, 200, 2), point('nose', 20, 120, 2), point('left_eye', 15, 115, 2),
-      // A point of no group is an object of its own
-      point('dot', 5, 5, null)
+      // A point of no group is an object of its own, and so is a line, though the COCO and YOLO exports leave both out
+      point('dot', 5, 5, null), newShape('lane', 'linestrip', [[0, 250], [200, 260], [390, 250]])
     ]),
     // Boxes of two labels in one group make no pose, so its point is an object
     image('b', [part('car', 0, 0, 50, 50, 3), part('bus', 60, 0, 110, 50, 3), point('wheel', 10, 45, 3)])
@@ -80,15 +80,16 @@ test("shapes sharing a label and a group_id are one object, as the exports take 
     { label: 'car', objects: 1, images: 1, types: { rectangle: 1 } },
     { label: 'dog', objects: 1, images: 1, types: { rectangle: 1 } },
     { label: 'dot', objects: 1, images: 1, types: { point: 1 } },
+    { label: 'lane', objects: 1, images: 1, types: { linestrip: 1 } },
     { label: 'person', objects: 1, images: 1, types: { rectangle: 1 } },
     { label: 'wheel', objects: 1, images: 1, types: { point: 1 } },
     // Keypoints count as shapes of their labels, with no objects
     { label: 'left_eye', objects: 0, images: 1, types: { point: 1 } },
     { label: 'nose', objects: 0, images: 1, types: { point: 1 } }
   ])
-  expect(stats.objectsPerImage).toEqual([{ objects: 3, images: 1 }, { objects: 5, images: 1 }])
-  // The dot and the wheel have no area
-  expect(stats.sizes.unsized).toBe(2)
+  expect(stats.objectsPerImage).toEqual([{ objects: 3, images: 1 }, { objects: 6, images: 1 }])
+  // The dot, the lane and the wheel have no area
+  expect(stats.sizes.unsized).toBe(3)
 })
 
 test("an object of several shapes is ranged by its area as one, where they overlap counted once, as COCO's export merges them", () => {

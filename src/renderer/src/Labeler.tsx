@@ -2559,9 +2559,10 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       if (target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || (target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'range' && (target as HTMLInputElement).type !== 'checkbox')) return
       // Tab moves the focus through the docks' controls: only from the canvas, or with nothing focused, does it skip an AI shape
       if (e.key === 'Tab' && target !== document.body && target !== canvasRef.current) return
-      // Enter and Space press the Problems dock's buttons and tick its box, as they would anywhere, rather than finish a shape or verify the image
+      // Enter and Space press the Problems dock's buttons and tick its box, as they would anywhere, rather than finish a shape or verify the image.
+      // A click on a row leaves the focus here, so Space held down still pans under a drag, which takes the focus to the canvas: the button isn't pressed
       if ((e.key === 'Enter' || e.code === 'Space') && target.closest?.('section.problems') && (target.tagName === 'BUTTON' || target.tagName === 'INPUT')) {
-        if (e.code === 'Space') { space.current = false; spaceTap.current = null }
+        if (e.code === 'Space') { space.current = e.type === 'keydown'; spaceTap.current = null }
         return
       }
       if (e.code === 'Space') {

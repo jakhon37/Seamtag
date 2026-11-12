@@ -188,9 +188,10 @@ input.group { width: 110px; }
 .panel.right section.grow { flex: 1; }
 .panel.right .classes { max-height: 260px; }
 /* On a short window the Labels list gives way first, down to two rows; the Shapes section keeps its
-   title and two rows, and Difficult and Delete shape under them, and never paints over the dock below it */
-.panel.right > section[aria-label="Labels"] { flex: 0 1 auto; min-height: 140px; }
-.panel.right > section[aria-label="Labels"] .classes { flex: 0 1 auto; min-height: 59px; }
+   title and two rows, and Difficult and Delete shape under them, and never paints over the dock below it.
+   A list of one label, or none, has no row to give, and stays as tall as what it holds */
+.panel.right > section[aria-label="Labels"]:has(> .classes > .class + .class) { flex: 0 1 auto; min-height: 140px; }
+.panel.right > section[aria-label="Labels"]:has(> .classes > .class + .class) .classes { flex: 0 1 auto; min-height: 59px; }
 .panel.right > section.grow { min-height: 89px; overflow: clip; overflow-clip-margin: 3px; }
 .panel.right > section.grow:has(> .row.selection) { min-height: 136px; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; position: relative; cursor: pointer; }

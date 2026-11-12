@@ -189,8 +189,9 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
             ) : <p className="muted">No shapes yet.</p>}
             {grouped && (
               <p className="muted">
-                Objects are counted as the exports count them: shapes with one label and one group ID are one object, and points grouped
-                with a box are its keypoints, not objects. The columns by shape type count shapes.
+                Objects are grouped as the exports group them: shapes with one label and one group ID are one object, and points grouped
+                with a box are its keypoints, not objects. Lines and other points count as objects here, though the COCO and YOLO
+                exports leave them out. The columns by shape type count shapes.
               </p>
             )}
 

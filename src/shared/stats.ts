@@ -1,7 +1,7 @@
 // Counts over a folder's labels for the Dataset window's Statistics tab: images by status,
-// objects per label as the exports count them and shapes per label by type, objects per image,
-// object sizes as COCO ranges them at full size and at the training size, and image sizes. AI
-// proposals aren't objects until they're accepted, as summarize() in labels.ts counts them.
+// objects per label, grouped as the exports group them, and shapes per label by type, objects per
+// image, object sizes as COCO ranges them at full size and at the training size, and image sizes.
+// AI proposals aren't objects until they're accepted, as summarize() in labels.ts counts them.
 import { shapeArea } from './checks'
 import type { DatasetImage } from './dataset'
 import { isAi, SHAPE_TYPES, type ShapeType } from './labelfile'
@@ -60,11 +60,12 @@ const SMALL = 32 ** 2, LARGE = 96 ** 2
 const range = (area: number): keyof SizeCounts => (area < SMALL ? 'small' : area < LARGE ? 'medium' : 'large')
 
 /**
- * An image's objects as the exports take them, each a list of its shapes, AI proposals left
- * out. Shapes sharing a label and a group_id are one object, as src/shared/coco.ts' instances()
- * and ultralytics.ts' labelRows() group them, and any other shape is one of its own. The points
- * of a pose, a group whose closed shapes all have one label, are its keypoints and no objects
- * of their own, as src/main/export.ts' keypointSchemaOf() finds poses without a keypoints file.
+ * An image's objects, grouped as the exports group them, each a list of its shapes, AI proposals
+ * left out. Shapes sharing a label and a group_id are one object, as src/shared/coco.ts'
+ * instances() and ultralytics.ts' labelRows() group them, and any other shape is one of its own:
+ * lines and points too, though those exports leave them out. The points of a pose, a group whose
+ * closed shapes all have one label, are its keypoints and no objects of their own, as
+ * src/main/export.ts' keypointSchemaOf() finds poses without a keypoints file.
  */
 function objectsOf(image: DatasetImage): number[][] {
   const groups = new Map<number, { boxes: Set<string>; points: number[] }>()
