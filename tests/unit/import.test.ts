@@ -487,11 +487,18 @@ describe('a COCO file', () => {
     const file = path.join(folder(), 'c.json')
     writeFileSync(file, JSON.stringify({
       images: [{ id: 1, file_name: 'a.png', width: W, height: H }], categories: [{ id: 1, name: 'car' }],
-      annotations: [{ id: 1, image_id: 1, category_id: 1, bbox: [1e308, 2, 1e308, 10] }, { id: 2, image_id: 1, category_id: 1, bbox: [2, 2, 10, 10] }]
+      annotations: [
+        { id: 1, image_id: 1, category_id: 1, bbox: [1e308, 2, 1e308, 10] }, { id: 2, image_id: 1, category_id: 1, bbox: [2, 2, 10, 10] },
+        // CVAT's rotated box, whose corners come to Infinity only once turned
+        { id: 3, image_id: 1, category_id: 1, bbox: [0, 0, 1.7e308, 1.7e308], attributes: { occluded: false, rotation: 45 } }
+      ]
     }))
     const root = await open(dir)
     const p = await read(root, { kind: 'coco', path: file })
-    expect(group(p, 'coco-no-pixels')!.rows).toEqual(["a.png: annotation 1 (“car”) has neither a shape nor a box with an area, so it's left out"])
+    expect(group(p, 'coco-no-pixels')!.rows).toEqual([
+      "a.png: annotation 1 (“car”) has neither a shape nor a box with an area, so it's left out",
+      "a.png: annotation 3 (“car”) has a rotated box too large to place on the image, so it's left out"
+    ])
     await save('add')
     expect(brief(doc(dir, 'a.json').shapes)).toEqual([['kept', 'rectangle', null, [[1, 1], [5, 5]]], ['car', 'rectangle', null, [[2, 2], [12, 12]]]])
   })

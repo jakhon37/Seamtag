@@ -219,7 +219,9 @@ export function writeVoc(image: VocImage, shapes: Shape[], verified: boolean): s
 
 /** classes.txt as LabelImg reads it. Blank lines in the middle stay, so the numbers after them do too. */
 export function readClasses(text: string): string[] {
-  return text.replace(/^[\r\n]+|[\r\n]+$/g, '').split(/\r?\n/)
+  // The line breaks at the end are looked for from the first of a run only: looked for from each
+  // one of a long run in the middle, they took time growing with the run's length squared
+  return text.replace(/^[\r\n]+|(?<![\r\n])[\r\n]+$/g, '').split(/\r?\n/)
 }
 export const writeClasses = (classes: string[]) => classes.map((c) => `${c}\n`).join('')
 

@@ -792,6 +792,20 @@ describe('reading COCO from other tools', () => {
     ])
   })
 
+  test('a rotated box whose corners come to Infinity once turned is no box either', () => {
+    const turned = (id: number, bbox: number[], rotation: number) => ({ id, image_id: 7, category_id: 3, segmentation: [], area: 1, bbox, iscrowd: 0, attributes: { occluded: false, rotation } })
+    const read = readCoco(coco([turned(1, [0, 0, 1.7e308, 1.7e308], 45), turned(2, [1e308, 0, 7e307, 1.7e308], 90), turned(3, [0, 0, 1e308, 1e308], 30)]), 'instances_default.json')
+    // As large, but still numbers once turned
+    const [kept, ...more] = read.results.get(7)!.shapes
+    expect([kept.shape_type, more]).toEqual(['oriented_rectangle', []])
+    expect(kept.points.flat().every(Number.isFinite)).toBe(true)
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "b.jpg: annotation 1 (“cat”) has a rotated box too large to place on the image, so it's left out",
+      "b.jpg: annotation 2 (“cat”) has a rotated box too large to place on the image, so it's left out",
+      'instances_default.json: 1 annotation is a box CVAT rotated (attributes.rotation), so it becomes a rotated box, as CVAT shows it'
+    ])
+  })
+
   test('group ids past 2^31 are kept, and new ones count on from those below, so separate objects stay apart', () => {
     const two = (x: number) => [[x, 1, x + 2, 1, x + 2, 3], [x + 4, 1, x + 6, 1, x + 6, 3]]
     const text = coco([
@@ -850,6 +864,39 @@ describe('reading COCO from other tools', () => {
     expect(read.results.get(1)!.shapes).toEqual([newShape('cat', 'mask', [[0, 5], [0, 5]])])
     expect(read.issues.map((i) => i.message)).toEqual([
       "a.jpg: annotation 1 (“cat”) carries Seamtag's attributes, but shape 2's outline is too long to compare with its mask, so it's imported from its segmentation"
+    ])
+  })
+
+  test("masks a file makes millions of pixels wide are read from the segmentation, not compared with it a column at a time", () => {
+    // A 1 x 268,402,689 image, as a file can claim one: comparing its mask took 12 seconds
+    const W = MASK_PIXELS
+    const wide = JSON.stringify({
+      images: [{ id: 1, width: W, height: 1, file_name: 'a.png' }], categories: [{ id: 1, name: 'road' }],
+      annotations: [{ id: 1, image_id: 1, category_id: 1, segmentation: { size: [1, W], counts: [0, W] }, area: W, bbox: [0, 0, W, 1], iscrowd: 0, attributes: { shape_type: 'mask', points: [[0, 0], [W - 1, 0]] } }]
+    })
+    let t = performance.now()
+    let read = readCoco(wide, 'a.json', { pixels: false })
+    expect(performance.now() - t).toBeLessThan(200)
+    expect(read.results.get(1)!.shapes).toEqual([newShape('road', 'mask', [[0, 0], [W - 1, 0]])])
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "a.png: annotation 1 (“road”) carries Seamtag's attributes, but shape 1's mask is 268402689 pixels wide, more than the 4,194,304 Seamtag compares with a segmentation, so it's imported from its segmentation"
+    ])
+    // An object's masks are held to it in all. Here each is a row of a 2-row image, so its runs
+    // were cut at every column, two numbers a column: nearly a second and 100 MB a mask
+    const N = 3_000_000
+    const rows = JSON.stringify({
+      images: [{ id: 1, width: N, height: 2, file_name: 'b.png' }], categories: [{ id: 1, name: 'road' }],
+      annotations: [{
+        id: 1, image_id: 1, category_id: 1, segmentation: { size: [2, N], counts: [0, 2 * N] }, area: 2 * N, bbox: [0, 0, N, 2], iscrowd: 0,
+        attributes: { group_id: 1, shapes: [{ shape_type: 'mask', points: [[0, 0], [N - 1, 0]] }, { shape_type: 'mask', points: [[0, 1], [N - 1, 1]] }] }
+      }]
+    })
+    t = performance.now()
+    read = readCoco(rows, 'b.json', { pixels: false })
+    expect(performance.now() - t).toBeLessThan(200)
+    expect(read.results.get(1)!.shapes).toEqual([newShape('road', 'mask', [[0, 0], [N - 1, 1]])])
+    expect(read.issues.map((i) => i.message)).toEqual([
+      "b.png: annotation 1 (“road”) carries Seamtag's attributes, but its shapes' masks are 6000000 pixels wide in all, more than the 4,194,304 Seamtag compares with a segmentation, so it's imported from its segmentation"
     ])
   })
 

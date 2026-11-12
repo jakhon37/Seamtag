@@ -434,6 +434,10 @@ export const MASK_PIXELS = 0x3fff * 0x3fff
 // times the size: about 25 times round the largest mask's edge. An outline in a file's
 // attributes can zigzag across the image far more often than any shape does.
 const OUTLINE_POINTS = 2 ** 23
+// How wide an annotation's mask shapes may be in all to be compared with its mask: rleMove takes
+// a step a column, and a file can claim an image wider than any is, and masks as wide. No
+// object's masks come near it.
+const MASK_COLUMNS = 2 ** 22
 
 /**
  * New group ids count on from the highest below this. Past 2^53 a number plus 1 is the same
@@ -696,6 +700,11 @@ function readObject(a: Record<string, unknown>, label: string, image: CocoImage,
   }
   const [x, y, bw, bh] = box
   const turned = turnedBox(label, box, isObject(a.attributes) ? a.attributes.rotation : undefined)
+  // Turned, a box cocoBox takes can have a corner past the largest number, which no label file can hold
+  if (turned && !turned.points.every((p) => p.every(Number.isFinite))) {
+    note('warning', 'coco-no-pixels', "has a rotated box too large to place on the image, so it's left out")
+    return { shapes: [], restored: false }
+  }
   // Its polygons, if any, were all left out, each with its own note
   const seg = a.segmentation
   if (Array.isArray(seg) && seg.some((p) => !Array.isArray(p) || p.length)) note('warning', 'coco-box-only', `keeps only its box, so it becomes ${turned ? 'a rotated box' : 'a rectangle'}`)
@@ -852,6 +861,11 @@ function restore(attrs: Record<string, unknown>, label: string, image: CocoImage
       if (!same) return `${polygons.length > 1 ? `polygon ${i + 1}` : 'its polygon'} differs from the shape they give`
     }
     return out
+  }
+  const masks = out.filter((r) => r.pixels), wide = masks.reduce((n, r) => n + r.pixels!.box.width, 0)
+  if (wide > MASK_COLUMNS) {
+    const which = masks.length > 1 ? `its shapes' masks are ${wide} pixels wide in all` : `shape ${out.indexOf(masks[0]) + 1}'s mask is ${wide} pixels wide`
+    return `${which}, more than the ${MASK_COLUMNS.toLocaleString('en-GB')} Seamtag compares with a segmentation`
   }
   // Compared as runs, so no pixels are made for shapes that may not be kept
   const runs: Rle[] = []

@@ -186,6 +186,9 @@ const some = (first: string, n: number, kind: string) => (n > 1 ? `${first} and 
 
 // A darknet .data file is a few lines of key = value: a bigger one is something else
 const DATA_FILE_BYTES = 64 * 2 ** 10
+// A file of class names, one a line, is read whole, as classes.txt and darknet's names files are:
+// one bigger than this isn't a list of names, and reading it would hold up the app
+const NAMES_FILE_BYTES = 4 * 2 ** 20
 // Roboflow's YOLO Darknet labelmap, one in each split's folder: _darknet.labels, as its downloads
 // name it, or darknet.labels, as its page on the format does
 const DARKNET_LABELS = new Set(['_darknet.labels', 'darknet.labels'])
@@ -207,7 +210,7 @@ async function darknetNames(root: string, files: string[], say: (s: Severity, co
     return all.find((f) => path.basename(f).toLowerCase() === name) ?? (all.length === 1 ? all[0] : null)
   }
   const read = async (file: string) => {
-    const text = await fs.readFile(file, 'utf8').catch(() => null)
+    const text = (await namesFile(file, root, say)) ? await fs.readFile(file, 'utf8').catch(() => null) : null
     return text === null ? null : { names: readClasses(text), file }
   }
   const data = named('.data', 'obj.data')
@@ -230,6 +233,15 @@ async function darknetNames(root: string, files: string[], say: (s: Severity, co
   if (lists.every((l) => l.names.join('\n') === lists[0].names.join('\n'))) return lists[0] ?? null
   say('warning', 'yolo-no-yaml', `${some(path.relative(root, maps[0]), maps.length, 'labelmap')} name the classes differently, so ${maps.length > 2 ? 'none' : 'neither'} is used`)
   return null
+}
+
+// Whether a file of class names can be read: a file, and not too big, which is told
+async function namesFile(file: string, root: string, say: (s: Severity, code: string, m: string) => void) {
+  const info = await stat(file)
+  if (!info?.isFile()) return false
+  if (info.size <= NAMES_FILE_BYTES) return true
+  say('warning', 'yolo-no-yaml', `${path.relative(root, file)} is ${(info.size / 2 ** 20).toFixed(1)} MB, more than the ${NAMES_FILE_BYTES / 2 ** 20} MB a file of class names may be, so it isn't read`)
+  return false
 }
 
 /**
@@ -320,7 +332,7 @@ export async function readYoloDataset(target: string, { signal, most = MOST_FILE
     }
     for (const where of [root, path.join(root, 'labels')]) {
       const classes = path.join(where, YOLO_CLASSES)
-      if (await isFile(classes)) {
+      if (await namesFile(classes, root, say)) {
         data.names = readClasses(await fs.readFile(classes, 'utf8'))
         say('info', 'yolo-no-yaml', `${path.basename(target)} has no data.yaml, so the class names come from ${path.relative(target, classes)}`)
         break

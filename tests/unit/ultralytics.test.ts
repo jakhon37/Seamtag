@@ -900,6 +900,34 @@ describe('datasets on disk, wherever they sit', () => {
     ])
   })
 
+  test("files of class names: a long run of blank lines is read in no time, and a file too big to be a list of names isn't read", async () => {
+    put('dn/a.jpg')
+    put('dn/a.txt', '0 0.5 0.5 0.2 0.2\n')
+    // The blank lines stay, as LabelImg keeps them: 50,000 took five seconds
+    put('dn/obj.names', `car${'\n'.repeat(50_000)}tree\n`)
+    const t = performance.now()
+    let d = await readYoloDataset(path.join(dir, 'dn'))
+    expect(performance.now() - t).toBeLessThan(500)
+    expect([d.names.length, d.names[0], d.names[1], d.names[50_000]]).toEqual([50_001, 'car', '', 'tree'])
+    // Past 4 MB, classes.txt is passed over for the next place names can come from
+    const big = 'x\n'.repeat(2.5 * 2 ** 20)
+    put('dn/classes.txt', big)
+    d = await readYoloDataset(path.join(dir, 'dn'))
+    expect(d.names[0]).toBe('car')
+    expect(d.issues.map((i) => [i.severity, i.message])).toEqual([
+      ['warning', "classes.txt is 5.0 MB, more than the 4 MB a file of class names may be, so it isn't read"],
+      ['info', 'dn has no data.yaml, so the class names come from obj.names']
+    ])
+    rmSync(path.join(dir, 'dn', 'classes.txt'))
+    put('dn/obj.names', big)
+    d = await readYoloDataset(path.join(dir, 'dn'))
+    expect(d.names).toEqual(['class_0'])
+    expect(d.issues.map((i) => [i.severity, i.message])).toEqual([
+      ['warning', "obj.names is 5.0 MB, more than the 4 MB a file of class names may be, so it isn't read"],
+      ['info', 'dn has neither data.yaml nor classes.txt, so the classes are named class_0 to class_0']
+    ])
+  })
+
   test('without data.yaml, classes are named up to class_99999: a row of a class past it is told and left out', async () => {
     put('ds/images/a.jpg')
     put('ds/labels/a.txt', '1 0.5 0.5 0.2 0.2\n100000000 0.5 0.5 0.2 0.2\n4294967295 0.5 0.5 0.2 0.2\n')
