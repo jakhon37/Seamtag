@@ -5,7 +5,8 @@
 //   - the packages app.asar carries: the dependencies, and theirs, as installed,
 //   - libvips and the libraries built into it, from sharp's @img packages,
 //   - ONNX Runtime, and Electron.
-// Texts node_modules lacks are in resources/notices, whose README says where each came from.
+// Texts node_modules lacks are in resources/notices, whose README says where each came from. It
+// stops when they no longer match what's installed: another ONNX Runtime, or another sharp-libvips.
 // Code from other projects inside Seamtag's own source files is in NOTICE.md instead.
 //
 // `npm run build`, `dist` and `dist:dir` run it. electron-builder runs it again before it packs
@@ -96,6 +97,65 @@ function licenceOf(p) {
   return own
 }
 
+/** libvips's copyright line, as About shows it */
+function libvipsCopyright() {
+  const copyright = /export const LIBVIPS_COPYRIGHT = '([^']+)'/.exec(readFileSync(path.join(ROOT, 'src', 'shared', 'legal.ts'), 'utf8'))?.[1]
+  if (!copyright) throw new Error('src/shared/legal.ts has no LIBVIPS_COPYRIGHT, the copyright line of libvips')
+  return copyright
+}
+
+/** The files in a folder, by their paths in it: the top level's first */
+function filesIn(dir, at = '') {
+  const here = readdirSync(path.join(dir, at), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
+  return [...here.filter((e) => e.isFile()).map((e) => path.posix.join(at, e.name)),
+    ...here.filter((e) => e.isDirectory()).flatMap((e) => filesIn(dir, path.posix.join(at, e.name)))]
+}
+
+/** The sharp-libvips release sharp takes libvips from, on every system: Windows's @img/sharp-win32-x64 packs it too */
+function sharpLibvips() {
+  const sharp = json(path.join(ROOT, 'node_modules', 'sharp', 'package.json'))
+  const releases = [...new Set(Object.entries(sharp.optionalDependencies ?? {}).filter(([name]) => name.startsWith('@img/sharp-libvips-')).map(([, v]) => v))]
+  if (releases.length !== 1) throw new Error(`sharp ${sharp.version} names ${releases.join(' and ') || 'no'} sharp-libvips version${releases.length ? 's' : ''}: scripts/notices.mjs takes one`)
+  return releases[0]
+}
+
+/**
+ * The licence files of libvips and of each library built into it, from their sources at the
+ * versions libvips is built from (resources/notices/sharp-libvips-<release>). It stops when sharp
+ * takes libvips from another sharp-libvips, or the libraries or their versions change.
+ */
+function libraryLicences(release, versions) {
+  const folder = `resources/notices/sharp-libvips-${release}`
+  const dir = path.join(ROOT, folder)
+  const how = 'See resources/notices/README.md'
+  if (!existsSync(path.join(dir, 'sources.json'))) {
+    throw new Error(`${folder} needs the licence files of libvips and the libraries built into it, from their sources at the versions sharp-libvips ${release} builds. ${how}`)
+  }
+  const { libraries } = json(path.join(dir, 'sources.json'))
+  const changed = [...new Set([...Object.keys(versions), ...Object.keys(libraries)])].sort()
+    .filter((key) => versions[key] !== libraries[key]?.version || !existsSync(path.join(dir, key)))
+    .map((key) => `${key} ${versions[key] ?? 'not'} in libvips, ${libraries[key]?.version ?? 'not'} in ${folder}${existsSync(path.join(dir, key)) ? '' : ', with no folder'}`)
+  if (changed.length) throw new Error(`The libraries in libvips don't match ${folder}: ${changed.join('; ')}. ${how}`)
+  // A text given once: the next library with the same words points to it
+  const given = new Map()
+  const words = (t) => t.replace(/\s+/g, ' ').trim()
+  // libvips first, then the libraries built into it
+  const order = (a, b) => (b === 'vips') - (a === 'vips') || libraries[a].name.localeCompare(libraries[b].name)
+  return Object.keys(libraries).sort(order).map((key) => {
+    const lib = libraries[key]
+    const files = filesIn(path.join(dir, key)).map((file) => {
+      const of = file.replace(/\.excerpt$/, '')
+      if (of !== file && !lib.excerpts?.[of]) throw new Error(`${folder}/sources.json gives no lines for ${key}/${file}`)
+      const label = of === file ? file : `${of}, lines ${lib.excerpts[of]}`
+      const body = text(path.join(dir, key, file))
+      if (given.has(words(body))) return `${label}: the same words as ${given.get(words(body))}, above.\n`
+      given.set(words(body), `${lib.name}'s ${label}`)
+      return `${label}:\n\n${body}`
+    })
+    return [`${line('.')}\n${lib.name} ${lib.version}, from ${lib.source}\n`, ...files].join('\n')
+  })
+}
+
 /** libvips and the libraries built into it, from the @img package sharp loads it from */
 function libvips(packages) {
   return packages.filter((p) => /LGPL/.test(p.licence)).map((p) => {
@@ -105,15 +165,17 @@ function libvips(packages) {
     const versions = existsSync(path.join(p.dir, 'versions.json')) ? json(path.join(p.dir, 'versions.json')) : {}
     const lib = existsSync(path.join(p.dir, 'lib')) ? readdirSync(path.join(p.dir, 'lib')).filter((f) => /vips/.test(f)).sort() : []
     const vips = versions.vips ? `libvips ${versions.vips}` : 'libvips'
-    const built = /^@img\/sharp-libvips-/.test(p.name) ? `https://github.com/lovell/sharp-libvips/tree/v${p.version}` : 'https://github.com/lovell/sharp-libvips'
+    const release = sharpLibvips()
     return {
       listed: `  ${vips} and the libraries built into it, in ${p.name} ${p.version}: ${p.licence}, and the licences listed there`,
       body: [
         heading(`${vips} and the libraries built into it`, `In ${p.name} ${p.version}. Licence: ${p.licence}`) +
-          `sharp loads libvips as a shared library${lib.length ? ` (${lib.join(', ')})` : ''}, from node_modules/${p.name}/lib in app.asar.unpacked, beside app.asar.`,
+          `libvips is ${libvipsCopyright()}. It is licensed under the GNU Lesser General Public License version 2.1 or later, and used here under version 3 (LGPL-3.0-or-later), which ends this part.`,
+        '',
+        `sharp loads libvips as a shared library${lib.length ? ` (${lib.join(', ')})` : ''}, from node_modules/${p.name}/lib in app.asar.unpacked, beside app.asar.`,
         ...(Object.keys(versions).length ? ['', `Versions: ${Object.entries(versions).map(([k, v]) => `${k} ${v}`).join(', ')}.`] : []),
         '',
-        `Sources: libvips at ${versions.vips ? `https://github.com/libvips/libvips/tree/v${versions.vips}` : 'https://github.com/libvips/libvips'}. ${built} builds it and the libraries listed below, and says where each one's source comes from.`,
+        `Sources: libvips at ${versions.vips ? `https://github.com/libvips/libvips/tree/v${versions.vips}` : 'https://github.com/libvips/libvips'}. https://github.com/lovell/sharp-libvips/tree/v${release} builds it and the libraries listed below, and says where each one's source comes from.`,
         '',
         `${p.name}'s README says:`,
         '',
@@ -121,7 +183,13 @@ function libvips(packages) {
         '',
         'This software is based in part on the work of the Independent JPEG Group.',
         'This software is based in part on the work of the FreeType Team (https://freetype.org).',
+        'This product includes Radiance software (http://radsite.lbl.gov/) developed by the Lawrence Berkeley National Laboratory (http://www.lbl.gov/).',
+        "libtiff's LZW compression (tif_lzw.c) was developed by the University of California, Berkeley.",
         '',
+        'The licence files of libvips and of each library built into it follow, as their sources carry them at these versions, with the licences of code from other projects that they build in.',
+        '',
+        ...libraryLicences(release, versions),
+        line('.'),
         'The GNU Lesser General Public License version 3 follows. It adds to the GNU General Public License version 3, which is in LICENSE, beside this file.',
         '',
         text(path.join(NOTICES, 'LGPL-3.0.txt'))
@@ -174,9 +242,9 @@ export function notices() {
   return [
     `Seamtag ${json(path.join(ROOT, 'package.json')).version}: third-party notices`,
     '',
-    'Seamtag is free software under the GNU General Public License version 3 only, which is in LICENSE, beside this file. NOTICE.md, also beside it, says which of Seamtag\'s own source files hold code from other projects, and under which licences.',
+    'Seamtag is free software under the GNU General Public License version 3 only (GPL-3.0-only), which is in LICENSE, beside this file. NOTICE.md, also beside it, says which of Seamtag\'s own source files hold code from other projects, and under which licences.',
     '',
-    'This file lists the other software the app carries, each part under its own licence, given in full below.',
+    "This file lists the other software the app carries, and each part's licence as that part's source gives it.",
     '',
     `Built into the app's code (${builtIn.length}):`,
     ...builtIn.map(listed),
