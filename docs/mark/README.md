@@ -1,6 +1,6 @@
 # Seamtag's mark
 
-Seamtag is the labelling half of Seamline, so its mark is [Seamline's](../brand) with the other side changed. The seam still parts the photos from what they're joined to, but that side is cloth in the app's blue instead of a network training. A line of stitches runs beside the seam, and a white label comes out from under its edge: the tag in the name. Two of Seamline's handles stay on the seam.
+Seamtag's mark is a seam: an S that parts photo tiles on paper from cloth in the app's blue. A line of stitches runs beside it on the cloth side, and a white label, the tag in the name, comes out from under its edge. Two editing handles sit on the seam.
 
 ## Files
 
@@ -11,7 +11,7 @@ Seamtag is the labelling half of Seamline, so its mark is [Seamline's](../brand)
 | `../../resources/icon.png` | Window icon: the mark at 944 of 1024 px |
 | `../../resources/icon.icns`, `icon.ico`, `icons/` | The installers' icons for macOS, Windows and Linux, with the small mark at 32 px and under, and at 16 and 32 points on a Mac |
 
-`make.py` draws both SVGs from Seamline's mark and copies them into `src/renderer/src/assets`; `icons.cjs` makes the icons from them:
+`make.py` draws both SVGs from Seamline's mark in [`docs/brand`](../brand) and copies them into `src/renderer/src/assets`; `icons.cjs` makes the icons from them:
 
 ```bash
 python3 docs/mark/make.py && node docs/mark/icons.cjs
@@ -19,4 +19,4 @@ python3 docs/mark/make.py && node docs/mark/icons.cjs
 
 ## Colours
 
-Seamline's paper (`#f3f5f9`), handle ink and rim, and its blue (`#4f8cff`) for the cloth, shaded from `#5c97ff` to `#3f7ae8`. The photo tiles are Seamline's, in greys at about a third of their strength.
+Paper (`#f3f5f9`) on the photo side, with the tiles in greys at about a third of their strength, and the app's blue (`#4f8cff`) for the cloth, shaded from `#5c97ff` to `#3f7ae8`. The handles are ringed in `#14161a`, and the rim is a faint grey (`#8a93a3`).
