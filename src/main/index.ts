@@ -14,7 +14,7 @@ import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
 import { type Args, loadConfig, type LoadedConfig, parseArgs, USAGE, USER_CONFIG } from './config'
 import { FORMAT_EXT, FORMAT_NAMES, type LabelFormat } from '../shared/formats'
-import { COPYRIGHT, INCLUDES, LEGAL_FILES, type LegalKind, type LegalText, TERMS } from '../shared/legal'
+import { COPYRIGHT, INCLUDES, LEGAL_FILES, type LegalKind, type LegalText, LIBVIPS, TERMS } from '../shared/legal'
 import { cacheRoot, imageData, imageDepth, imageSize, openImage, setCacheDir } from './images'
 import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImport, stopImport, writeImport } from './import'
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
@@ -339,10 +339,10 @@ function registerIpc() {
 function buildMenu() {
   // The window has its own menu bar. A Mac still needs the app menu, and Edit for text fields.
   if (process.platform !== 'darwin') return Menu.setApplicationMenu(null)
-  // The app menu's About panel says what the About window says, and where the notices are
+  // The app menu's About panel says what the About window says, and where the licences are
   app.setAboutPanelOptions({
     copyright: COPYRIGHT,
-    credits: `${TERMS}\n${INCLUDES} Their notices are under Help > About Seamtag > Third-party notices, and in Seamtag.app/Contents/Resources/legal.`
+    credits: `${TERMS}\n${INCLUDES}\n${LIBVIPS}\nThe GNU GPL, the LGPL and the notices are under Help > About Seamtag, and in Seamtag.app/Contents/Resources/legal.`
   })
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },

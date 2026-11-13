@@ -46,8 +46,10 @@ test('About says whose Seamtag is and on what terms, and shows its licence and t
   const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
   await expect(about.getByRole('heading', { level: 1 })).toHaveText(`Seamtag ${version}`)
   await expect(about).toContainText('Copyright © 2026 Jakhongir Nodirov')
-  await expect(about).toContainText('Free software under the GNU GPL version 3 only, with ABSOLUTELY NO WARRANTY.')
+  await expect(about).toContainText('Free software under the GNU GPL version 3 only (GPL-3.0-only), with ABSOLUTELY NO WARRANTY.')
   await expect(about).toContainText('Includes code from other projects under their own licences.')
+  // libvips's copyright among Seamtag's, and where the GPL and the LGPL are (LGPL-3.0 section 4(c))
+  await expect(about).toContainText('Uses libvips, Copyright (C) 1991-2005 The National Gallery and others, under the GNU LGPL version 3 or later (LGPL-3.0-or-later). The GNU GPL is under Licence, the LGPL under Third-party notices.')
 
   // Each button shows the files as the app has them, here the repository's own, over the About
   // window; Escape closes it and gives the focus back to the button

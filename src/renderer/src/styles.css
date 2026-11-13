@@ -155,6 +155,9 @@ canvas:focus { outline: none; }
 .dialog.about { width: 420px; align-items: center; text-align: center; }
 .dialog.about p { margin: 0; }
 .dialog.about > p { text-wrap: balance; }
+.dialog.about .terms { display: flex; flex-direction: column; gap: 4px; }
+.dialog.about .terms p { text-wrap: balance; }
+.dialog.about .whole { white-space: nowrap; }
 .dialog.about .actions { flex-wrap: wrap; justify-content: center; }
 /* Help > About Seamtag > Licence or Third-party notices: the files as shipped, the title and Close always in view */
 .dialog.legal { width: 760px; top: 6vh; }

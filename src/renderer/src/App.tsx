@@ -2,7 +2,7 @@ import { FolderOpen } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type Config, formatKeys, matches, shortcutList } from '../../shared/config'
 import { FORMAT_NAMES, LABEL_FORMATS } from '../../shared/formats'
-import { COPYRIGHT, INCLUDES, type LegalKind, TERMS } from '../../shared/legal'
+import { COPYRIGHT, INCLUDES, type LegalKind, LIBVIPS, TERMS } from '../../shared/legal'
 import ExportDialog from './ExportDialog'
 import ImportDialog from './ImportDialog'
 import Labeler, { type Commands, type LabelerHandle, type Settings } from './Labeler'
@@ -70,6 +70,8 @@ const MENUS: MenuSpec = [
   { label: 'Help', items: ['shortcuts', 'docs', 'about'] }
 ]
 const CONTEXT = ['edit_label', 'duplicate_shape', 'copy_shape', 'paste_shape', 'delete_shape', 'merge_shapes', 'toggle_lock', 'toggle_difficult', 'shape_line_color', 'shape_fill_color', '-', 'undo', 'redo', '-', 'add_point_to_edge', 'add_multiple_points', 'remove_selected_point', '-', 'edit_shape', 'create_polygon', 'create_rectangle']
+/** About's lines with the licences' names and the buttons' names kept whole, never broken at a hyphen */
+const whole = (text: string) => text.split(/(\(?L?GPL-3\.0-[\w-]+\)?|Third-party notices)/).map((part, k) => (k % 2 ? <span key={k} className="whole">{part}</span> : part))
 
 export default function App() {
   const [start, setStart] = useState<Start | null>(null)
@@ -361,10 +363,11 @@ export default function App() {
           <Logo size={56} />
           <h1>Seamtag {start.version}</h1>
           <p>Image annotation in LabelMe, Pascal VOC, YOLO or CreateML format, with brush, eraser, AI segmentation and review of model proposals.</p>
-          <div className="muted">
+          <div className="muted terms">
             <p>{COPYRIGHT}</p>
-            <p>{TERMS}</p>
+            <p>{whole(TERMS)}</p>
             <p>{INCLUDES}</p>
+            <p>{whole(`${LIBVIPS} The GNU GPL is under Licence, the LGPL under Third-party notices.`)}</p>
           </div>
           <div className="actions">
             <button className="ghost" onClick={() => setLegal('licence')}>Licence</button>
