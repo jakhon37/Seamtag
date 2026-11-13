@@ -17,10 +17,22 @@ files:
   - node_modules/onnxruntime-node/bin/napi-v6/${platform}/${arch}/**
   - "!node_modules/onnxruntime-node/bin/napi-v6/linux/*/libonnxruntime_providers_cuda.so"
   - "!node_modules/onnxruntime-node/bin/napi-v6/linux/*/libonnxruntime_providers_tensorrt.so"
-# CLIP's vocabulary, for SAM 3's and YOLO-World's word prompts
+# THIRD-PARTY-NOTICES.txt made again from this system's packages, and every file below checked,
+# before anything is packed: npm run dist makes it too, but the release workflow calls
+# electron-builder itself, and electron-builder only warns of a missing file
+beforePack: ./scripts/notices.mjs
 extraResources:
+  # CLIP's vocabulary, for YOLO-World's word prompts
   - from: resources/clip
     to: clip
+  # Seamtag's licence, the notice of the code in it from other projects, and the licences of
+  # the software it carries, which Help > About Seamtag shows
+  - from: LICENSE
+    to: legal/LICENSE
+  - from: NOTICE.md
+    to: legal/NOTICE.md
+  - from: THIRD-PARTY-NOTICES.txt
+    to: legal/THIRD-PARTY-NOTICES.txt
 asarUnpack:
   - node_modules/sharp/**
   - node_modules/@img/**
@@ -49,6 +61,13 @@ mac:
   # Ad-hoc signed, so it runs on Apple silicon; not notarised (see the README)
   identity: "-"
   hardenedRuntime: false
+  # electron-builder leaves Electron's and Chromium's licences out of a Mac app, which Windows
+  # and Linux keep beside the program
+  extraResources:
+    - from: node_modules/electron/LICENSE
+      to: legal/LICENSE.electron.txt
+    - from: node_modules/electron/dist/LICENSES.chromium.html
+      to: legal/LICENSES.chromium.html
 linux:
   icon: resources/icons
   category: Graphics
