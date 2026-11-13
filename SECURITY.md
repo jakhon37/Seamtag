@@ -1,62 +1,34 @@
-# Security Policy
+# Security
 
-## Supported Versions
+## Supported versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 3.x     | :white_check_mark: |
-| < 3.0 (LabelMeV2, Qt) | :x: |
+Fixes come out as a new 3.x release, so keep to the latest one.
 
-## Reporting a Vulnerability
+| Version | Supported |
+|---|---|
+| 3.x | Yes |
+| Before 3.0 | No |
 
-If you discover a security vulnerability in this project, please report it responsibly:
+## Reporting a vulnerability
 
-### How to Report
+Please don't open a public issue. Email jakhon37@gmail.com instead, with:
 
-1. **Do NOT** open a public GitHub issue
-2. Use GitHub's private vulnerability reporting on this repository (Security → Report a vulnerability)
-3. Provide detailed information:
-   - Description of the vulnerability
-   - Steps to reproduce
-   - Potential impact
-   - Suggested fix (if available)
+- what the problem is, and what it lets someone do;
+- how to reproduce it: the steps, and the file that triggers it if there is one;
+- the Seamtag version (Help → About, or `seamtag --version`) and your system.
 
-### What to Expect
+The fix comes out in a new release, noted in [CHANGELOG.md](CHANGELOG.md).
 
-- **Acknowledgment**: Within 48 hours
-- **Assessment**: Within 1 week
-- **Fix Timeline**: Depends on severity
-  - Critical: Within 7 days
-  - High: Within 30 days
-  - Medium: Within 90 days
-  - Low: Next regular release
+Worth reporting: a file Seamtag opens (an image, a label file, a COCO file, a YOLO dataset or a config file) that makes it run code, read or write files outside what you opened, or go online.
 
-### Security Best Practices
+## What Seamtag does with your files
 
-When using labelme:
+Seamtag works on files on your computer. It reads the images and label files in the folders you open, and writes label files, and the datasets you export, where you choose. Images, labels and settings aren't sent anywhere: there is no account, no telemetry and no update check.
 
-1. **Input Validation**: Always validate annotation files from untrusted sources
-2. **File Paths**: Be cautious when loading files from untrusted directories
-3. **Dependencies**: Keep all dependencies up to date
-4. **Permissions**: Run with minimal required permissions
-5. **Network**: Be aware that AI features may send data to remote servers
+It goes online only for these:
 
-### Known Security Considerations
+- **AI models**, when you agree to download one: from the question an AI tool asks the first time it needs its model, or from AI → AI models. The files come from release downloads on github.com, and YOLO-World's text encoder from Amazon S3 (`clip-as-service.s3.us-east-2.amazonaws.com`). Each file is checked against its SHA-256 before it's kept, in `~/.cache/osam`.
+- **A spelling dictionary.** On Windows and Linux, the spell checker built into Electron downloads one for your system's language from Google's servers when Seamtag first starts. On macOS the system's own spell checker is used.
+- **Links** in the app, such as Help → Documentation and the licences in AI → AI models, open in your web browser.
 
-- **Image Files**: Labelme loads images using PIL/Pillow. Ensure images come from trusted sources
-- **JSON Files**: Annotation files are loaded as JSON. Malformed files could cause crashes
-- **AI Features**: Some AI features may send data to external services (configurable)
-
-## Dependency Security
-
-This project uses:
-- Regular dependency updates via Dependabot (configured in `.github/dependabot.yml`)
-- Automated security scanning via GitHub's security features
-- Pin dependencies to specific versions in production
-
-## Updates
-
-Security updates will be:
-1. Released as patch versions (e.g., 0.0.x)
-2. Documented in [CHANGELOG.md](CHANGELOG.md)
-3. Announced in release notes
+Pre-labelling runs the ONNX model you choose, so use models from sources you trust.

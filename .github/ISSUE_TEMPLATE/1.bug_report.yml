@@ -1,10 +1,7 @@
-name: Bug Report
-description: Create a bug report
-labels: 'bug'
+name: Bug report
+description: Something in Seamtag doesn't work as it should
+labels: [bug]
 body:
-  - type: markdown
-    attributes:
-      value: Thanks for taking the time to file a bug report! Please fill out this form as completely as possible.
   - type: input
     attributes:
       label: Seamtag version
@@ -13,30 +10,23 @@ body:
       required: true
   - type: input
     attributes:
-      label: What OS are you using?
-      description: 'Please specify the exact version. For example: macOS 12.4, Ubuntu 20.04.4'
+      label: System
+      description: 'For example: Windows 11, macOS 15 on Apple silicon, Ubuntu 24.04'
     validations:
       required: true
   - type: textarea
     attributes:
-      label: Describe the Bug
-      description: A clear and concise description of what the bug is.
+      label: What happened
+      description: What you did, and what went wrong. Paste any error message as text.
     validations:
       required: true
   - type: textarea
     attributes:
-      label: Expected Behavior
-      description: A clear and concise description of what you expected to happen.
+      label: What you expected
   - type: textarea
     attributes:
-      label: To Reproduce
-      description: Steps to reproduce the behavior, please provide a clear description of how to reproduce the issue, based on the linked minimal reproduction. Screenshots can be provided in the issue body below. If using code blocks, make sure that [syntax highlighting is correct](https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-and-highlighting-code-blocks#syntax-highlighting) and double check that the rendered preview is not broken.
+      label: Steps to reproduce
+      description: From opening the folder to the problem. If one image, label file or dataset causes it, attach it, or a small copy that does the same, and the lines of `~/.seamtagrc` you changed.
   - type: markdown
     attributes:
-      value: Before posting the issue go through the steps you've written down to make sure the steps provided are detailed and clear.
-  - type: markdown
-    attributes:
-      value: Contributors should be able to follow the steps provided in order to reproduce the bug.
-  - type: markdown
-    attributes:
-      value: These steps are used to add integration tests to ensure the same issue does not happen again. Thanks in advance!
+      value: Please report security problems privately, as [SECURITY.md](https://github.com/jakhon37/Seamtag/blob/main/SECURITY.md) says, not here.
