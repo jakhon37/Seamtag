@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Datasets: a check of the whole folder's labels, statistics, and COCO and Ultralytics YOLO export and import.
+Datasets: a check of the whole folder's labels, statistics, and COCO and Ultralytics YOLO export and import. Seamtag's licence and notices, in About and in the installers.
 
 ### Added
 - Dataset → Check labels: 23 checks over every label file in the folder, listed as errors, warnings and notes in a Problems panel under the shapes (View → Problems). A problem opens its image with the shape selected, and This image only narrows the list to the open image. Repeated points, exact copies and boxes past the image's edge have a Fix, undone like any edit. An image is checked again as it's saved.
@@ -18,12 +18,17 @@ Datasets: a check of the whole folder's labels, statistics, and COCO and Ultraly
 - File → Import dataset (also under Dataset): a COCO file (instances or person_keypoints, as pycocotools, CVAT, labelme2coco and Seamtag write them), or a YOLO dataset in Ultralytics', Roboflow's, CVAT's or X-AnyLabeling's layout, read into each image's own label file as LabelMe JSON. Images are matched by path, or by a file name only one image on each side has; any other is listed and left out, never guessed. Images that already have labels are skipped, added to, or replaced; replaced files, and Pascal VOC, YOLO or CreateML files that are added to, go to the trash. COCO files are read in a worker with a memory limit of its own, and datasets from elsewhere are kept within bounds, so a file too big or malformed is refused with a reason instead of taking the app down.
 - CI: pycocotools 2.0.11 and Ultralytics 8.4.211's own label check read what the app exports, from the unit tests and from the Export dataset window.
 - NOTICE.md: Seamtag's copyright and licence, and the code from other projects it includes, each with its licence.
+- Licence and Third-party notices buttons in Help → About Seamtag: the first shows LICENSE, the second NOTICE.md and THIRD-PARTY-NOTICES.txt.
+- The installers carry LICENSE, NOTICE.md and THIRD-PARTY-NOTICES.txt in the app's `resources/legal` folder; on macOS, Electron's and Chromium's licences are there too. THIRD-PARTY-NOTICES.txt is made at each build and gives the full licence texts of the packages in the app, libvips and the libraries in it, ONNX Runtime and Electron.
 
 ### Changed
 - Windows over the page (About, Keyboard shortcuts, AI models, Add points to edge, Brightness and contrast, the line and fill colour windows, and the new ones) keep the keyboard inside them: Tab goes round them, Escape closes them, and the page behind takes no clicks, keys or dropped files until they close.
 - Tab skips to the next AI proposal when the image has the focus; in the panels it moves the focus, as in other apps.
 - A YOLO label file holding Ultralytics' outline, rotated box or keypoint rows says so when it opens, and points to File → Import dataset.
 - Closing the window while an import, a rename or an export is under way stops it and waits, ten seconds at most: an import or a rename finishes the image it's on, and an export removes what it wrote.
+- Help → About Seamtag gives the copyright and the licence, the GNU GPL version 3 only with no warranty, and says Seamtag includes code from other projects under their own licences. On macOS, the app menu's About panel gives the same, and where the notices are.
+- The start screen names the four formats labels are saved in, and says folders labelled in labelme or LabelImg open as they are.
+- The question before a model download, the Save format tooltip and `--help`'s line on the class file and save folder are reworded.
 
 ### Fixed
 - Saving a label file on Windows no longer fails when an antivirus scanner, the search indexer or OneDrive holds it for a moment: the rename is tried again for a few seconds.
@@ -69,9 +74,9 @@ Pascal VOC, YOLO and CreateML files, box tools, and a mark of Seamtag's own.
 - A right click on a shape selects it before the menu opens, and a right drag that starts on a shape carries a copy of it instead of panning.
 - In an output folder, images of the same name in different folders each keep their own label file, instead of sharing one straight in the folder.
 
-## [3.0.0] - Seamtag
+## [3.0.0] - 2026-11-10
 
-Rewritten as an Electron app, in place of the Qt app.
+Renamed Seamtag, and rewritten as an Electron app in place of the Qt app.
 
 ### Added
 - Polygons, rectangles, circles, lines, line strips, points and masks, and their editing: the label dialog with completion, flags per label pattern, group ID, description and validation; image flags; the shape list with visibility and order; copy and paste across images; merge; adding points along an edge; keep previous annotation; brightness and contrast; output folders; image data in label files; label files opened on their own; images in subfolders.
@@ -90,7 +95,7 @@ Rewritten as an Electron app, in place of the Qt app.
 ### Removed
 - The Qt app and its Python package. labelme's export scripts in `examples/` still work on these files with `pip install labelme`.
 
-## [2.x] - LabelMeV2, the Qt app
+## [2.x] - the Qt app
 
 ### Added
 - **Performance Optimizations** for large images and many polygons:
