@@ -472,7 +472,7 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
       add('shared-label-file', name, `${fileName(clash.file)} is the label file of ${listed(clash.images)}, so saving one replaces the others' labels`)
     } else if (image.file && image.labelImage !== undefined && image.labelImage !== name) {
       add('image-path-mismatch', name, `${fileName(image.file)} names ${image.labelImage ?? 'an image outside the folder'} as its image, not ${name}, ` +
-        'so labelme would show these labels on that image')
+        'so tools that follow imagePath show these labels on that image')
     }
     if (!image.file) add('never-labelled', name, `${name} has no label file yet`)
     else if (!image.shapes.length) add('labelled-empty', name, `${name} is labelled with no shapes, so it counts as a background`)

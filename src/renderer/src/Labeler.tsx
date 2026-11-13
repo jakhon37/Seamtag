@@ -1178,7 +1178,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const info = models?.find((x) => x.name === name)
     if (!info) return false
     if (info.downloaded) return true
-    const ok = await window.api.ask(`Download ${info.title}?`, `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once from the address labelme uses, and kept in ~/.cache/osam.`, ['Download', 'Cancel'])
+    const ok = await window.api.ask(`Download ${info.title}?`, `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once and kept in ~/.cache/osam, which labelme uses too.`, ['Download', 'Cancel'])
     if (ok !== 0) return false
     try {
       setBusyAi('Downloading the model…')

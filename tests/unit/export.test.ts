@@ -235,7 +235,7 @@ describe('COCO', () => {
       d.annotations.filter((a: any) => a.image_id === im.id).map((a: any) => a.category_id).sort((a: number, b: number) => a - b)]))
     expect(objects(ours)).toEqual(objects(theirs))
     expect(result.accepted).toContainEqual({ severity: 'info', title: 'Shapes labelled __ignore__ or _background_, left out', count: 2 })
-    expect(result.notes).toContain("The label list's __ignore__ and _background_ aren't classes: labelme's converters number the classes after them.")
+    expect(result.notes).toContain("The label list's __ignore__ and _background_ aren't classes, so the classes are numbered without them.")
   })
 
   test("an image an EXIF orientation turns, in any format that holds one, is noted, as COCO gives it upright and a reader that ignores the orientation sees it turned; its file goes in as it is", async () => {
@@ -340,9 +340,9 @@ describe('YOLO', () => {
     expect(check.labels).toEqual([{ label: 'dog', objects: [0] }, { label: 'cat', objects: [1] }])
     expect(check.splits[0]).toMatchObject({ images: 2, objects: 1, backgrounds: 1 })
     expect(check.groups.find((g) => g.code === 'export-not-a-class')!.issues.map((i) => [i.shape, i.message])).toEqual([
-      [0, "a.png: shapes 1 and 4, labelled “__ignore__”, are left out, as labelme's converters take __ignore__ for a region to ignore, not an object"],
-      [2, "a.png: shape 3, labelled “_background_”, is left out, as labelme's converters take _background_ for the background, not an object"],
-      [0, "b.png: shape 1, labelled “__ignore__”, is left out, as labelme's converters take __ignore__ for a region to ignore, not an object"]
+      [0, "a.png: shapes 1 and 4, labelled “__ignore__”, are left out: __ignore__ marks a region to ignore, not an object"],
+      [2, "a.png: shape 3, labelled “_background_”, is left out: _background_ marks the background, not an object"],
+      [0, "b.png: shape 1, labelled “__ignore__”, is left out: __ignore__ marks a region to ignore, not an object"]
     ])
     // The writers' issues keep the label file's numbers
     expect(check.groups.find((g) => g.code === 'yolo-open-shape')!.issues[0]).toMatchObject({ image: 'a.png', shape: 4 })
@@ -734,7 +734,7 @@ describe('what stops an export', () => {
     expect(codes(check)).toEqual([['info', 'export-ai-left-out', 1], ['info', 'export-not-a-class', 1]])
     expect(check.groups.map((g) => [g.issues[0].shape, g.issues[0].message])).toEqual([
       [0, 'a.png: its 1 AI proposal not yet accepted is left out'],
-      [1, "a.png: shape 2, labelled “__ignore__”, is left out, as labelme's converters take __ignore__ for a region to ignore, not an object"]
+      [1, "a.png: shape 2, labelled “__ignore__”, is left out: __ignore__ marks a region to ignore, not an object"]
     ])
     expect(check.splits[0]).toMatchObject({ images: 2, objects: 1, backgrounds: 1 })
     const out = newFolder()

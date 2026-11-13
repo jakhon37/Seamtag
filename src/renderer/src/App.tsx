@@ -307,7 +307,7 @@ export default function App() {
         )}
         {data && (
           // LabelImg's format button: new label files are saved in this format, and an image keeps the format of the file it has
-          <select className="format" value={settings.format} aria-label="Save format" title="Save format: an image that has a label file keeps its format, as in LabelImg"
+          <select className="format" value={settings.format} aria-label="Save format" title="Save format: an image that has a label file keeps its format"
             onChange={(e) => { commands()[`format:${e.target.value}`]?.run(); e.target.blur() }}>
             {LABEL_FORMATS.map((f) => <option key={f} value={f}>{FORMAT_NAMES[f]}</option>)}
           </select>
@@ -321,7 +321,7 @@ export default function App() {
         <div className="empty">
           <Logo size={72} />
           <h1>Open a folder of images</h1>
-          <p>Labels are saved beside each image as LabelMe JSON, so folders labelled in labelme, LabelMeV2 or Seamline open as they are.</p>
+          <p>Labels are saved beside each image as LabelMe JSON, Pascal VOC, YOLO or CreateML. Folders labelled in labelme or LabelImg open as they are.</p>
           <div className="row">
             <button className="primary" onClick={pickDir}><FolderOpen size={16} /> Open folder</button>
             <button className="ghost" onClick={pickOpen}>Open a file</button>

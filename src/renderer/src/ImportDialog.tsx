@@ -236,7 +236,7 @@ export default function ImportDialog({ root, format, labels, known, onClose, onI
               <button className="ghost" onClick={() => pick('yolo', 'folder')}><FolderOpen size={15} /> YOLO dataset folder…</button>
               <button className="ghost" onClick={() => pick('yolo', 'file')}><FileText size={15} /> YOLO data.yaml…</button>
             </div>
-            <p className="muted">COCO: instances or person_keypoints files, as pycocotools, CVAT and Seamtag write them. YOLO: Ultralytics', Roboflow's and CVAT's layouts, with or without data.yaml.</p>
+            <p className="muted">COCO: instances or person_keypoints files, as pycocotools, CVAT and Seamtag write them. YOLO: Ultralytics', Roboflow's, CVAT's and X-AnyLabeling's layouts, with or without data.yaml.</p>
             {error && <p className="bad" role="alert">{error}</p>}
           </div>
         )}

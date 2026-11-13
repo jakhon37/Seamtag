@@ -251,7 +251,7 @@ export function readYolo(text: string, classes: string[], width: number, height:
     const parts = line.trim().split(/\s+/)
     // Ultralytics' outlines have 7 numbers or more, its rotated boxes 9 and its keypoints 5 plus 2 or 3 a point
     if (parts.length > 6 && parts.every((p) => Number.isFinite(Number(p)))) {
-      fail(`Line ${k + 1} is an Ultralytics outline, rotated box or keypoints row, which LabelImg's YOLO files can't hold: use File > Import dataset to read it`)
+      fail(`Line ${k + 1} is an Ultralytics outline, rotated box or keypoints row, which a YOLO box file can't hold: use File > Import dataset to read it`)
     }
     if (parts.length !== 5) fail(`Line ${k + 1} needs a class and four numbers, as YOLO's boxes have`)
     const [c, xc, yc, w, h] = parts.map(Number)

@@ -618,8 +618,8 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
       add('info', 'export-ai-left-out', name, `${name}: its ${proposals} not yet accepted ${ai.length === 1 ? 'is' : 'are'} left out`, ai[0])
     }
     for (const [label, shapes] of unclassed ?? []) {
-      add('info', 'export-not-a-class', name, `${name}: ${shapeList(shapes)}, labelled “${label}”, ${shapes.length === 1 ? 'is' : 'are'} left out, ` +
-        `as labelme's converters take ${label} for ${NOT_CLASSES.get(label)}, not an object`, shapes[0])
+      add('info', 'export-not-a-class', name, `${name}: ${shapeList(shapes)}, labelled “${label}”, ${shapes.length === 1 ? 'is' : 'are'} left out: ` +
+        `${label} marks ${NOT_CLASSES.get(label)}, not an object`, shapes[0])
     }
     take({ image: { ...image, shapes: map.map((i) => image.shapes[i]), masks: map.map((i) => image.masks[i]) }, read: image, map, as, at })
   }
@@ -642,7 +642,7 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
   } else {
     const named = [...new Set(options.labels.filter((l) => NOT_CLASSES.has(l)))]
     if (named.length) {
-      notes.push(`The label list's ${named.join(' and ')} ${named.length === 1 ? "isn't a class" : "aren't classes"}: labelme's converters number the classes after ${named.length === 1 ? 'it' : 'them'}.`)
+      notes.push(`The label list's ${named.join(' and ')} ${named.length === 1 ? "isn't a class" : "aren't classes"}, so the classes are numbered without ${named.length === 1 ? 'it' : 'them'}.`)
     }
     // A chunk of images at a time, each adding the labels it finds past those before it, as one
     // call over them all would

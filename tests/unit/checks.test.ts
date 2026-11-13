@@ -261,8 +261,8 @@ describe('files', () => {
   test('a label file naming another image is a warning; naming its own, or holding its own image, is not', () => {
     const issues = check([image('a.png', [], { labelImage: 'b.png' }), image('c.png', [], { labelImage: null }), image('d.png'), image('e.json', [], { labelImage: undefined })])
     expect(of(issues, 'image-path-mismatch').map((i) => i.message)).toEqual([
-      'a.json names b.png as its image, not a.png, so labelme would show these labels on that image',
-      'c.json names an image outside the folder as its image, not c.png, so labelme would show these labels on that image'
+      'a.json names b.png as its image, not a.png, so tools that follow imagePath show these labels on that image',
+      'c.json names an image outside the folder as its image, not c.png, so tools that follow imagePath show these labels on that image'
     ])
   })
 
