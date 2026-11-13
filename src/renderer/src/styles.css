@@ -168,6 +168,25 @@ canvas:focus { outline: none; }
 .legal-text pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .legal-text p { margin: 0; font-size: 12px; }
 .legal-text .muted { color: var(--muted-on-grey); }
+/* NOTICE.md as its page would read; the licences in its fenced blocks keep their lines */
+.legal-text .md { font-size: 12px; }
+.legal-text .md > * { margin: 0; }
+.legal-text .md > * + * { margin-top: 8px; }
+.legal-text .md > .md-h:not(:first-child) { margin-top: 16px; }
+.legal-text .md-h { font-weight: 600; }
+.legal-text .md-h1 { font-size: 15px; }
+.legal-text .md-h2 { font-size: 13px; }
+.legal-text .md-h3 { font-size: 12px; }
+.legal-text .md pre { padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.legal-text .md code { font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: break-word; }
+.legal-text .md table { border-collapse: collapse; width: 100%; }
+/* A cell breaks a path only where it would overflow, so the columns are as wide as their longest name */
+.legal-text .md th, .legal-text .md td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; overflow-wrap: break-word; }
+.legal-text .md th { font-weight: 600; background: var(--panel); }
+.legal-text .md ul, .legal-text .md ol { padding-left: 20px; }
+.legal-text .md blockquote { padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted-on-grey); }
+.legal-text .md hr { border: 0; border-top: 1px solid var(--line); }
+.legal-text .md a { color: var(--accent-text); }
 .dialog.shortcuts { width: 560px; max-height: 76vh; overflow: auto; }
 .dialog.models { width: 680px; max-height: 76vh; overflow: auto; }
 .dialog.models h3 { margin: 0; }

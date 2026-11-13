@@ -35,9 +35,9 @@ export async function project(folder: string, files: Record<string, string | nul
 
 /**
  * The app on a folder or file, with its own home folder and profile, so a test never reads or
- * writes the settings, config or recent files of the person running it.
+ * writes the settings, config or recent files of the person running it. `env` adds to its environment.
  */
-export async function launch(target: string | null, extra: string[] = [], home?: string) {
+export async function launch(target: string | null, extra: string[] = [], home?: string, env: Record<string, string> = {}) {
   const own = home ?? mkdtempSync(path.join(tmpdir(), 'seamtag-home-'))
   // A home with the folders Windows expects in one
   const roaming = path.join(own, 'AppData', 'Roaming'), local = path.join(own, 'AppData', 'Local')
@@ -48,7 +48,7 @@ export async function launch(target: string | null, extra: string[] = [], home?:
     args: [path.resolve(__dirname, '..'), ...headless, ...(target ? [target] : []), ...extra],
     env: {
       ...process.env, HOME: own, USERPROFILE: own, APPDATA: roaming, LOCALAPPDATA: local, XDG_CONFIG_HOME: path.join(own, '.config'),
-      SEAMTAG_USER_DATA: path.join(own, 'profile')
+      SEAMTAG_USER_DATA: path.join(own, 'profile'), ...env
     } as Record<string, string>
   })
   const page = await app.firstWindow()

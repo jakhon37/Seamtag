@@ -1,11 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { LegalKind, LegalText } from '../../shared/legal'
+import Markdown from './Markdown'
 import Modal from './Modal'
 import { plainError } from './types'
 
 const TITLES: Record<LegalKind, string> = { licence: 'Licence', notices: 'Third-party notices' }
 
-/** Seamtag's licence, or the notices of the code and components it includes, as the files shipped with it have them */
+/**
+ * Seamtag's licence, or the notices of the code and components it includes, as the files shipped
+ * with it have them: a Markdown file as its page would read, the others as plain text
+ */
 export default function Legal({ kind, onClose }: { kind: LegalKind; onClose: () => void }) {
   const [files, setFiles] = useState<LegalText[] | null>(null)
   const [error, setError] = useState('')
@@ -25,7 +29,7 @@ export default function Legal({ kind, onClose }: { kind: LegalKind; onClose: () 
         {files?.map((f) => (
           <section key={f.name} data-file={f.name}>
             <h4>{f.name}</h4>
-            {'text' in f ? <pre>{f.text}</pre> : <p className="muted">{f.missing}</p>}
+            {!('text' in f) ? <p className="muted">{f.missing}</p> : /\.md$/i.test(f.name) ? <Markdown text={f.text} level={4} /> : <pre>{f.text}</pre>}
           </section>
         ))}
       </div>

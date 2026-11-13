@@ -77,8 +77,9 @@ function addRecent(target: string) {
 }
 
 // Seamtag's licence and the notices of what it includes (src/shared/legal.ts): packed into
-// resources/legal (electron-builder.yml); in development, the repository's own copies
-const legalDir = () => (app.isPackaged ? path.join(process.resourcesPath, 'legal') : app.getAppPath())
+// resources/legal (electron-builder.yml); in development, the repository's own copies, or a
+// test's (SEAMTAG_LEGAL_DIR)
+const legalDir = () => (app.isPackaged ? path.join(process.resourcesPath, 'legal') : process.env.SEAMTAG_LEGAL_DIR || app.getAppPath())
 async function readLegal(kind: LegalKind) {
   const dir = legalDir()
   return Promise.all(LEGAL_FILES[kind].map(async (name): Promise<LegalText> => {
