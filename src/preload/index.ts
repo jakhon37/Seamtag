@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('api', {
   reveal: (root: string, name: string) => ipc.invoke('file:reveal', root, name),
   openConfig: () => ipc.invoke('config:open'),
   openLink: (url: string) => ipc.invoke('app:link', url),
+  legal: (kind: string) => ipc.invoke('app:legal', kind),
   pathForFile: (file: File) => webUtils.getPathForFile(file),
   onSummaries: on('project:summaries'),
   onFlush: on('app:flush'),

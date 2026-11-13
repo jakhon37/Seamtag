@@ -2,9 +2,11 @@ import { FolderOpen } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { type Config, formatKeys, matches, shortcutList } from '../../shared/config'
 import { FORMAT_NAMES, LABEL_FORMATS } from '../../shared/formats'
+import { COPYRIGHT, INCLUDES, type LegalKind, TERMS } from '../../shared/legal'
 import ExportDialog from './ExportDialog'
 import ImportDialog from './ImportDialog'
 import Labeler, { type Commands, type LabelerHandle, type Settings } from './Labeler'
+import Legal from './Legal'
 import Logo from './Logo'
 import MenuBar, { ContextMenu, type MenuSpec } from './Menu'
 import Modal from './Modal'
@@ -77,6 +79,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [context, setContext] = useState<{ x: number; y: number } | null>(null)
   const [about, setAbout] = useState(false)
+  // The licence or the notices, opened from the About window, over it
+  const [legal, setLegal] = useState<LegalKind | null>(null)
   const [help, setHelp] = useState(false)
   const [dataset, setDataset] = useState<'import' | 'export' | null>(null)
   const [, setTick] = useState(0)
@@ -186,6 +190,10 @@ export default function App() {
     } catch (e) {
       showError(plainError(e))
     }
+  }
+  const closeAbout = () => {
+    setAbout(false)
+    setLegal(null)
   }
   const closeFolder = async () => {
     if (labeler.current && !(await labeler.current.canLeave())) return
@@ -349,14 +357,23 @@ export default function App() {
       )}
       {context && <ContextMenu at={context} items={CONTEXT} commands={commands()} config={config} mac={mac} onDone={() => setContext(null)} />}
       {about && (
-        <Modal label="About" className="about" onClose={() => setAbout(false)}>
+        <Modal label="About" className="about" onClose={closeAbout}>
           <Logo size={56} />
           <h1>Seamtag {start.version}</h1>
           <p>Image annotation in LabelMe, Pascal VOC, YOLO or CreateML format, with brush, eraser, AI segmentation and review of model proposals.</p>
-          <p className="muted">Continues LabelMeV2, an enhanced fork of labelme by Kentaro Wada, on Seamline's desktop app. GPL-3.0. Pascal VOC, YOLO and CreateML files are read and written as LabelImg by Tzutalin does it, from its MIT-licensed code. AI models are downloaded from the addresses osam and labelme use, under their own licences.</p>
-          <div className="actions"><button className="primary" onClick={() => setAbout(false)}>Close</button></div>
+          <div className="muted">
+            <p>{COPYRIGHT}</p>
+            <p>{TERMS}</p>
+            <p>{INCLUDES}</p>
+          </div>
+          <div className="actions">
+            <button className="ghost" onClick={() => setLegal('licence')}>Licence</button>
+            <button className="ghost" onClick={() => setLegal('notices')}>Third-party notices</button>
+            <button className="primary" onClick={closeAbout}>Close</button>
+          </div>
         </Modal>
       )}
+      {about && legal && <Legal kind={legal} onClose={() => setLegal(null)} />}
       {help && (
         <Modal label="Keyboard shortcuts" className="shortcuts" onClose={() => setHelp(false)}>
           <h3>Keyboard shortcuts <span className="muted">change them under shortcuts: in the config file</span></h3>

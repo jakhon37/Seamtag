@@ -1,4 +1,6 @@
 import { expect, type Page, test } from '@playwright/test'
+import { existsSync, readFileSync } from 'fs'
+import path from 'path'
 import { doc, finish, launch, onImage, project, saved, shapesIn, square } from './helpers'
 
 // The app's smaller windows behave as the dataset windows do: each takes the focus as it opens and
@@ -33,6 +35,45 @@ test('About, Keyboard shortcuts, AI models and Brightness and contrast hold the 
   }
   // The folder is as it was
   await expect(page.locator('.files .file .name')).toHaveText(['a.png'])
+  await finish(app, errors)
+})
+
+test('About says whose Seamtag is and on what terms, and shows its licence and the notices of what it includes', async () => {
+  const root = path.resolve(__dirname, '..')
+  const { app, page, errors } = await launch(null)
+  await menu(page, 'Help', 'About Seamtag')
+  const about = page.getByRole('dialog', { name: 'About' })
+  const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'))
+  await expect(about.getByRole('heading', { level: 1 })).toHaveText(`Seamtag ${version}`)
+  await expect(about).toContainText('Copyright © 2026 Jakhongir Nodirov')
+  await expect(about).toContainText('Free software under the GNU GPL version 3 only, with ABSOLUTELY NO WARRANTY.')
+  await expect(about).toContainText('Includes code from other projects under their own licences.')
+
+  // Each button shows the files as the app has them, here the repository's own, over the About
+  // window; Escape closes it and gives the focus back to the button
+  const shows = async (button: string, files: string[]) => {
+    const opener = about.getByRole('button', { name: button, exact: true })
+    await opener.click()
+    const dialog = page.getByRole('dialog', { name: button })
+    await expect(dialog.locator('section')).toHaveCount(files.length)
+    for (const file of files) {
+      const section = dialog.locator(`section[data-file="${file}"]`)
+      await expect(section.getByRole('heading')).toHaveText(file)
+      // THIRD-PARTY-NOTICES.txt is made by npm run build, which a test build may leave out
+      if (existsSync(path.join(root, file))) expect(await section.locator('pre').textContent()).toBe(readFileSync(path.join(root, file), 'utf8'))
+      else await expect(section).toContainText(`${file} isn't in ${root}.`)
+    }
+    // The keys scroll the text
+    await expect(dialog.locator('.legal-text')).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(dialog).toHaveCount(0)
+    await expect(about).toBeVisible()
+    await expect(opener).toBeFocused()
+  }
+  await shows('Licence', ['LICENSE'])
+  await shows('Third-party notices', ['NOTICE.md', 'THIRD-PARTY-NOTICES.txt'])
+  await page.keyboard.press('Escape')
+  await expect(about).toHaveCount(0)
   await finish(app, errors)
 })
 

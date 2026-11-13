@@ -14,6 +14,7 @@ import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
 import { type Args, loadConfig, type LoadedConfig, parseArgs, USAGE, USER_CONFIG } from './config'
 import { FORMAT_EXT, FORMAT_NAMES, type LabelFormat } from '../shared/formats'
+import { COPYRIGHT, INCLUDES, LEGAL_FILES, type LegalKind, type LegalText, TERMS } from '../shared/legal'
 import { cacheRoot, imageData, imageDepth, imageSize, openImage, setCacheDir } from './images'
 import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImport, stopImport, writeImport } from './import'
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
@@ -73,6 +74,21 @@ function addRecent(target: string) {
   const state = readState()
   state.recent = [target, ...state.recent.filter((r) => r !== target)].slice(0, 10)
   writeState(state)
+}
+
+// Seamtag's licence and the notices of what it includes (src/shared/legal.ts): packed into
+// resources/legal (electron-builder.yml); in development, the repository's own copies
+const legalDir = () => (app.isPackaged ? path.join(process.resourcesPath, 'legal') : app.getAppPath())
+async function readLegal(kind: LegalKind) {
+  const dir = legalDir()
+  return Promise.all(LEGAL_FILES[kind].map(async (name): Promise<LegalText> => {
+    try {
+      return { name, text: await fs.readFile(path.join(dir, name), 'utf8') }
+    } catch {
+      const made = !app.isPackaged && name === 'THIRD-PARTY-NOTICES.txt' ? ' npm run build makes it.' : ''
+      return { name, missing: `${name} isn't in ${dir}.${made}` }
+    }
+  }))
 }
 
 function send(channel: string, payload: unknown) {
@@ -189,6 +205,10 @@ function registerIpc() {
   })
   ipcMain.handle('app:link', (_e, url: string) => {
     if (/^https:\/\//.test(url)) return shell.openExternal(url)
+  })
+  ipcMain.handle('app:legal', (_e, kind: LegalKind) => {
+    if (!Object.hasOwn(LEGAL_FILES, kind)) throw new Error(`There's no ${kind} to show`)
+    return readLegal(kind)
   })
   ipcMain.handle('ai:models', () => listModels())
   ipcMain.handle('ai:download', (_e, name: string) => download(name, (p) => send('ai:download', p)))
@@ -319,6 +339,11 @@ function registerIpc() {
 function buildMenu() {
   // The window has its own menu bar. A Mac still needs the app menu, and Edit for text fields.
   if (process.platform !== 'darwin') return Menu.setApplicationMenu(null)
+  // The app menu's About panel says what the About window says, and where the notices are
+  app.setAboutPanelOptions({
+    copyright: COPYRIGHT,
+    credits: `${TERMS}\n${INCLUDES} Their notices are under Help > About Seamtag > Third-party notices, and in Seamtag.app/Contents/Resources/legal.`
+  })
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },

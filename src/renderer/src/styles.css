@@ -154,6 +154,17 @@ canvas:focus { outline: none; }
 .dialog.small { width: 300px; }
 .dialog.about { width: 420px; align-items: center; text-align: center; }
 .dialog.about p { margin: 0; }
+.dialog.about > p { text-wrap: balance; }
+.dialog.about .actions { flex-wrap: wrap; justify-content: center; }
+/* Help > About Seamtag > Licence or Third-party notices: the files as shipped, the title and Close always in view */
+.dialog.legal { width: 760px; top: 6vh; }
+.dialog.legal h3 { margin: 0; }
+.legal-text { max-height: 72vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+.legal-text section + section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.legal-text h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+.legal-text pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.legal-text p { margin: 0; font-size: 12px; }
+.legal-text .muted { color: var(--muted-on-grey); }
 .dialog.shortcuts { width: 560px; max-height: 76vh; overflow: auto; }
 .dialog.models { width: 680px; max-height: 76vh; overflow: auto; }
 .dialog.models h3 { margin: 0; }

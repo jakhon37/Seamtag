@@ -3,6 +3,7 @@ import type { AiOutput, Config } from '../../shared/config'
 import type { Issue } from '../../shared/dataset'
 import type { LabelFormat } from '../../shared/formats'
 import type { LabelDoc, Shape } from '../../shared/labelfile'
+import type { LegalKind, LegalText } from '../../shared/legal'
 import type { Summary } from '../../shared/labels'
 import type {
   CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped
@@ -93,6 +94,7 @@ declare global {
       reveal(root: string, name: string): Promise<void>
       openConfig(): Promise<void>
       openLink(url: string): Promise<void>
+      legal(kind: LegalKind): Promise<LegalText[]>
       pathForFile(file: File): string
       onSummaries(fn: (p: { root: string; items: ImageItem[]; labels: string[] }) => void): () => void
       onFlush(fn: () => void): () => void
