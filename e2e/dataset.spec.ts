@@ -808,7 +808,7 @@ test("Space+drag pans the image after a click on a problem's image name, which l
   await finish(app, errors)
 })
 
-// labelme's label list for its instance segmentation example (examples/instance_segmentation/labels.txt): it fills the Labels list
+// labelme's label list for its instance segmentation example (examples/instance_segmentation/labels.txt in labelme's repository): it fills the Labels list
 const VOC = '__ignore__,_background_,aeroplane,bicycle,bird,boat,bottle,bus,car,cat,chair,cow,diningtable,dog,horse,motorbike,person,potted plant,sheep,sofa,train,tv/monitor'
 
 /**

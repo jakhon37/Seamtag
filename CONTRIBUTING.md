@@ -13,6 +13,8 @@ npm run dist         # the installer for this system, in release/
 
 On Linux the end-to-end tests run without a window (`--ozone-platform=headless`); set `E2E_SHOW=1` to see them. Each launch gets its own home folder and profile (`SEAMTAG_USER_DATA`), so tests never touch your settings. The SAM test needs `SEAMTAG_MODELS` set to a folder holding `efficientsam:10m`, as osam keeps it.
 
+The tests fetch the labelme files they read (`tests/labelme-files.ts`) from GitHub the first time, so that run needs the network; later runs use the copies in `node_modules/.cache/seamtag-labelme`.
+
 ## Where things are
 
 | Path | |

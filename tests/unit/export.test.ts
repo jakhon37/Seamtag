@@ -1,5 +1,5 @@
 import {
-  chmodSync, cpSync, existsSync, promises as fsp, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync
+  chmodSync, copyFileSync, existsSync, promises as fsp, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync
 } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
@@ -18,6 +18,7 @@ import { openProject } from '../../src/main/project'
 import { type CocoEntry, writeCoco } from '../../src/shared/coco'
 import { writePoseYaml } from '../../src/shared/pose'
 import { verifyRows } from '../../src/shared/ultralytics'
+import { labelmeFile } from '../labelme-files'
 
 // Whole folders exported with real images, made by sharp as e2e/helpers.ts makes them
 const cache = mkdtempSync(path.join(tmpdir(), 'seamtag-cache-'))
@@ -218,16 +219,19 @@ describe('COCO', () => {
   })
 
   test("labelme's own example with its labels.txt: __ignore__ and _background_ are no categories, and each image's objects are labelme2coco's", async () => {
-    const example = path.resolve(__dirname, '../../examples/instance_segmentation')
+    // labelme 5.11.4's examples/instance_segmentation, fetched
+    const example = (file: string) => labelmeFile('v5.11.4', `examples/instance_segmentation/${file}`)
     const dir = folder()
-    cpSync(path.join(example, 'data_annotated'), dir, { recursive: true })
+    for (const name of ['2011_000003', '2011_000006', '2011_000025'].flatMap((stem) => [`${stem}.jpg`, `${stem}.json`])) {
+      copyFileSync(await example(`data_annotated/${name}`), path.join(dir, name))
+    }
     await openProject(dir, null)
-    const labels = readFileSync(path.join(example, 'labels.txt'), 'utf8').split('\n').map((l) => l.trim()).filter(Boolean)
+    const labels = readFileSync(await example('labels.txt'), 'utf8').split('\n').map((l) => l.trim()).filter(Boolean)
     expect(labels.slice(0, 3)).toEqual(['__ignore__', '_background_', 'aeroplane'])
     const out = newFolder()
     const result = await runExport(dir, options({ labels }), out)
     const ours = json(out, 'annotations/instances_default.json')
-    const theirs = JSON.parse(readFileSync(path.join(example, 'data_dataset_coco', 'annotations.json'), 'utf8'))
+    const theirs = JSON.parse(readFileSync(await example('data_dataset_coco/annotations.json'), 'utf8'))
     // labelme2coco's categories but its _background_, which is 0
     expect(ours.categories.map((c: any) => [c.id, c.name])).toEqual(theirs.categories.filter((c: any) => c.id > 0).map((c: any) => [c.id, c.name]))
     // Each image's objects by category, its regions to ignore left out

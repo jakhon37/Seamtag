@@ -29,6 +29,7 @@ Datasets: a check of the whole folder's labels, statistics, and COCO and Ultraly
 - Help → About Seamtag gives the copyright and the licence, the GNU GPL version 3 only with no warranty, and says Seamtag includes code from other projects under their own licences. On macOS, the app menu's About panel gives the same, and where the notices are.
 - The start screen names the four formats labels are saved in, and says folders labelled in labelme or LabelImg open as they are.
 - The question before a model download, the Save format tooltip and `--help`'s line on the class file and save folder are reworded.
+- labelme's example files and two of its default configs are no longer kept in the repository; the tests fetch the ones they read from labelme's repository, checked by hash.
 
 ### Fixed
 - Saving a label file on Windows no longer fails when an antivirus scanner, the search indexer or OneDrive holds it for a moment: the rename is tried again for a few seconds.

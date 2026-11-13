@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 import sharp from 'sharp'
+import { labelmeFile } from '../tests/labelme-files'
 import { click, doc, drag, finish, launch, onImage, open, project, saved, shapesIn, square } from './helpers'
 
 const near = (a: number, b: number, tolerance = 1.5) => expect(Math.abs(a - b), `${a} near ${b}`).toBeLessThan(tolerance)
@@ -260,6 +261,8 @@ test("the image list's footer: how many images are annotated, and where their la
 // These need models in SEAMTAG_MODELS: efficientsam:10m for AI box, yoloworld:latest for the text prompt
 const models = process.env.SEAMTAG_MODELS
 const has = (hash: string) => !!models && existsSync(path.join(models, `sha256-${hash}`))
+// A photo of people and a bottle from labelme's examples, fetched
+const photo = () => labelmeFile('v5.11.4', 'examples/instance_segmentation/data_annotated/2011_000003.jpg')
 
 test('AI box makes each kind of shape labelme 7 makes', async () => {
   test.skip(!has('7a73ee65aa2c37237c89b4b18e73082f757ffb173899609c5d97a2bbd4ebb02d'), 'set SEAMTAG_MODELS to a folder with efficientsam:10m')
@@ -323,7 +326,7 @@ test('on an image bigger than the model sees, an AI mask at the edge stops at it
 test('the text prompt finds each person in a photo with YOLO-World, and leaves the ones drawn', async () => {
   test.skip(!has('92660c6456766439a2670cf19a8a258ccd3588118622a15959f39e253731c05d'), 'set SEAMTAG_MODELS to a folder with yoloworld:latest')
   const dir = await project('textprompt', {})
-  copyFileSync(path.join(__dirname, '../tests/data/raw/2011_000003.jpg'), path.join(dir, 'p.jpg'))
+  copyFileSync(await photo(), path.join(dir, 'p.jpg'))
   const { app, page, errors } = await launch(dir)
   await open(page, 'p.jpg')
   await page.getByRole('toolbar').getByRole('button', { name: 'AI box', exact: true }).click()
@@ -352,7 +355,7 @@ test('YOLO-World finds the boxes labelme 7.9.1 finds in the same photo, scores a
   // labelme's own results: tests/fixtures/labelme7/make_text_prompt.py
   const ref = JSON.parse(readFileSync(path.join(__dirname, '../tests/fixtures/labelme7/text_prompt.json'), 'utf8'))
   const dir = await project('yoloworld', {})
-  copyFileSync(path.join(__dirname, '../tests/data/raw/2011_000003.jpg'), path.join(dir, 'p.jpg'))
+  copyFileSync(await photo(), path.join(dir, 'p.jpg'))
   const { app, page, errors } = await launch(dir)
   await open(page, 'p.jpg')
   for (const words of ['person', 'person,bottle']) {

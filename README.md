@@ -141,7 +141,7 @@ Without `classes`, the label list names the classes, in order. Images bigger tha
 Label files go both ways with [labelme](https://github.com/wkentaro/labelme) and [LabelImg](https://github.com/HumanSignal/labelImg), and datasets with COCO and Ultralytics YOLO tools; each way is tested:
 
 - Saving a file that labelme 5 wrote gives back the same bytes, including Python's float format and key order.
-- Every `.json` in labelme's examples and test data opens.
+- Every `.json` in labelme's examples and test data opens. The tests fetch labelme's example files from its repository, at a fixed commit, and check each against its hash.
 - In CI, labelme 7.9.1 and 5.8.1 load the files this app writes with each drawing tool and turn every shape into pixels with `shapes_to_label`, as labelme's export scripts do. CI has no SAM models; run locally with one, AI mask shapes pass the same check.
 - On the test photo, AI masks are the same as osam's, pixel for pixel, for EfficientSAM and SAM2, and YOLO-World finds the same boxes with the same scores as labelme 7.9.1. That needed Pillow's bilinear resize ported exactly, which a test checks against Pillow 13.
 - Unit tests compare what AI results become with what labelme 7.9.1's own code makes of the same test masks: polygons at each detail, circles, rotated boxes, the removal of repeats and of objects already drawn, osam's non-maximum suppression, and CLIP's tokens for text prompts.
@@ -151,8 +151,6 @@ Label files go both ways with [labelme](https://github.com/wkentaro/labelme) and
 - COCO's numbers, the runs of its masks, their areas and boxes, are ported from pycocotools 2.0.11's C code and compared with it on 251 masks, polygons, boxes, merges and runs, to the pixel and the byte. Objects are made from the label files' shapes as labelme 7.9.1's `labelme2coco` makes them. In CI, pycocotools loads every COCO file the app writes, from the unit tests and from the Export dataset window, decodes each mask and scores the export against itself: AP 1.0 for boxes, masks and keypoints.
 - In CI, Ultralytics 8.4.211's own label check (`verify_image_label`) accepts every YOLO dataset the app writes, for all four tasks, and its YAML reader gives back the class names Seamtag wrote. An object of several parts becomes one row, joined as Ultralytics' `merge_multi_segment` joins COCO's. Ultralytics' code is fetched for the test, checked against its hash, and isn't kept here.
 - Import is tested on what `labelme2coco` writes, on pycocotools' compressed masks and CVAT's COCO (lists of runs, rotated boxes), and on Ultralytics', Roboflow's, CVAT's and X-AnyLabeling's YOLO layouts.
-
-labelme's export scripts in [examples/](examples) (to VOC or COCO) work on these files with `pip install labelme`.
 
 ## How it's built
 
