@@ -17,6 +17,12 @@ files:
   - node_modules/onnxruntime-node/bin/napi-v6/${platform}/${arch}/**
   - "!node_modules/onnxruntime-node/bin/napi-v6/linux/*/libonnxruntime_providers_cuda.so"
   - "!node_modules/onnxruntime-node/bin/napi-v6/linux/*/libonnxruntime_providers_tensorrt.so"
+  # On Windows, nor DirectML and the DirectX shader compiler: Microsoft's redistributables, under
+  # their own terms, for GPU providers Seamtag doesn't use (it runs models on the CPU). onnxruntime.dll
+  # delay-loads DirectML.dll, for a DirectML session only, and loads the other two only for WebGPU
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32/*/DirectML.dll"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32/*/dxcompiler.dll"
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32/*/dxil.dll"
 # THIRD-PARTY-NOTICES.txt made again from this system's packages, and every file below checked,
 # before anything is packed: npm run dist makes it too, but the release workflow calls
 # electron-builder itself, and electron-builder only warns of a missing file
