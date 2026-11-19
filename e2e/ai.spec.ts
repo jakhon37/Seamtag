@@ -162,3 +162,48 @@ test('the download question waits for the mouse button to come up', async () => 
   expect(existsSync(path.join(dir, 'd.json'))).toBe(false)
   await finish(app, errors)
 })
+
+// Needs sam2:latest in SEAMTAG_MODELS, about 330 MB. Its encoder closed the app on the second
+// image: onnxruntime asked Electron's allocator for a 1 GiB block, which it doesn't give.
+test('AI points with Sam2 (balanced) on three images in a row', async () => {
+  const models = process.env.SEAMTAG_MODELS
+  const blobs = ['ce95c44082b4532c25ae01e11da3c9337dab7b04341455c09ae599dc9ae5c438', '2ad091af889b20ad2035503b4355cd8924fcf0e29fa6536924c48dc220ecdc56']
+  test.skip(!models || !blobs.every((h) => existsSync(path.join(models, `sha256-${h}`))), 'set SEAMTAG_MODELS to a folder with sam2:latest')
+  const dir = await project('sam2', {})
+  const spots = [{ cx: 130, cy: 120, r: 60, color: '#e0a030' }, { cx: 250, cy: 170, r: 70, color: '#30a0e0' }, { cx: 200, cy: 150, r: 80, color: '#c040c0' }]
+  for (const [k, d] of spots.entries()) await discs(dir, `s${k}`, [d])
+  const { app, page, errors } = await launch(dir, ['--labels', 'disc'])
+  await open(page, 's0.png')
+  await page.getByRole('menuitem', { name: 'AI', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Model for AI points and box' }).hover()
+  await page.getByRole('menuitemcheckbox', { name: 'Sam2 (balanced)' }).click()
+  await page.getByRole('toolbar').getByRole('button', { name: 'AI points', exact: true }).click()
+  // The app closing by itself, as it did on the second image, fails the test with its signal
+  let image = ''
+  const quit = new Promise<never>((_, reject) => app.process().once('exit', (code, signal) => reject(new Error(`The app quit (${signal ?? `exit code ${code}`}) on ${image}`))))
+  quit.catch(() => {})
+  const running = <T>(step: Promise<T>) => Promise.race([step, quit])
+  for (const [k, d] of spots.entries()) {
+    image = `s${k}.png`
+    if (k) await running(open(page, image))
+    await click(page, d.cx, d.cy)
+    // Each image is encoded once, which takes seconds on a CPU
+    await running(expect(page.locator('.loading.notice')).toContainText('Segmenting'))
+    await running(expect(page.locator('.loading.notice')).toHaveCount(0, { timeout: 120000 }))
+    await page.keyboard.press('Enter')
+    await expect.poll(() => existsSync(path.join(dir, `s${k}.json`)) && shapesIn(dir, `s${k}`).length).toBeGreaterThan(0)
+    await saved(page)
+    // The polygon around the disc: the largest, if the model adds a speck beside it
+    const polygons = shapesIn(dir, `s${k}`)
+    expect(polygons.every((s: any) => s.shape_type === 'polygon')).toBe(true)
+    const span = (s: any, i: number) => Math.max(...s.points.map((p: number[]) => p[i])) - Math.min(...s.points.map((p: number[]) => p[i]))
+    const polygon = polygons.reduce((a: any, b: any) => (span(b, 0) > span(a, 0) ? b : a))
+    const xs = polygon.points.map((p: number[]) => p[0]), ys = polygon.points.map((p: number[]) => p[1])
+    expect(Math.min(...xs)).toBeGreaterThan(d.cx - d.r - 5)
+    expect(Math.max(...xs)).toBeLessThan(d.cx + d.r + 5)
+    expect(Math.min(...ys)).toBeGreaterThan(d.cy - d.r - 5)
+    expect(Math.max(...ys)).toBeLessThan(d.cy + d.r + 5)
+    expect(span(polygon, 0)).toBeGreaterThan(d.r * 1.8)
+  }
+  await finish(app, errors)
+})
