@@ -16,7 +16,7 @@ shortcuts:
 
 | Key | Default | |
 |---|---|---|
-| `auto_save` | `true` | Save a moment after each change. When off, leaving an image asks. |
+| `auto_save` | `true` | Save a moment after each change. An image with no label file gets none while it has no shapes and no flags, so a shape drawn and undone leaves nothing behind; Save writes the empty file. When off, leaving an image asks. |
 | `display_label_popup` | `false` | Ask for a label after every shape. When off, the label picked in the Labels list (or with 1-9) is used, and the dialog opens only when none is picked. |
 | `with_image_data` | `false` | Put the image in the label file as base64 (`imageData`). labelme 5 called it `store_data`. |
 | `label_format` | `labelme` | The format new label files are saved in: `labelme` (LabelMe JSON), `voc` (Pascal VOC), `yolo` or `createml`. An image that has a label file keeps that file's format. |
@@ -52,7 +52,7 @@ shortcuts:
 | `canvas.crosshair.<tool>` | rectangle and AI box | Show a crosshair while drawing with that tool: `polygon`, `rectangle`, `oriented_rectangle`, `circle`, `line`, `point`, `linestrip`, `ai_points_to_shape`, `ai_box_to_shape`. |
 | `canvas.wheel` | `zoom` | The wheel zooms. `scroll`: it scrolls, and zooms with Ctrl. |
 | `brush.size`, `brush.min`, `brush.max` | `28`, `4`, `200` | The brush and eraser, in screen pixels. |
-| `prelabel.min_area` | `20` | Proposed shapes smaller than this, in pixels, are dropped. |
+| `prelabel.min_area` | `25` | Proposed shapes smaller than this, in pixels, are dropped. The area runs through the centres of the shape's outer pixels, as Seamline measures it. |
 | `dark_mode` | `true` | |
 
 `fit_to_content`, `language`, `color_theme` and the rest of `performance` are accepted and have no effect here: the window lays itself out, is in English with its own Dark mode switch, and large images always go through tile pyramids. A `logger_level` key is dropped on load.

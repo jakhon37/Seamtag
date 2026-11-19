@@ -217,13 +217,28 @@ export function writeVoc(image: VocImage, shapes: Shape[], verified: boolean): s
 
 // YOLO
 
-/** classes.txt as LabelImg reads it. Blank lines in the middle stay, so the numbers after them do too. */
+/**
+ * classes.txt as LabelImg reads it. Blank lines in the middle stay, so the numbers after them do too.
+ * A byte order mark, which some editors write first, is left out of the first name, where LabelImg
+ * keeps it: class 0 is then named as Seamline names it, and as it reads on screen.
+ */
 export function readClasses(text: string): string[] {
   // The line breaks at the end are looked for from the first of a run only: looked for from each
   // one of a long run in the middle, they took time growing with the run's length squared
-  return text.replace(/^[\r\n]+|(?<![\r\n])[\r\n]+$/g, '').split(/\r?\n/)
+  const names = text.replace(/^[\r\n]+|(?<![\r\n])[\r\n]+$/g, '').split(/\r?\n/)
+  names[0] = names[0].replace(/^﻿/, '')
+  return names
 }
 export const writeClasses = (classes: string[]) => classes.map((c) => `${c}\n`).join('')
+/**
+ * classes.txt with names added at its end, and the rest as it was, its line ends too: written again
+ * from the names read, a byte order mark before a blank first line would go, and that line with it,
+ * so every class after it would take the number before
+ */
+export function addClasses(text: string, names: string[]) {
+  const end = text.includes('\r\n') ? '\r\n' : '\n'
+  return text.replace(/[\r\n]+$/, '') + names.map((n) => end + n).join('') + end
+}
 
 /** Python's round(): halves go to the even number */
 export function pyRound(x: number) {

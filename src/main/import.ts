@@ -1132,7 +1132,7 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
     }
   }
   // The image list and the label list count the images whose label files changed again
-  if (names.length) await summarizeAll(s.root, summaries, s.prefer, names).catch(() => {})
+  if (names.length) await summarizeAll(s.root, summaries, s.prefer, false, names).catch(() => {})
   return {
     stopped: signal.aborted, total, done, written, shapes, repeated, trashed,
     labels: [...labels].map(([label, n]) => ({ label, shapes: n, listed: s.listed.has(label) })).sort((a, b) => b.shapes - a.shapes || a.label.localeCompare(b.label)),

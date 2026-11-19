@@ -23,8 +23,8 @@ The tests fetch the labelme files they read (`tests/labelme-files.ts`) from GitH
 | `src/shared/formats.ts` | Pascal VOC, YOLO and CreateML, byte for byte as LabelImg writes them |
 | `src/shared/config.ts`, `src/main/config.ts` | Config keys (labelme's, so a `~/.labelmerc` works), the command line, shortcuts |
 | `src/main/project.ts`, `images.ts` | Folders, label files and the save queue; images and tile pyramids |
-| `src/main/ai.ts`, `masks.ts`, `resize.ts` | AI models through onnxruntime, masks to shapes, resizing images for the models as Pillow does |
-| `src/main/prelabel.ts` | Pre-labelling with an ONNX segmentation model |
+| `src/main/ai.ts`, `masks.ts`, `resize.ts` | AI models through onnxruntime, masks to shapes, resizing images for the models as Pillow does, and for pre-labelling as OpenCV does |
+| `src/main/prelabel.ts`, `outline.ts`, `outliner.ts`, `runs.ts` | Pre-labelling with an ONNX segmentation model, its polygons outlined in a worker thread; the models Seamline exported from a folder's runs |
 | `src/renderer/src/Labeler.tsx` | The canvas and everything on it |
 | `src/renderer/src/shapes.ts`, `geometry.ts` | Shape geometry; brush and eraser |
 | `tests/unit`, `e2e`, `tests/parity` | Unit tests, end-to-end tests, and labelme, LabelImg, pycocotools and Ultralytics reading this app's files |
