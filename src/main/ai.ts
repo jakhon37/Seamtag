@@ -200,11 +200,11 @@ async function part(m: ModelDef, key: string): Promise<InferenceSession> {
   let session = loaded.parts.get(key)
   if (!session) {
     // No memory arena or memory pattern: each tensor has a block of its own, freed after the run
-    // (Sam2 (balanced)'s largest is 512 MiB). With them, Sam2 (balanced) closed the app on its
-    // second image: the pattern asks for all of a run's tensors in one block, 820 MiB, and to hold
-    // it the arena, which grows in regions of up to 1 GiB, asked for 1 GiB. Electron's allocator
-    // rounds an aligned request that size up to 2 GiB, more than it gives in one block, and stops
-    // the app rather than fail the request.
+    // (the largest, in Sam2 (balanced) and Sam2 (accuracy), is 512 MiB). With them, both closed
+    // the app on their second image: the pattern asks for all of a run's tensors in one block, 820
+    // and 896 MiB, and to hold it the arena, which grows in regions of up to 1 GiB, asked for 1 GiB.
+    // Electron's allocator rounds an aligned request that size up to 2 GiB, more than it gives in
+    // one block, and stops the app rather than fail the request.
     const opts: InferenceSession.SessionOptions = {
       executionProviders: ['cpu'], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false
     }
