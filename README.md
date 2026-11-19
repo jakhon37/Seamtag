@@ -11,7 +11,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="GPL-3.0-only"></a>
 </p>
 
-![Seamtag editing a polygon around a person pushing a pram on a city crossing](docs/media/label.webp)
+![Seamtag at work on street photos: an image's outlines, a tram outlined by hand, SAM2 outlining a bus from one click, YOLO-World finding people and bicycles by name, Dataset → Check labels, and an export as YOLO segment](docs/media/banner.webp)
+
+<sub>The app at work on four CC0 street photos; the waits for the AI are shortened.</sub>
 
 Seamtag is a desktop app for labelling images. Each image's labels are saved in a file beside it, as LabelMe JSON, Pascal VOC, YOLO or CreateML, so a folder labelled in labelme or LabelImg opens as it is, and they open Seamtag's files too. Everything runs on your computer: images, labels and AI models never leave it.
 

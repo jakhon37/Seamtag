@@ -434,7 +434,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## Photos in the README
 
-The README's screenshots show four photos from Wikimedia Commons. Each photographer dedicated theirs to the public domain under CC0 1.0, so no credit is required; this is where they come from:
+The video at the top of the README and its screenshots show four photos from Wikimedia Commons. Each photographer dedicated theirs to the public domain under CC0 1.0, so no credit is required; this is where they come from:
 
 - [A pedestrian crossing over Stadhouderskade, Amsterdam](https://commons.wikimedia.org/wiki/File:2023_Amsterdam_poto_-_Woman_are_walking_the_pedestrian_crossing_over_the_city_road_Stadhouderskade_in_early_Spring_sunlight;_free_download_photo_in_high_resolutions_by_Fons_Heijnbroek_,_street_photography_in_The_Netherlands,_CCO.jpg), by Fons Heijnsbroek
 - [Erfurt Cafe Hilge 3](https://commons.wikimedia.org/wiki/File:Erfurt_Cafe_Hilge_3.jpg), by Ousw
