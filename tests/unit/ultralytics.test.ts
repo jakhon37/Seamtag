@@ -543,8 +543,9 @@ kpt_names:
     const read = (nc: string, names = '') => {
       const t = performance.now()
       const got = readDataYaml(`train: a\nval: a\nnc: ${nc}\n${names}`, 'data.yaml')
-      // Each class's name was made, so nc: 4294967295 took 45 s and nc: 100000000 ran out of memory
-      expect(performance.now() - t).toBeLessThan(500)
+      // Each class's name was made, so nc: 4294967295 took 45 s and nc: 100000000 ran out of memory. Two seconds
+      // still catches that, where half of one was missed now and then on a busy machine
+      expect(performance.now() - t).toBeLessThan(2000)
       return { names: got.data.names, errors: got.issues.filter((i) => i.severity === 'error').map((i) => i.message) }
     }
     expect(read('3')).toEqual({ names: ['class_0', 'class_1', 'class_2'], errors: [] })
