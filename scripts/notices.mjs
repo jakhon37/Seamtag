@@ -13,7 +13,9 @@
 // (beforePack in electron-builder.yml), so a build that calls electron-builder itself, as the
 // release workflow does, has it too, and stops there if a file extraResources names is missing.
 
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { downloadArtifact } from '@electron/get'
+import AdmZip from 'adm-zip'
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { builtinModules } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -267,13 +269,39 @@ export function write() {
   console.log(`THIRD-PARTY-NOTICES.txt: ${Math.round(Buffer.byteLength(out) / 1024)} KB`)
 }
 
+// Chromium's licences, which a Mac app carries beside NOTICE.md (mac extraResources in
+// electron-builder.yml), as electron-builder leaves Electron's licence files out of it. They're read
+// from Electron's own zip for the build's system and processor, through @electron/get, which keeps it
+// in its cache, or downloads it checked against Electron's checksums: Electron's npm package fills
+// node_modules/electron/dist only when something first loads it, which a release build never does
+// before it packs, so on the 3.3.0 tag's Mac runners there was no dist to take them from.
+export const CHROMIUM_LICENCES = path.join(ROOT, 'build', 'legal', 'LICENSES.chromium.html')
+export async function chromiumLicences(platform, arch) {
+  const electron = path.join(ROOT, 'node_modules', 'electron')
+  const zip = await downloadArtifact({
+    version: JSON.parse(readFileSync(path.join(electron, 'package.json'), 'utf8')).version,
+    artifactName: 'electron',
+    platform,
+    arch,
+    cacheRoot: process.env.electron_config_cache,
+    checksums: JSON.parse(readFileSync(path.join(electron, 'checksums.json'), 'utf8'))
+  })
+  const text = new AdmZip(zip).readFile('LICENSES.chromium.html')
+  if (!text) throw new Error(`${path.basename(zip)} holds no LICENSES.chromium.html`)
+  mkdirSync(path.dirname(CHROMIUM_LICENCES), { recursive: true })
+  writeFileSync(CHROMIUM_LICENCES, text)
+}
+// electron-builder's Arch, by its number
+const ARCHES = ['ia32', 'x64', 'armv7l', 'arm64']
+
 /**
- * electron-builder's beforePack: the notices again, from this system's packages. It also stops the
- * build when a file extraResources names is missing, as NOTICE.md or, on macOS, Electron's licences
- * could be: electron-builder would only warn, and leave it out of the installer.
+ * electron-builder's beforePack: the notices again, from this system's packages, and for a Mac app
+ * Chromium's licences. It also stops the build when a file extraResources names is missing, as
+ * NOTICE.md could be: electron-builder would only warn, and leave it out of the installer.
  */
-export default async function beforePack({ packager }) {
+export default async function beforePack({ packager, arch, electronPlatformName }) {
   write()
+  if (electronPlatformName === 'darwin') await chromiumLicences('darwin', ARCHES[arch] ?? 'arm64')
   const asList = (v) => (v == null ? [] : Array.isArray(v) ? v : [v])
   const missing = [...asList(packager.config.extraResources), ...asList(packager.platformSpecificBuildOptions.extraResources)]
     .flatMap((r) => (typeof r === 'object' && r.from && !r.from.includes('${') ? [r.from] : []))

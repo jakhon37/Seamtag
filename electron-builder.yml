@@ -72,7 +72,8 @@ mac:
   extraResources:
     - from: node_modules/electron/LICENSE
       to: legal/LICENSE.electron.txt
-    - from: node_modules/electron/dist/LICENSES.chromium.html
+    # Written by beforePack (scripts/notices.mjs) from Electron's zip for the Mac being built
+    - from: build/legal/LICENSES.chromium.html
       to: legal/LICENSES.chromium.html
 linux:
   icon: resources/icons
