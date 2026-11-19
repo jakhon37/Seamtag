@@ -5,7 +5,7 @@ All notable changes to Seamtag are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.3.0] - 2026-11-19
 
 Datasets: a check of the whole folder's labels, statistics, and COCO and Ultralytics YOLO export and import. Seamline and Seamtag on one folder: the models Seamline exports are offered for pre-labelling, and Seamtag never writes over labels or classes another app changed. Seamtag's licence and notices, in About and in the installers.
 

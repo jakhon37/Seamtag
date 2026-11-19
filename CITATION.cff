@@ -5,6 +5,6 @@ abstract: "Seamtag is a desktop app for Windows, macOS and Linux that labels ima
 authors:
 - family-names: "Nodirov"
   given-names: "Jakhongir"
-version: 3.2.0
+version: 3.3.0
 url: "https://github.com/jakhon37/Seamtag"
 license: GPL-3.0-only
