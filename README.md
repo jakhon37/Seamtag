@@ -11,7 +11,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="GPL-3.0-only"></a>
 </p>
 
-![Seamtag editing a polygon around a person in a photo](docs/media/label.webp)
+![Seamtag editing a polygon around a person pushing a pram on a city crossing](docs/media/label.webp)
 
 Seamtag is a desktop app for labelling images. Each image's labels are saved in a file beside it, as LabelMe JSON, Pascal VOC, YOLO or CreateML, so a folder labelled in labelme or LabelImg opens as it is, and they open Seamtag's files too. Everything runs on your computer: images, labels and AI models never leave it.
 
@@ -25,9 +25,9 @@ Seamtag is a desktop app for labelling images. Each image's labels are saved in 
 
 **AI points, AI box and the text prompt.** Click an object, or drag a box around it, and the model outlines it; Shift+click marks background. What it finds becomes the shape picked beside the tool: polygons (one for each part of the object, grouped), a mask, a rectangle, a circle or a rotated box. Repeats of one object are dropped, and with `ai.suppress_existing_shape_matches` so are objects already drawn. The text prompt takes words, such as `dog,cat`, and boxes everything they name with YOLO-World, each box labelled with its word and score. The models are EfficientSAM in two sizes, SAM2 in three, and YOLO-World, run as ONNX files. Each is downloaded once, when you agree, into `~/.cache/osam`, the folder labelme keeps its models in too, so a model either app has downloaded is there for the other; AI → AI models lists them, with their sizes and licences, and downloads or deletes them. SAM and SAM 3 aren't offered: their image encoders need blocks of memory larger than Electron allows.
 
-![SAM2 outlining a bus from two clicks](docs/media/ai.webp)
+![SAM2 outlining a red bus from two clicks](docs/media/ai.webp)
 
-![YOLO-World boxing the people and the bottle in a photo from the words person,bottle](docs/media/text.webp)
+![YOLO-World boxing the people and the bicycles at a pavement café from the words person,bicycle](docs/media/text.webp)
 
 **Pre-label with your own model.** Point it at a segmentation model exported to ONNX, for example from [Seamline](https://github.com/jakhon37/Seamline), and it proposes shapes for every unlabelled image, each with a score. Proposals stay dashed until you accept them: `W` accepts, `S` rejects, `Tab` skips, and the list can put the least certain images first.
 
@@ -37,15 +37,15 @@ Seamtag is a desktop app for labelling images. Each image's labels are saved in 
 
 **Labels that are hard to lose.** Saves go through one queue to a temporary file and then into place. A label file that can't be read is shown read-only and never written over, and closing the window saves first, or asks when saving isn't automatic.
 
-![The label dialog, with flags for the person label, a group ID and a description](docs/media/dialog.webp)
+![The label dialog for the person pushing the pram, with the flags occluded and truncated, group ID 1 and a description](docs/media/dialog.webp)
 
 **Check a folder's labels.** Dataset → Check labels reads every label file in the folder and lists what it finds in a Problems panel under the shapes. As errors and warnings: label files or images that can't be read, label files that give another image size, name another image, have no image or serve several images, masks that can't be read, shapes with no label, the wrong number of points or no area, repeated points, polygons that cross themselves, shapes reaching outside the image, exact and near copies, one label written several ways (`Cat` and `cat`) or missing from the label list, AI proposals not yet accepted, and identical images. As notes, hidden until asked for: images never labelled, labelled with no shapes or not verified, and labels in the list that no shape uses. That's 23 checks in all. Clicking a problem opens its image with the shape selected. Repeated points, exact copies and boxes past the image's edge have a Fix, undone like any edit, and a label can be renamed in every label file of the folder, from the Problems panel or Statistics, with the old files sent to the trash. An image is checked again as it's saved, and the image list can show only the images with an error or a warning. Dataset → Statistics counts images by state, objects and images by label with each label's shapes by type, objects per image, object sizes as COCO ranges them at full size and at a training size, and image sizes, and saves the labels table as CSV.
 
-![The Problems panel after Dataset → Check labels, with a bus outline that reaches below its photo picked from its row](docs/media/check.webp)
+![The Problems panel after Dataset → Check labels, with a cargo bike outline that reaches past its photo's right edge picked from its row](docs/media/check.webp)
 
 **COCO and YOLO datasets.** File → Export dataset writes the folder as COCO (objects, or objects with keypoints) or Ultralytics YOLO (detect, segment, pose or rotated boxes, with its `data.yaml`): whole, split by ratio with a seed, or split as its folders already are, with the images copied, hard-linked or, for COCO, left where they are. Everything is checked before anything is written, including what each format can't hold, and the dataset appears in its folder only once it's complete. File → Import dataset reads a COCO file or a YOLO dataset (Ultralytics', Roboflow's, CVAT's or X-AnyLabeling's layout) into each image's own label file, as LabelMe JSON whatever the save format. Images are matched by their path, or by a file name only one image on each side has, and never guessed: a name that fits several images is listed and left out. Images that already have labels are skipped, added to or replaced; a replaced file, or a Pascal VOC, YOLO or CreateML file added to, goes to the trash. The image's own label file stays the one you work on; datasets are made from it and read into it.
 
-![The Export dataset window splitting three photos 70/20/10 for YOLO segment, with each split's counts and two warnings](docs/media/export.webp)
+![The Export dataset window splitting four street photos 70/20/10 for YOLO segment, with each split's counts and two warnings](docs/media/export.webp)
 
 ## Install
 

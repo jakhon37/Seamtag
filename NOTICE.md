@@ -175,6 +175,15 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## Photos in the README
+
+The README's screenshots show four photos from Wikimedia Commons. Each photographer dedicated theirs to the public domain under CC0 1.0, so no credit is required; this is where they come from:
+
+- [A pedestrian crossing over Stadhouderskade, Amsterdam](https://commons.wikimedia.org/wiki/File:2023_Amsterdam_poto_-_Woman_are_walking_the_pedestrian_crossing_over_the_city_road_Stadhouderskade_in_early_Spring_sunlight;_free_download_photo_in_high_resolutions_by_Fons_Heijnbroek_,_street_photography_in_The_Netherlands,_CCO.jpg), by Fons Heijnsbroek
+- [Erfurt Cafe Hilge 3](https://commons.wikimedia.org/wiki/File:Erfurt_Cafe_Hilge_3.jpg), by Ousw
+- [Trent Buses (101 - YCH 890M) - 10 August 2025](https://commons.wikimedia.org/wiki/File:Trent_Buses_(101_-_YCH_890M)_-_10_August_2025.jpg), by Aethonatic
+- [Market st. San Francisco.](https://commons.wikimedia.org/wiki/File:Market_st._San_Francisco._(48669724832).jpg), by Bernard Spragg. NZ
+
 ## AI models
 
 The AI models aren't part of Seamtag. Each is downloaded when you ask for it, under its own licence, which AI → AI models shows: EfficientSAM and SAM2 are under the Apache License 2.0, YOLO-World under the GNU GPL v3.0.
