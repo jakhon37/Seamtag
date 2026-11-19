@@ -130,7 +130,7 @@ export async function predictImage(model: PrelabelModel, root: string, name: str
       // confidence bilinear. Where tiles overlap, near the edges, the surer one's class wins, so the
       // two apps' confidences must agree for their classes to.
       const tileSure = cvResize(sure, ow, oh, pw, ph, 1)
-      // OpenCV's nearest: each pixel takes the one at its place times 1 / (pw / ow), rounded down
+      // OpenCV's nearest (resize.cpp, under its licences in NOTICE.md): each pixel takes the one at its place times 1 / (pw / ow), rounded down
       const nx = 1 / (pw / ow), ny = 1 / (ph / oh)
       for (let y = 0; y < ph; y++) {
         const from = Math.min(oh - 1, Math.floor(y * ny)) * ow

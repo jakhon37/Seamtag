@@ -120,6 +120,20 @@ export function pilResize(data: Uint8Array, width: number, height: number, outWi
 }
 
 
+/*!
+ * Bilinear resize translated to TypeScript from OpenCV's modules/imgproc/src/resize.cpp, as it is
+ * in OpenCV 4.13.0 and 5.0.0 (https://github.com/opencv/opencv). OpenCV is licensed under the
+ * Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0) since 4.5.0, and
+ * resize.cpp's older code under the BSD-3-Clause licence in its header:
+ *
+ * Copyright (C) 2000-2008, 2017, Intel Corporation, all rights reserved.
+ * Copyright (C) 2009, Willow Garage Inc., all rights reserved.
+ * Copyright (C) 2014-2015, Itseez Inc., all rights reserved.
+ * Third party copyrights are property of their respective owners.
+ *
+ * NOTICE.md holds both licences in full, with OpenCV's COPYRIGHT file.
+ */
+
 // OpenCV's bilinear resize of 8-bit images (cv::resize with INTER_LINEAR, imgproc/src/resize.cpp),
 // to the bit: Seamline's predict resizes each tile to its model's input with it, through
 // albumentations' Resize, so a model sees the same pixels in both apps. Pixel centres map onto
