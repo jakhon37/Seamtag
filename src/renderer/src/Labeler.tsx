@@ -2429,6 +2429,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     // So do the labels found in the files, and the label new shapes get. The config's labels stay listed.
     if (!done.left && done.changed.length) {
       forgetLabel(from)
+      // The label list keeps its order: the new name takes the old one's place
+      const kept = keptLabels.current
+      if (kept) keptLabels.current = kept.includes(to) ? kept.filter((l) => l !== from) : kept.map((l) => (l === from ? to : l))
       setActive((a) => ((a === undefined ? classes[0]?.name : a) === from ? to : a))
     }
     if (done.changed.length) reloadImages(done.changed)
