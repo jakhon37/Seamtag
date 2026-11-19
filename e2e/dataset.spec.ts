@@ -937,7 +937,9 @@ test("a short list of problems leaves the Labels list its room, and the dock kee
   // dock keeps its height, its list scrolling when it shows more, until it shows what it did at first
   await resize(app, page, 1500, 940)
   const before = await dockAt(page)
-  const still = async () => expect(await dockAt(page)).toMatchObject({ height: before.height, only: before.only, list: before.list })
+  // Rows shown again are new, and stand at content-visibility's 48 px until they're drawn, a frame later: on a slow
+  // machine the dock is measured once they are
+  const still = () => expect.poll(() => dockAt(page)).toMatchObject({ height: before.height, only: before.only, list: before.list })
   const only = dock.getByLabel('This image only')
   const severity = (key: string) => dock.locator(`.problems-severities [data-severity="${key}"]`)
   await only.click()
@@ -951,14 +953,14 @@ test("a short list of problems leaves the Labels list its room, and the dock kee
   await severity('info').click()
   await expect(dock.locator('.problems-group[data-code="unused-label"]')).toHaveCount(1)
   await still()
-  expect((await dockAt(page)).scrolls).toBe(true)
+  await expect.poll(async () => (await dockAt(page)).scrolls).toBe(true)
   await severity('info').click()
   await dock.locator('.problems-title').first().click()
   await expect(dock.locator('.problem')).toHaveCount(1)
   await still()
   await dock.locator('.problems-title').first().click()
   await expect(dock.locator('.problem')).toHaveCount(2)
-  expect(await dockAt(page)).toEqual(before)
+  await expect.poll(() => dockAt(page)).toEqual(before)
 
   // At 960 x 600 the two fill the dock's half of the column; once one is fixed, the other leaves the Labels list four rows
   await resize(app, page, 960, 600)
@@ -966,9 +968,11 @@ test("a short list of problems leaves the Labels list its room, and the dock kee
   await dock.locator('.problems-group[data-code="duplicate-shape"]').getByRole('button', { name: 'Fix', exact: true }).click()
   await expect(dock.locator('.problem')).toHaveCount(1)
   await expect(dock.locator('.problems-status')).toHaveText(CHECKED)
-  const after = await dockAt(page)
-  expect([after.room, after.scrolls]).toEqual([0, false])
-  expect(after.labelRows).toBeGreaterThanOrEqual(4)
+  await expect.poll(async () => {
+    const { room, scrolls } = await dockAt(page)
+    return [room, scrolls]
+  }).toEqual([0, false])
+  expect((await dockAt(page)).labelRows).toBeGreaterThanOrEqual(4)
   expect(await fits(page, '.panel.right')).toEqual({ inside: true, page: true, onScreen: true })
   await shot(page, 'dock-short-960-fixed-light.png')
   await finish(app, errors)
@@ -1041,9 +1045,14 @@ test("problem rows keep their image's name, cut in the middle, and their buttons
       await row(image).scrollIntoViewIfNeeded()
       await expect(row(image).locator('.problem-open')).toHaveAttribute('title', image)
       await expect(row(image).locator('.problem-open')).toHaveAccessibleName(image)
-      const { name, end, whole, buttons } = await measure(row(image))
+      // Rows are drawn as they come into view (content-visibility: auto), and a row's buttons take a click once it's
+      // drawn, a frame or two after it's scrolled in: on a slow machine, after the first look
+      await expect.poll(async () => {
+        const { end, buttons } = await measure(row(image))
+        return [end, buttons]
+      }).toEqual([true, [true]])
+      const { name, whole } = await measure(row(image))
       expect(name).toBeGreaterThanOrEqual(60)
-      expect([end, buttons]).toEqual([true, [true]])
       // The name has its line to itself but for the button: one of 20 characters or fewer isn't cut at all
       if (image.length <= 20) expect(whole).toBe(true)
     }
