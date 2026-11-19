@@ -1066,12 +1066,14 @@ describe('a YOLO dataset', () => {
   test('a folder of 40,000 images of one name, one to a folder, is matched in a time their number gives, not its square', async () => {
     const ds = await dataset({ 'rgb.png': '0 0.5 0.5 0.5 0.5\n' }, { 0: 'cat' })
     const dir = folder()
-    // The folders are listed, not made: making them would take longer than the test
+    // The folders are listed, not made: making them would take longer than the test. A listing is entries when
+    // they're asked for (withFileTypes), and names otherwise, as fs.readdir gives them
     const readdir = fsp.readdir.bind(fsp)
     const listed = (name: string, isDir: boolean) => ({ name, isDirectory: () => isDir, isFile: () => !isDir, isSymbolicLink: () => false })
     vi.spyOn(fsp, 'readdir').mockImplementation((async (p: string, o: unknown) => {
-      if (p === dir) return Array.from({ length: 40_000 }, (_, i) => listed(`s${i}`, true))
-      if (path.dirname(p) === dir) return [listed('rgb.png', false)]
+      const as = (entries: ReturnType<typeof listed>[]) => ((o as { withFileTypes?: boolean } | undefined)?.withFileTypes ? entries : entries.map((e) => e.name))
+      if (p === dir) return as(Array.from({ length: 40_000 }, (_, i) => listed(`s${i}`, true)))
+      if (path.dirname(p) === dir) return as([listed('rgb.png', false)])
       return readdir(p, o as never)
     }) as never)
     const root = await open(dir)
