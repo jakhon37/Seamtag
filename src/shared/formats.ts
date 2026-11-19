@@ -223,8 +223,10 @@ export function writeVoc(image: VocImage, shapes: Shape[], verified: boolean): s
  * keeps it: class 0 is then named as Seamline names it, and as it reads on screen.
  */
 export function readClasses(text: string): string[] {
-  const names = text.replace(/^[\r\n]+|[\r\n]+$/g, '').split(/\r?\n/)
-  names[0] = names[0].replace(/^\uFEFF/, '')
+  // The line breaks at the end are looked for from the first of a run only: looked for from each
+  // one of a long run in the middle, they took time growing with the run's length squared
+  const names = text.replace(/^[\r\n]+|(?<![\r\n])[\r\n]+$/g, '').split(/\r?\n/)
+  names[0] = names[0].replace(/^﻿/, '')
   return names
 }
 export const writeClasses = (classes: string[]) => classes.map((c) => `${c}\n`).join('')
@@ -262,6 +264,10 @@ export function readYolo(text: string, classes: string[], width: number, height:
   text.split(/\r?\n/).forEach((line, k) => {
     if (!line.trim()) return
     const parts = line.trim().split(/\s+/)
+    // Ultralytics' outlines have 7 numbers or more, its rotated boxes 9 and its keypoints 5 plus 2 or 3 a point
+    if (parts.length > 6 && parts.every((p) => Number.isFinite(Number(p)))) {
+      fail(`Line ${k + 1} is an Ultralytics outline, rotated box or keypoints row, which a YOLO box file can't hold: use File > Import dataset to read it`)
+    }
     if (parts.length !== 5) fail(`Line ${k + 1} needs a class and four numbers, as YOLO's boxes have`)
     const [c, xc, yc, w, h] = parts.map(Number)
     if (![c, xc, yc, w, h].every(Number.isFinite)) fail(`Line ${k + 1} has something that isn't a number`)
@@ -377,6 +383,14 @@ function parsePython(text: string): unknown {
  * place of its old one, or added. Entries for other images stay as they were.
  */
 export function writeCreateML(existing: string | null, image: string, shapes: Shape[], verified: boolean): string {
+  return writeCreateMLEntries(existing, new Map([[image, { shapes, verified }]]))
+}
+
+/**
+ * writeCreateML for several images of one list at once, by the names the list gives them: the
+ * list is read and written once, however many images change in it
+ */
+export function writeCreateMLEntries(existing: string | null, images: Map<string, { shapes: Shape[]; verified: boolean }>): string {
   let list: unknown = []
   if (existing !== null) {
     try {
@@ -386,7 +400,24 @@ export function writeCreateML(existing: string | null, image: string, shapes: Sh
     }
     if (!Array.isArray(list)) fail("It isn't a CreateML file: the top level must be a list")
   }
-  const entry = {
+  const entries = list as unknown[]
+  // Each image's first entry, found in one pass
+  const first = new Map<string, number>()
+  entries.forEach((e, k) => {
+    if (isObject(e) && typeof e.image === 'string' && images.has(e.image) && !first.has(e.image)) first.set(e.image, k)
+  })
+  for (const [image, { shapes, verified }] of images) {
+    const entry = createmlEntry(image, shapes, verified)
+    const at = first.get(image)
+    if (at === undefined) entries.push(entry)
+    else entries[at] = entry
+  }
+  return pyDumps(entries)
+}
+
+/** An image's entry, as LabelImg's CreateMLWriter makes it */
+function createmlEntry(image: string, shapes: Shape[], verified: boolean) {
+  return {
     image,
     verified,
     annotations: shapes.map((s) => {
@@ -402,11 +433,6 @@ export function writeCreateML(existing: string | null, image: string, shapes: Sh
       }
     })
   }
-  const entries = list as unknown[]
-  const at = entries.findIndex((e) => isObject(e) && e.image === image)
-  if (at >= 0) entries[at] = entry
-  else entries.push(entry)
-  return pyDumps(entries)
 }
 
 /** Takes this image's entries out of a CreateML list; null when nothing else is left in it */

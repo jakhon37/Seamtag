@@ -1,5 +1,5 @@
 blank_issues_enabled: true
 contact_links:
-  - name: labelme
-    url: https://github.com/wkentaro/labelme
-    about: For labelme itself. Seamtag reads and writes its files, but it's a separate app.
+  - name: Security problems
+    url: https://github.com/jakhon37/Seamtag/blob/main/SECURITY.md
+    about: Please report them privately, as SECURITY.md says, not in an issue.

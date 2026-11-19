@@ -1,14 +1,17 @@
-import fs, { existsSync, mkdirSync, mkdtempSync, promises, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'fs'
+import fs, {
+  existsSync, mkdirSync, mkdtempSync, promises, promises as fsp, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync
+} from 'fs'
 import { syncBuiltinESMExports } from 'module'
 import { tmpdir } from 'os'
 import path from 'path'
-import { describe, expect, test, vi } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { defaultConfig } from '../../src/shared/config'
 import { newShape, type Shape } from '../../src/shared/labelfile'
+import { setFolding } from '../../src/main/names'
 import { labelList, recolored, withClass } from '../../src/renderer/src/colors'
 import {
   findLabels, type ImageItem, type LabelClass, labelPath, labelsChanged, LabelsChanged, loadLabels, mergeClasses, openHere, openProject, refreshProject,
-  reloadProjectFile, saveLabels, saveProjectFile, type SaveRequest, setTrash, summarizeAll, trashImage, trashLabels
+  reloadProjectFile, renameRetrying, saveLabels, saveProjectFile, type SaveRequest, setTrash, sharesStem, summarizeAll, trashImage, trashLabels, writeAtomic
 } from '../../src/main/project'
 
 // Saving, switching formats and deleting, on folders of their own. The trash is a folder too.
@@ -145,6 +148,137 @@ test('Delete image: the image goes first, then its label files in every format; 
   expect((await trashImage(dir, 'a.png')).kept).toBeUndefined()
   expect(trashed).toEqual(['a.png', 'a.json', 'a.xml', 'a.txt'].map((f) => path.join(dir, f)))
   expect(existsSync(path.join(dir, 'classes.txt'))).toBe(true)
+})
+
+test('images whose names differ only in their extension are known, as the system compares names, until one is deleted', async () => {
+  const dir = folder({}, ['a.png', 'a.jpg', 'B.png', 'sub/b.jpg', 'c.png'])
+  await openProject(dir, null)
+  expect(['a.png', 'B.png', 'sub/b.jpg', 'c.png'].map((name) => sharesStem(dir, name))).toEqual([true, false, false, false])
+  await trashImage(dir, 'a.jpg')
+  expect(sharesStem(dir, 'a.png')).toBe(false)
+  setFolding('case')
+  try {
+    const other = folder({}, ['a.png', 'A.jpg'])
+    await openProject(other, null)
+    expect(sharesStem(other, 'a.png')).toBe(true)
+  } finally {
+    setFolding()
+  }
+})
+
+describe('renames a file someone holds for a moment', () => {
+  const platform = process.platform
+  const as = (name: string) => Object.defineProperty(process, 'platform', { value: name })
+  const busy = (code: string, times: number) => {
+    const rename = fsp.rename.bind(fsp)
+    let left = times
+    return vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      if (left-- > 0) throw Object.assign(new Error(`${code}: held`), { code })
+      return rename(from, to)
+    })
+  }
+  afterEach(() => {
+    as(platform)
+    vi.restoreAllMocks()
+  })
+
+  test('on Windows, EPERM, EACCES and EBUSY are tried again until the file is let go', async () => {
+    as('win32')
+    const dir = folder({})
+    for (const code of ['EPERM', 'EACCES', 'EBUSY']) {
+      const spy = busy(code, 3)
+      await writeAtomic(path.join(dir, `${code}.json`), code)
+      expect(spy).toHaveBeenCalledTimes(4)
+      expect(text(dir, `${code}.json`)).toBe(code)
+      spy.mockRestore()
+    }
+  })
+
+  test('it gives up after its patience, and other errors and other systems fail at once', async () => {
+    const dir = folder({ 'a.txt': 'a' })
+    as('win32')
+    let spy = busy('EPERM', Infinity)
+    await expect(renameRetrying(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'), 100)).rejects.toThrow('EPERM')
+    expect(spy.mock.calls.length).toBeGreaterThan(2)
+    spy.mockRestore()
+    spy = busy('ENOENT', 1)
+    await expect(renameRetrying(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'))).rejects.toThrow('ENOENT')
+    expect(spy).toHaveBeenCalledTimes(1)
+    spy.mockRestore()
+    as('linux')
+    spy = busy('EPERM', 1)
+    await expect(renameRetrying(path.join(dir, 'a.txt'), path.join(dir, 'b.txt'))).rejects.toThrow('EPERM')
+    expect(spy).toHaveBeenCalledTimes(1)
+    spy.mockRestore()
+    // A write whose rename fails leaves the old file as it was and no temporary file behind
+    busy('EPERM', 1)
+    await expect(writeAtomic(path.join(dir, 'a.txt'), 'new')).rejects.toThrow('EPERM')
+    expect(text(dir, 'a.txt')).toBe('a')
+    expect(readdirSync(dir).sort()).toEqual(['a.png', 'a.txt'])
+  })
+})
+
+describe('a label file that gives way to another format', () => {
+  // LabelImg's CreateML file of a.png alone, whose name LabelMe's file takes
+  const CREATEML = JSON.stringify([{ image: 'a.png', verified: false, annotations: [{ label: 'dog', coordinates: { x: 20, y: 15, width: 10, height: 6 } }] }])
+  afterEach(() => vi.restoreAllMocks())
+  /** A full disk: a new file gets some of its text, then the write fails */
+  const fullDisk = () => {
+    const write = fsp.writeFile.bind(fsp)
+    vi.spyOn(fsp, 'writeFile').mockImplementation(async (file, data, options) => {
+      if (!String(file).endsWith('.tmp')) return write(file, data, options)
+      await write(file, String(data).slice(0, 10), options)
+      throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' })
+    })
+  }
+  const labels = (dir: string, name: string) => JSON.parse(text(dir, name)).shapes.map((s: Shape) => s.label)
+
+  test('goes to the trash only once the new file is written: a full disk leaves it as it was, with nothing left behind', async () => {
+    for (const [from, format, old] of [['createml', 'labelme', CREATEML], ['labelme', 'createml', LABELME]] as const) {
+      const dir = folder({ 'a.json': old })
+      await openProject(dir, null)
+      fullDisk()
+      await expect(saveLabels(dir, 'a.png', request([box('cat')], { format, from }))).rejects.toThrow(
+        "a.json's new labels couldn't be written, so it's left unchanged: ENOSPC")
+      vi.restoreAllMocks()
+      expect(text(dir, 'a.json')).toBe(old)
+      expect(trashed).toEqual([])
+      expect(readdirSync(dir).sort()).toEqual(['a.json', 'a.png'])
+    }
+  })
+
+  test("a save that can't be written leaves no temporary file either", async () => {
+    const dir = folder({ 'a.json': LABELME })
+    await openProject(dir, null)
+    fullDisk()
+    await expect(saveLabels(dir, 'a.png', request([box('cat')]))).rejects.toThrow('ENOSPC')
+    expect(text(dir, 'a.json')).toBe(LABELME)
+    expect(readdirSync(dir).sort()).toEqual(['a.json', 'a.png'])
+  })
+
+  test('once the old file is in the trash, a new one something holds is copied into its place, or the message says where it is', async () => {
+    const dir = folder({ 'a.json': CREATEML })
+    await openProject(dir, null)
+    // As an antivirus scanner or OneDrive can hold a new file on Windows, past renameRetrying's patience
+    const rename = fsp.rename.bind(fsp)
+    vi.spyOn(fsp, 'rename').mockImplementation(async (from, to) => {
+      if (String(from).endsWith('.tmp')) throw Object.assign(new Error('EPERM: operation not permitted, rename'), { code: 'EPERM' })
+      return rename(from, to)
+    })
+    const saved = await saveLabels(dir, 'a.png', request([box('cat')], { format: 'labelme', from: 'createml' }))
+    expect(saved.replaced).toBe(path.join(dir, 'a.json'))
+    expect(trashed).toEqual([path.join(dir, 'a.json')])
+    expect(labels(dir, 'a.json')).toEqual(['cat'])
+    expect(readdirSync(dir).sort()).toEqual(['a.json', 'a.png'])
+    // Nor can it be copied: it stays where it is, and the message says so
+    writeFileSync(path.join(dir, 'a.json'), CREATEML)
+    vi.spyOn(fsp, 'copyFile').mockRejectedValue(Object.assign(new Error('EPERM: operation not permitted, copyfile'), { code: 'EPERM' }))
+    await expect(saveLabels(dir, 'a.png', request([box('owl')], { format: 'labelme', from: 'createml' }))).rejects.toThrow(
+      /^a\.json is in the trash, but its new labels couldn't take its name: they're in .*a\.json\.\d+\.\d+\.tmp \(EPERM/)
+    const left = readdirSync(dir).filter((f) => f.endsWith('.tmp'))
+    expect(left).toHaveLength(1)
+    expect(labels(dir, left[0])).toEqual(['owl'])
+  })
 })
 
 describe('another app, such as Seamline, changing label files while the folder is open', () => {

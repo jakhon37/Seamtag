@@ -40,7 +40,7 @@ export type Args = {
 
 export const USAGE = `Usage: seamtag [options] [image, label file or folder] [class file] [save folder]
 
-  The class file and save folder are LabelImg's: the same as --labels FILE and --output DIR.
+  The class file and save folder are the same as --labels FILE and --output DIR.
 
   -h, --help            show this help
   -V, --version         show the version

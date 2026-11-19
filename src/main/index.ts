@@ -4,15 +4,25 @@ import { tmpdir } from 'os'
 import path from 'path'
 import { pathToFileURL } from 'url'
 import { cancelDownload, download, listModels, release, removeModel } from './ai'
+import {
+  checkFolder, fixShapes, folderStats, forgetChecks, problemPage, renamePlan, renameRun, saveStats, statsFileName, statsText, stopJob, strayFile
+} from './checking'
+import { forgetDataset } from './dataset'
+import {
+  type ExportOptions, type ExportProgress, folderProblem, forgetExportChecks, keypointsFromFolder, moreIssues, preflight, readKeypoints, runExport, saveKeypoints
+} from './export'
 import { mergeMasks } from './masks'
 import { assist, type AssistRequest, fromTexts, MaskOutputUnavailable, type TextRequest } from './assist'
 import { type Args, loadConfig, type LoadedConfig, parseArgs, USAGE, USER_CONFIG } from './config'
 import { FORMAT_EXT, FORMAT_NAMES, type LabelFormat } from '../shared/formats'
+import { COPYRIGHT, INCLUDES, LEGAL_FILES, type LegalKind, type LegalText, LIBVIPS, TERMS } from '../shared/legal'
 import { cacheRoot, imageData, imageDepth, imageSize, openImage, setCacheDir } from './images'
+import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImport, stopImport, writeImport } from './import'
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
 import {
   closeProject, hasLabelsIn, imagePath, type LabelClass, labelsChanged, LabelsChanged, labelsFile, loadLabels, meta, openHere, openProject, type ProjectInfo,
-  readLabelFile, refreshProject, reloadProjectFile, rootsOpen, saveLabels, saveProjectFile, type SaveRequest, setTrash, summarizeAll, trashImage, trashLabels
+  readLabelFile, refreshProject, reloadProjectFile, rootsOpen, saveLabels, saveProjectFile, type SaveRequest, serial, setTrash, summarizeAll, trashImage,
+  trashLabels
 } from './project'
 import { runModels } from './runs'
 
@@ -89,8 +99,52 @@ function addRecent(target: string, select: string | null) {
   writeState(state)
 }
 
+// Seamtag's licence and the notices of what it includes (src/shared/legal.ts): packed into
+// resources/legal (electron-builder.yml); in development, the repository's own copies, or a
+// test's (SEAMTAG_LEGAL_DIR)
+const legalDir = () => (app.isPackaged ? path.join(process.resourcesPath, 'legal') : process.env.SEAMTAG_LEGAL_DIR || app.getAppPath())
+async function readLegal(kind: LegalKind) {
+  const dir = legalDir()
+  return Promise.all(LEGAL_FILES[kind].map(async (name): Promise<LegalText> => {
+    try {
+      return { name, text: await fs.readFile(path.join(dir, name), 'utf8') }
+    } catch {
+      const made = !app.isPackaged && name === 'THIRD-PARTY-NOTICES.txt' ? ' npm run build makes it.' : ''
+      return { name, missing: `${name} isn't in ${dir}.${made}` }
+    }
+  }))
+}
+
 function send(channel: string, payload: unknown) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload)
+}
+
+// The jobs that write label files or an export, each with what stops it. Closing the window stops
+// them and waits for them: an import or a rename finishes the image it's on, so none is left
+// with its old labels in the trash and the new ones in a temporary file, and an export removes
+// what it wrote.
+const writing = new Map<Promise<unknown>, () => void>()
+function job<T>(work: Promise<T>, stop: () => void): Promise<T> {
+  writing.set(work, stop)
+  const done = () => void writing.delete(work)
+  work.then(done, done)
+  return work
+}
+/** Waits for work, or for ms, whichever ends first */
+async function within(work: Promise<unknown>, ms: number) {
+  let timer: NodeJS.Timeout | undefined
+  await Promise.race([work, new Promise((go) => (timer = setTimeout(go, ms)))])
+  clearTimeout(timer)
+}
+/** Stops the jobs that write and waits for them, and for the label files being saved, for ten seconds at most */
+async function stopWriting() {
+  const until = Date.now() + 10_000
+  // A job started while the others stop is stopped in turn
+  while (writing.size && Date.now() < until) {
+    for (const stop of writing.values()) stop()
+    await within(Promise.allSettled(writing.keys()), until - Date.now())
+  }
+  await within(serial(async () => {}), until - Date.now())
 }
 
 // `again`: opened from Open recent or as the last folder, so a folder remembered on an image opens on it
@@ -142,7 +196,12 @@ function registerIpc() {
     return r.response
   })
   ipcMain.handle('project:open', (_e, target: string, output: string | null, started?: boolean, again?: boolean) => open(target, output, started, again))
-  ipcMain.handle('project:close', (_e, root: string) => closeProject(root))
+  ipcMain.handle('project:close', (_e, root: string) => {
+    // What the dataset reader keeps of the folder goes with it
+    forgetDataset(root)
+    forgetChecks(root)
+    return closeProject(root)
+  })
   ipcMain.handle('project:save', (_e, root: string, project: ProjectInfo, shown?: LabelClass[]) => saveProjectFile(root, project, shown))
   ipcMain.handle('project:reload', (_e, root: string) => reloadProjectFile(root))
   // Another app, such as Seamline, may have changed the folder while the window was in the background
@@ -190,6 +249,10 @@ function registerIpc() {
   ipcMain.handle('app:link', (_e, url: string) => {
     if (/^https:\/\//.test(url)) return shell.openExternal(url)
   })
+  ipcMain.handle('app:legal', (_e, kind: LegalKind) => {
+    if (!Object.hasOwn(LEGAL_FILES, kind)) throw new Error(`There's no ${kind} to show`)
+    return readLegal(kind)
+  })
   ipcMain.handle('ai:models', () => listModels())
   ipcMain.handle('ai:download', (_e, name: string) => download(name, (p) => send('ai:download', p)))
   ipcMain.handle('ai:cancel', (_e, name: string) => cancelDownload(name))
@@ -216,11 +279,121 @@ function registerIpc() {
   ipcMain.handle('prelabel:run', (_e, root: string, model: string, names: string[], classes: string[], batch?: boolean) =>
     prelabel(root, model, names, classes, loaded?.config.prelabel.min_area ?? 25, (p) => send('prelabel:progress', p), !!batch))
   ipcMain.handle('prelabel:stop', () => stopPrelabel())
+  // Dataset > Check labels, Statistics and renaming a label across the folder (checking.ts)
+  ipcMain.handle('check:run', (_e, root: string, req) => checkFolder(root, req, (p) => send('check:progress', { root, ...p })))
+  ipcMain.handle('check:stop', (_e, root: string) => stopJob(root, 'check'))
+  ipcMain.handle('check:view', (_e, root: string, query) => problemPage(root, query))
+  ipcMain.handle('check:fix', (_e, root: string, issue, shapes) => fixShapes(root, issue, shapes))
+  // Only a label file the last check found without its image
+  ipcMain.handle('check:reveal', (_e, root: string, file: string) => {
+    const full = strayFile(root, file)
+    if (full) shell.showItemInFolder(full)
+  })
+  ipcMain.handle('rename:plan', (_e, root: string, from: string, prefer: LabelFormat) =>
+    renamePlan(root, from, prefer, (p) => send('rename:progress', { root, ...p })))
+  ipcMain.handle('rename:run', (_e, root: string, from: string, to: string, prefer: LabelFormat) => job((async () => {
+    const config = loaded?.config
+    const done = await renameRun(root, from, to, prefer, config?.validate_label === 'exact' ? config.labels : null, (p) => send('rename:progress', { root, ...p }))
+    // The image list counts the changed images again, read as they were renamed, and takes in the new label; the rename stands either way.
+    // A folder closed meanwhile has no image list to count them in.
+    if (done.changed.length && rootsOpen().includes(root)) {
+      await summarizeAll(root, (b) => send('project:summaries', b), prefer, false, done.changed).catch((e) =>
+        send('app:error', `Some renamed label files couldn't be counted again: ${e.message}`))
+    }
+    return done
+  })(), () => stopJob(root, 'rename')))
+  ipcMain.handle('rename:stop', (_e, root: string) => stopJob(root, 'rename'))
+  ipcMain.handle('stats:read', (_e, root: string, req) => folderStats(root, req, (p) => send('stats:progress', { root, ...p })))
+  ipcMain.handle('stats:stop', (_e, root: string) => stopJob(root, 'stats'))
+  ipcMain.handle('stats:save', async (_e, root: string) => {
+    const text = statsText(root)
+    if (text === null) throw new Error('Count the folder first')
+    // GTK's save dialog asks before replacing a file only when told to; the others always ask
+    const r = await dialog.showSaveDialog(win!, {
+      title: 'Save statistics as CSV', defaultPath: await statsFileName(root), filters: [{ name: 'CSV files', extensions: ['csv'] }],
+      properties: ['showOverwriteConfirmation']
+    })
+    if (r.canceled || !r.filePath) return null
+    await saveStats(r.filePath, text)
+    return r.filePath
+  })
+
+  // File > Export dataset…: one job at a time, a check or an export, and a new one stops the last.
+  // The folder is checked again before anything is written to it, and only keypoints files main's
+  // own dialogs gave are read.
+  let exporting: AbortController | null = null
+  let exported: string | null = null
+  const keypointFiles = new Set<string>()
+  const exportJob = () => {
+    exporting?.abort()
+    return { signal: (exporting = new AbortController()).signal, onProgress: (p: ExportProgress) => send('export:progress', p), version: app.getVersion() }
+  }
+  const exportOptions = (options: ExportOptions) => {
+    if (options.keypoints && !keypointFiles.has(options.keypoints)) throw new Error('Choose the keypoints file again')
+    return { ...options, labels: options.labels ?? [] }
+  }
+  const keypointsFilter = [{ name: 'Keypoints files', extensions: ['yaml', 'yml'] }]
+  // A check given the id of the last check's read uses that read again; the window gives a new one when it opens and after an export fails
+  ipcMain.handle('export:check', (_e, root: string, options: ExportOptions, read: unknown) =>
+    preflight(root, exportOptions(options), { ...exportJob(), read: typeof read === 'string' ? read : undefined }))
+  ipcMain.handle('export:issues', (_e, id: number, key: string, from: number) => moreIssues(id, key, from))
+  ipcMain.handle('export:folder', async (_e, root: string) => {
+    const r = await dialog.showOpenDialog(win!, { title: 'Export to a new or empty folder', defaultPath: path.dirname(root), properties: ['openDirectory', 'createDirectory'] })
+    if (r.canceled || !r.filePaths[0]) return null
+    return { path: r.filePaths[0], problem: await folderProblem(root, r.filePaths[0]) }
+  })
+  ipcMain.handle('export:keypoints', async () => {
+    const r = await dialog.showOpenDialog(win!, { title: 'Choose a keypoints file', properties: ['openFile'], filters: keypointsFilter })
+    if (r.canceled || !r.filePaths[0]) return null
+    const { summary } = await readKeypoints(r.filePaths[0])
+    keypointFiles.add(summary.file)
+    return summary
+  })
+  ipcMain.handle('export:make-keypoints', async (_e, root: string, prefer: LabelFormat) => {
+    const schema = await keypointsFromFolder(root, prefer)
+    if (!schema) throw new Error('The folder has no posed objects to make a keypoints file from: give a box and its points one group_id')
+    // GTK's save dialog asks before replacing a file only when told to: a keypoints file edited by hand is worth the question
+    const r = await dialog.showSaveDialog(win!, {
+      title: 'Save the keypoints file', defaultPath: path.join(path.dirname(root), `${path.basename(root)}-keypoints.yaml`), filters: keypointsFilter,
+      properties: ['showOverwriteConfirmation']
+    })
+    if (r.canceled || !r.filePath) return null
+    const summary = await saveKeypoints(r.filePath, schema)
+    keypointFiles.add(summary.file)
+    return summary
+  })
+  ipcMain.handle('export:run', (_e, root: string, options: ExportOptions, out: string) => job((async () => {
+    const result = await runExport(root, exportOptions(options), out, exportJob())
+    if (!result.stopped) exported = result.out
+    return result
+  })(), () => exporting?.abort()))
+  ipcMain.handle('export:stop', () => exporting?.abort())
+  // The window closed: what its checks kept goes with it
+  ipcMain.handle('export:close', () => {
+    exporting?.abort()
+    forgetExportChecks()
+  })
+  ipcMain.handle('export:reveal', (_e, out: string) => {
+    if (out === exported) shell.showItemInFolder(out)
+  })
+
+  // File > Import dataset: reading writes nothing; writing goes through saveLabels, then the image list counts the images again
+  ipcMain.handle('import:read', (_e, root: string, req: ImportRequest) => readImport(root, req, (p) => send('import:progress', p)))
+  ipcMain.handle('import:rows', (_e, list: 'issues' | 'skipped', code: string, offset: number) => importRows(list, code, offset))
+  ipcMain.handle('import:write', (_e, policy: ImportPolicy) =>
+    job(writeImport(policy, (p) => send('import:progress', p), (batch) => send('project:summaries', batch)), stopImport))
+  ipcMain.handle('import:stop', () => stopImport())
+  ipcMain.handle('import:close', () => closeImport())
 }
 
 function buildMenu() {
   // The window has its own menu bar. A Mac still needs the app menu, and Edit for text fields.
   if (process.platform !== 'darwin') return Menu.setApplicationMenu(null)
+  // The app menu's About panel says what the About window says, and where the licences are
+  app.setAboutPanelOptions({
+    copyright: COPYRIGHT,
+    credits: `${TERMS}\n${INCLUDES}\n${LIBVIPS}\nThe GNU GPL, the LGPL and the notices are under Help > About Seamtag, and in Seamtag.app/Contents/Resources/legal.`
+  })
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { role: 'appMenu' },
     { role: 'editMenu' },
@@ -241,21 +414,30 @@ function createWindow() {
   // Back from another app, such as Seamline: the window looks at the folder again
   win.on('focus', () => send('app:focus', null))
   // Saves wait a moment after each change: the window flushes them, or asks about unsaved
-  // work when saving isn't automatic, before it closes
+  // work when saving isn't automatic, before it closes. Then jobs that write stop, and are
+  // waited for, as are the saves under way.
   let closing = false
+  // A close under way: another click while it is changes nothing, nor asks twice about unsaved work
+  let leaving = false
   win.on('close', (e) => {
     if (closing || !win) return
     e.preventDefault()
-    const finish = (ok: boolean) => {
-      if (!ok || closing || !win) return
+    if (leaving) return
+    leaving = true
+    ipcMain.once('app:flushed', async (_e, ok: boolean) => {
+      if (!ok || !win || win.isDestroyed()) {
+        leaving = false
+        return
+      }
+      await stopWriting()
+      if (win.isDestroyed()) return
       closing = true
       const s = readState()
       s.maximized = win.isMaximized()
       if (!s.maximized) s.bounds = win.getBounds()
       writeState(s)
       win.close()
-    }
-    ipcMain.once('app:flushed', (_e, ok: boolean) => finish(ok))
+    })
     send('app:flush', null)
   })
   win.webContents.setWindowOpenHandler(({ url }) => {

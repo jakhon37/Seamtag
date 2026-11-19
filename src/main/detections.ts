@@ -3,7 +3,7 @@
 // one object are dropped, and so are detections over shapes already drawn. Also osam's
 // non-maximum suppression, as ONNX Runtime's NonMaxSuppression runs it.
 import type { AiOutput } from '../shared/config'
-import { circleFromMask, type Grid, orientedRectFromMask, polygonsFromMask } from './polygonize'
+import { circleFromMask, type Grid, orientedRectFromMask, polygonsFromMask } from '../shared/polygonize'
 
 type Point = [number, number]
 

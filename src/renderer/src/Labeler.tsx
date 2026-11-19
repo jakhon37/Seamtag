@@ -3,7 +3,7 @@ import {
   Slash, Sparkles, Spline, Square, Trash2, Undo2, Wand2, X, Dot, ScanLine, Lock, BadgeCheck, RectangleHorizontal, Type, Focus
 } from 'lucide-react'
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { AI_OUTPUTS, type AiOutput, type Config, matches, type ShortcutName, shortcutList } from '../../shared/config'
+import { AI_OUTPUTS, type AiOutput, type Config, formatKeys, matches, type ShortcutName, shortcutList } from '../../shared/config'
 import {
   asBox, boxOf, FORMAT_NAMES, holdsBoxesOnly, keepsDifficult, keepsVerified, LABEL_FORMATS, type LabelFormat, NEXT_FORMAT
 } from '../../shared/formats'
@@ -13,14 +13,18 @@ import { labelColor, labelList, recolored, withAlpha, withClass } from './colors
 import { eraseShapes, paintShapes, strokeRegion } from './geometry'
 import LabelDialog, { flagsFor, type LabelChoice, type LabelRequest } from './LabelDialog'
 import { ContextMenu } from './Menu'
+import Modal from './Modal'
 import Models from './Models'
+import Problems, { counted, RenameDialog } from './Problems'
 import {
   addPointsToEdge, bounds, boxCenter, canRemovePoint, CLOSED, contains, describe, EDITABLE_POINTS, edges, insertPoint, mergePolygons,
   moveCorner, moveShapes, nearestEdge, nearestVertex, outline, type Pt, reprojectCorners, rotatePoints, rotationHandles, squareFrom, toEdge, vertices
 } from './shapes'
+import { Stale } from './stale'
+import Statistics from './Statistics'
 import {
-  type DrawnShape, fileUrl, type ImageItem, type LabelClass, type Loaded, type ModelInfo, type OpenImage, type OpenProject, plainError, type PrelabelModel,
-  type ProjectInfo, type ProposedShape, type RunModel
+  type CheckSummary, type DrawnShape, fileUrl, type ImageItem, type LabelClass, type Loaded, type ModelInfo, type OpenImage, type OpenProject, plainError,
+  type PrelabelModel, type ProblemRow, type ProjectInfo, type Progress, type ProposedShape, type RenameDone, type RunModel
 } from './types'
 
 export type Mode = 'edit' | 'polygon' | 'rectangle' | 'oriented_rectangle' | 'circle' | 'line' | 'point' | 'linestrip' | 'ai_points' | 'ai_box' | 'brush' | 'eraser'
@@ -50,7 +54,7 @@ export type Settings = {
   prelabelModel: string
   /** The pre-labelling model chosen for each folder: from its runs in the menu, or with Choose a model… */
   prelabelModels: Record<string, string>
-  docks: { files: boolean; labels: boolean; shapes: boolean; flags: boolean }
+  docks: { files: boolean; labels: boolean; shapes: boolean; flags: boolean; problems: boolean }
   dark: boolean
   /** Where new labels are saved; it follows the label file of the image opened, as in LabelImg */
   format: LabelFormat
@@ -68,15 +72,26 @@ export type Settings = {
 
 export type Command = { label: string; run: () => void; enabled?: () => boolean; checked?: () => boolean; shortcut?: ShortcutName; keys?: string }
 export type Commands = Record<string, Command>
-/**
- * `canLeave`: saves, or asks about, unsaved work; for another `folder`, a pre-label batch running
- * here stops first, if the user agrees. `show`: opens that image, once what's on screen is saved,
- * or asked about. `busy`: what here waits on the user, such as a dialog, which opening another
- * image or folder would cut short, said for the user; '' when nothing does.
- */
-export type LabelerHandle = { commands: Commands; canLeave: (folder?: boolean) => Promise<boolean>; show: (name: string) => void; busy: () => string }
+export type LabelerHandle = {
+  commands: Commands
+  /**
+   * Before another image or folder opens: the open image's changes are saved, or asked about;
+   * false when that's cancelled. With `stay`, as before the folder's label files are read, the
+   * image stays open, and changes let go are taken back: it's read again as saved. With `folder`,
+   * for another folder, a pre-label batch running here stops first, if the user agrees.
+   */
+  canLeave: (how?: { stay?: boolean; folder?: boolean }) => Promise<boolean>
+  /** Opens an image, once its changes are saved or let go, and brings one of its shapes into view selected */
+  showImage: (name: string, shape?: number) => Promise<void>
+  /** Label files written outside the window: their undo history is dropped and the open one is read again */
+  reloadImages: (names: string[]) => void
+  /** Opens that image, as a second start asks, once what's on screen is saved, or asked about */
+  show: (name: string) => void
+  /** What here waits on the user, such as a dialog, which opening another image or folder would cut short, said for the user; '' when nothing does */
+  busy: () => string
+}
 
-type Filter = 'all' | 'label' | 'review' | 'done'
+type Filter = 'all' | 'label' | 'review' | 'done' | 'problems'
 type Props = {
   data: OpenProject
   config: Config
@@ -86,6 +101,8 @@ type Props = {
   setProject: (p: ProjectInfo, shown?: LabelClass[]) => void
   setImages: (fn: (images: ImageItem[]) => ImageItem[]) => void
   discovered: string[]
+  /** A label no label file has any more, after a rename: it goes from those found in the files */
+  forgetLabel: (label: string) => void
   mac: boolean
   /** `image`: the image on screen the message is about, by its folder and name, so it goes once another image is */
   onError: (m: string, image?: string) => void
@@ -121,6 +138,8 @@ const FILTERS: { key: Filter; name: string; title: string; test: (i: ImageItem) 
   { key: 'review', name: 'Review', title: 'AI shapes to accept or reject', test: (i) => i.ai > 0 },
   { key: 'done', name: 'Done', title: 'Labelled, nothing left to review', test: (i) => i.labelled && !i.ai && !i.broken }
 ]
+/** A filter's count, as 12k past 9,999, so the five fit side by side in the Files dock */
+const few = (n: number) => (n < 10000 ? String(n) : n < 1e6 ? `${Math.floor(n / 1000)}k` : `${Math.floor(n / 1e5) / 10}M`)
 const percent = (score: number) => `${Math.round(score * 100)}%`
 const RELOADED = 'These labels changed in another app (such as Seamline), so they were reloaded.'
 const COLOR_TITLES = { line: 'Shape line colour', fill: 'Shape fill colour', draw: 'Box line colour' }
@@ -180,16 +199,17 @@ function maskCanvas(mask: string, color: string, onReady: () => void) {
 }
 
 const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
-  const { data, config, settings, setSettings, setProject, setImages, discovered, mac, onError, onShown, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
+  const { data, config, settings, setSettings, setProject, setImages, discovered, forgetLabel, mac, onError, onShown, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
   const { project, images, root } = data
   const [index, setIndex] = useState(() => Math.max(0, data.select ? images.findIndex((i) => i.name === data.select) : 0))
   const [query, setQuery] = useState(config.file_search ?? '')
   const [filter, setFilter] = useState<Filter>('all')
   const [sort, setSort] = useState<'name' | 'certainty'>('name')
   const [mode, setModeState] = useState<Mode>('polygon')
-  // The label new shapes get, by its name, as another app changing the folder's classes moves labels
-  // in the list: the list's first until one is picked, and null to be asked each time
-  const [picked, setPicked] = useState<string | null | undefined>(undefined)
+  // The label new shapes get, by name, so it stays the same label when the list changes under it, as a
+  // rename or another app changing the folder's classes changes it: the list's first until one is
+  // picked, and null to be asked each time
+  const [active, setActive] = useState<string | null | undefined>(undefined)
   const [shapes, setShapesState] = useState<Shape[]>([])
   const [selected, setSelectedState] = useState<number[]>([])
   const [imageFlags, setImageFlags] = useState<Record<string, boolean>>({})
@@ -225,6 +245,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   // Models Seamline exported from this folder's training runs, newest first; null until read
   const [runModels, setRunModels] = useState<RunModel[] | null>(null)
   const [dragOver, setDragOver] = useState<number | null>(null)
+  // Dataset > Check labels: the folder's last check, and one running (after saves, `quick`)
+  const [check, setCheck] = useState<CheckSummary | null>(null)
+  const [checking, setChecking] = useState<{ quick: boolean; progress: Progress | null } | null>(null)
+  const [problemsFolded, setProblemsFolded] = useState(false)
+  const [renaming, setRenaming] = useState<{ from: string; to: string } | null>(null)
+  const [statsOpen, setStatsOpen] = useState(false)
+  // Counts up when label files change outside the window's own saves, so Statistics reads them again
+  const [labelsChanged, setLabelsChanged] = useState(0)
   const [, setTick] = useState(0)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -238,6 +266,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const alive = useRef(true)
   const history = useRef(new Map<string, { undo: Shape[][]; redo: Shape[][] }>())
   const reviewOnLoad = useRef(false)
+  // A shape to select once its image has loaded, for showImage
+  const selectOnLoad = useRef<{ name: string; shape?: number } | null>(null)
   const reviewBack = useRef<string | null>(null)
   const undoOnLoad = useRef(false)
   const overCanvas = useRef(false)
@@ -287,6 +317,17 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   // A Fit to Selection put off until the mouse button is up and a double-click's time has passed
   const pendingFit = useRef(false)
   const fitTimer = useRef<ReturnType<typeof setTimeout>>()
+  const checkRef = useRef(check)
+  checkRef.current = check
+  const checkingRef = useRef(false)
+  const checkSeq = useRef(0)
+  // Images saved since the last check, whose problems are out of date until the next one
+  const stale = useRef(new Stale())
+  const recheckTimer = useRef<ReturnType<typeof setTimeout>>()
+  // Set each render: label files the window wrote, or saw written, put the last check out of date
+  const touched = useRef<(names: string[]) => void>(() => {})
+  // Waiting for an image to load, for a fix to another image than the one open
+  const loadWaits = useRef<{ name: string; done: (ok: boolean) => void }[]>([])
   // The list and the image picked in it, for work that finishes after a render
   const listRef = useRef({ images, index })
   listRef.current = { images, index }
@@ -302,13 +343,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   // The label list: config labels, then a Seamline project's classes, then labels found in the files
   const classes = useMemo(() => labelList(config, project.classes, [...discovered, ...shapes.map((s) => s.label)], keptLabels.current),
     [config, project.classes, discovered, shapes])
-  const pickedAt = picked ? classes.findIndex((c) => c.name === picked) : picked === undefined && classes.length ? 0 : -1
-  const activeClass = pickedAt >= 0 ? pickedAt : null
+  // A label gone from the list, as a class another app deleted, is picked again if it comes back; meanwhile new shapes ask for theirs
+  const activeAt = classes.findIndex((c) => c.name === active)
+  const activeClass = active === undefined ? 0 : activeAt < 0 ? null : activeAt
+  // The list's first label until one is picked, held by its name, so a label another app puts ahead of it doesn't take its place
   useEffect(() => {
-    if (picked === undefined && classes.length) setPicked(classes[0].name)
-    // Gone from the list, as a class another app deleted: new shapes ask for their label
-    else if (picked && !classes.some((c) => c.name === picked)) setPicked(null)
-  }, [classes, picked])
+    if (active === undefined && classes.length) setActive(classes[0].name)
+  }, [classes, active])
   const opts = useRef({ showShapes, settings, classes, mode, activeClass, brushSize, bc })
   opts.current = { showShapes, settings, classes, mode, activeClass, brushSize, bc }
   // labelme 7's allow_out_of_bounds_points: points may go past the image's edge
@@ -787,6 +828,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       const { item, replaced, kept, format } = result
       if (!target) setImages((all) => all.map((i) => (i.name === job.name ? { ...i, ...item } : i)))
+      if (!target) touched.current([job.name])
       if (!target && loadedName.current === job.name) {
         fileFormat.current = format
         if (switchedFrom.current === job.from) switchedFrom.current = null
@@ -857,7 +899,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }
 
   /** Before another image or folder opens: save, or ask when saving isn't automatic */
-  const canLeave = useCallback(async () => {
+  const canLeave = useCallback(async ({ stay = false }: { stay?: boolean } = {}) => {
     if (!dirty.current) return true
     if (settingsRef.current.autoSave) return flush()
     const name = loadedName.current
@@ -870,6 +912,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       pending.current = null
       dirty.current = false
       setSaved('saved')
+      // Staying on the image, the changes let go would be saved with the next: it's read again as saved
+      if (stay && loadedName.current === name) {
+        history.current.delete(name)
+        undo.current = []
+        redo.current = []
+        setReload((n) => n + 1)
+      }
       return true
     }
     return false
@@ -910,7 +959,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     }
     ;(async () => {
       await flush()
-      const copy = !again && (settingsRef.current.keepPrev || copyOnLoad.current)
+      // Never an image's own shapes, read again: changes let go would come back
+      const copy = !again && (settingsRef.current.keepPrev || copyOnLoad.current) && loadedName.current !== name
       copyOnLoad.current = false
       try {
         // Labels last: a big image can take a while, and pre-labelling may write meanwhile
@@ -1001,9 +1051,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         if (undoHere) stepHistory(undo, redo)
         const first = reviewOrder(shapesRef.current)[0]
         if ((fromReview || undoHere) && first !== undefined) selectForReview(first, shapesRef.current)
+        const pick = selectOnLoad.current
+        selectOnLoad.current = null
+        if (pick?.name === name && pick.shape !== undefined && shapesRef.current[pick.shape]) selectForReview(pick.shape, shapesRef.current)
         invalidate()
+        for (const w of loadWaits.current.splice(0)) w.done(w.name === name)
       } catch (e) {
         if (stale) return
+        for (const w of loadWaits.current.splice(0)) w.done(false)
         onError(`Could not open ${name}: ${plainError(e)}`)
         rememberHistory()
         reviewOnLoad.current = false
@@ -1069,6 +1124,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (changed && name === loadedName.current && idle()) reloadChanged(name)
     if (!found) return
     history.current.delete(name)
+    touched.current([name])
     if (name === loadedName.current) {
       // Anything being edited here wins: it saves over this result
       if (pending.current || drag.current || shapesRef.current.some((s) => !isAi(s))) return
@@ -1146,6 +1202,10 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (alive.current) refreshFolder()
   }), [root, idle, reloadChanged, onError, refreshFolder])
   useEffect(() => window.api.onAiDownload((p) => setDownload(p.done >= p.total ? null : p)), [])
+  useEffect(() => window.api.onCheck(({ root: at, ...p }) => {
+    if (at === root && checkingRef.current) setChecking((c) => c && { ...c, progress: p })
+  }), [root])
+  useEffect(() => () => clearTimeout(recheckTimer.current), [])
   // Fit to Selection follows the selection, as labelme 7 does: once the mouse button is up and a
   // double-click's time has passed, since a press that selects a shape may become a drag of it, or
   // the first click of a double-click, each measured in the view it started in
@@ -1243,7 +1303,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const next = [...shapesRef.current, ...list]
     setShapes(next)
     setSelected(list.map((_, k) => next.length - list.length + k))
-    if (classes.some((c) => c.name === label)) setPicked(label)
+    if (classes.some((c) => c.name === label)) setActive(label)
     // LabelImg's beginner mode: one shape, then back to editing
     if (!settingsRef.current.advanced) setMode('edit')
   }
@@ -1276,7 +1336,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const info = models?.find((x) => x.name === name)
     if (!info) return false
     if (info.downloaded) return true
-    const ok = await window.api.ask(`Download ${info.title}?`, `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once from the address labelme uses, and kept in ~/.cache/osam.`, ['Download', 'Cancel'])
+    const ok = await window.api.ask(`Download ${info.title}?`, `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once and kept in ~/.cache/osam, which labelme uses too.`, ['Download', 'Cancel'])
     if (ok !== 0) return false
     try {
       setBusyAi('Downloading the model…')
@@ -1738,7 +1798,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       // Painting with a shape selected continues that shape's class
       const label = (only !== null && list[only]?.label) || currentLabel()
       if (!label) return setNotice('Pick a class in the Labels list to paint with.')
-      if (classes.some((c) => c.name === label)) setPicked(label)
+      if (classes.some((c) => c.name === label)) setActive(label)
       setSelected([])
       setShapes(paintShapes(list, region, label))
     } catch (err) {
@@ -1803,7 +1863,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     setShapes(shapesRef.current.map((s, k) => (which.includes(k) ? { ...accepted(s), label, flags: { ...flagsFor(label, config.label_flags, s.flags), ...accepted(s).flags } } : s)))
   }
   const chooseClass = (i: number) => {
-    setPicked(classes[i].name)
+    setActive(classes[i].name)
     if (selectedRef.current.length) relabel(selectedRef.current, classes[i].name)
   }
 
@@ -1835,8 +1895,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     }))
   }
 
+  const problemImages = useMemo(() => new Set(check?.problemImages ?? []), [check])
   const visible = useMemo(() => {
-    const test = FILTERS.find((f) => f.key === filter)!.test
+    const test = filter === 'problems' ? (i: ImageItem) => problemImages.has(i.name) : FILTERS.find((f) => f.key === filter)!.test
     let match: (name: string) => boolean
     try {
       // labelme's file search is a regular expression; one that isn't valid filters as plain text
@@ -1851,7 +1912,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       list.sort((a, b) => rank(a.image) - rank(b.image) || a.i - b.i)
     }
     return list
-  }, [images, query, filter, sort])
+  }, [images, query, filter, sort, problemImages])
 
   // An image asked for from outside, as when Seamtag is started again on it: one another app added
   // since the list was read opens once the list is read again, unless another is opened first
@@ -1863,6 +1924,27 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     copyOnLoad.current = copy
     setIndex(i)
   }, [index, images.length, canLeave])
+  const showImage = async (name: string, shape?: number) => {
+    const i = images.findIndex((x) => x.name === name)
+    if (i < 0) return
+    if (i === index) {
+      if (loadedName.current !== name) selectOnLoad.current = { name, shape }
+      else if (shape !== undefined && shapesRef.current[shape]) selectForReview(shape, shapesRef.current)
+      return
+    }
+    if (!(await canLeave())) return
+    selectOnLoad.current = { name, shape }
+    copyOnLoad.current = false
+    setIndex(i)
+  }
+  const reloadImages = (names: string[]) => {
+    markStale(names)
+    for (const name of names) history.current.delete(name)
+    if (!names.includes(loadedName.current)) return
+    undo.current = []
+    redo.current = []
+    setReload((n) => n + 1)
+  }
   const show = (name: string) => {
     const i = images.findIndex((x) => x.name === name)
     // A dialog, a menu or a shape being drawn would be cut short, or a label given to the wrong image: it says so instead
@@ -2094,6 +2176,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       const gone = await window.api.trashLabels(root, name, formatRef.current)
       if (gone && typeof gone === 'object') return reloadChanged(name, 'Nothing was deleted.')
       history.current.delete(name)
+      markStale([name])
       fileFormat.current = null
       switchedFrom.current = null
       setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize([], false), broken: undefined, verified: undefined } : i)))
@@ -2214,6 +2297,167 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     }
   }
 
+  // Dataset > Check labels. The check runs in the main process, which keeps it; the Problems
+  // dock pages through it. A save puts an image's problems out of date, and a second after the
+  // last save the folder is checked again: only the images saved are read and measured again.
+  const listedLabels = useMemo(() => {
+    const list = [...new Set([...(config.labels ?? []), ...project.classes.map((c) => c.name)])]
+    return list.length ? list : null
+  }, [config.labels, project.classes])
+  // The label list as the check takes it: a change to it is checked again, as a save is
+  const labelKey = (listedLabels ?? []).join('\n')
+  const labelKeyRef = useRef(labelKey)
+  labelKeyRef.current = labelKey
+  const runCheck = async (quick: boolean) => {
+    clearTimeout(recheckTimer.current)
+    // One after saves waits for a check that's running: that one looks again once it's done. A
+    // window closed meanwhile, with its folder, checks nothing.
+    if ((quick && checkingRef.current) || !alive.current) return
+    const seq = ++checkSeq.current
+    const { names, upTo } = stale.current.begin()
+    // The list this check is given, which a later render may have changed already
+    const listed = labelKey
+    checkingRef.current = true
+    setChecking({ quick, progress: null })
+    let more = false
+    try {
+      const result = await window.api.checkRun(root, { prefer: formatRef.current, labels: listedLabels, ...(quick ? { saved: names } : {}) })
+      if (seq !== checkSeq.current || !alive.current) return
+      if ('stopped' in result) {
+        if (!quick) setNotice(checkRef.current ? 'Check stopped: the problems shown are from the check before.' : 'Check stopped.')
+        return
+      }
+      // Saves made while it ran are checked next, and a label list changed meanwhile
+      more = stale.current.settle(upTo) || labelKeyRef.current !== listed
+      checkRef.current = result
+      setCheck(result)
+    } catch (e) {
+      if (seq === checkSeq.current && alive.current) onError(`The labels couldn't be checked: ${plainError(e)}`)
+    } finally {
+      if (seq === checkSeq.current) {
+        checkingRef.current = false
+        setChecking(null)
+        if (more && alive.current) recheckTimer.current = setTimeout(() => runCheckRef.current(true), 1000)
+      }
+    }
+  }
+  const runCheckRef = useRef(runCheck)
+  runCheckRef.current = runCheck
+  // A label added to the list, or taken off it, changes which labels the check calls unknown: no file is read again
+  useEffect(() => {
+    if (!checkRef.current || checkingRef.current) return
+    clearTimeout(recheckTimer.current)
+    recheckTimer.current = setTimeout(() => runCheckRef.current(true), 1000)
+  }, [labelKey])
+  /** Label files changed: their images' problems are out of date until the check that follows a second later */
+  const markStale = (names: string[]) => {
+    // Before the first check there's nothing to put out of date, unless it's running; nor once the window has closed
+    if ((!checkRef.current && !checkingRef.current) || !names.length || !alive.current) return
+    stale.current.mark(names)
+    setTick((t) => t + 1)
+    clearTimeout(recheckTimer.current)
+    if (!checkingRef.current) recheckTimer.current = setTimeout(() => runCheckRef.current(true), 1000)
+  }
+  touched.current = markStale
+  const checkLabels = async () => {
+    if (!(await canLeave({ stay: true }))) return
+    setSettings((s) => ({ ...s, docks: { ...s.docks, problems: true } }))
+    setProblemsFolded(false)
+    runCheck(false)
+  }
+  const whenLoaded = (name: string) => new Promise<boolean>((done) => loadWaits.current.push({ name, done }))
+  /**
+   * A safe fix, made to the image's shapes as they are in the window, as an edit Ctrl+Z
+   * undoes. Another image than the one open opens first. The main process checks the shapes
+   * again and fixes only a problem that's still there.
+   */
+  const fixProblem = async (row: ProblemRow) => {
+    const name = row.image
+    if (!name || row.shape === undefined) return
+    if (loadedName.current !== name) {
+      const i = images.findIndex((x) => x.name === name)
+      // Still loading: it can be fixed once it's open
+      if (i < 0 || i === index || !(await canLeave())) return
+      const loaded = whenLoaded(name)
+      selectOnLoad.current = { name, shape: row.shape }
+      copyOnLoad.current = false
+      setIndex(i)
+      if (!(await loaded)) return
+    }
+    if (readOnlyRef.current) return
+    const before = shapesRef.current
+    let next: Shape[] | null
+    try {
+      next = await window.api.checkFix(root, { code: row.code, image: name, shape: row.shape }, before)
+    } catch (e) {
+      return onError(`It couldn't be fixed: ${plainError(e)}`)
+    }
+    // Changed meanwhile: the next check says what's left
+    if (loadedName.current !== name || shapesRef.current !== before) return
+    if (!next) {
+      // Changes the check hasn't seen: the saved file is checked once they're in it
+      if (dirty.current) return setNotice("That problem isn't in the image as it is now. It's checked again once the image is saved.")
+      setNotice("That problem isn't in the image as it is now, so it's checked again.")
+      return markStale([name])
+    }
+    const removed = before.length - next.length
+    // The save that follows puts its problems out of date; until then they're shown as not saved
+    setShapes(next)
+    setSelected(row.code === 'duplicate-shape' || !next[row.shape] ? [] : [row.shape])
+    const undoKeys = formatKeys(config.shortcuts.undo, mac)
+    const what = row.code === 'duplicate-shape' ? `Deleted ${counted(removed, 'exact copy', 'exact copies')} of a shape.`
+      : row.code === 'repeated-points' ? `Took the repeated points out of shape ${row.shape + 1}; its outline is as it was.`
+        : `Clipped shape ${row.shape + 1} to the image.`
+    const then = settingsRef.current.autoSave ? '' : " It's checked again once saved."
+    setNotice(`${what}${undoKeys ? ` ${undoKeys} undoes it.` : ''}${then}`)
+  }
+  /** Rename a label across the folder: the open image's changes are saved first, so the plan reads them */
+  const openRename = async (from: string, to = '') => {
+    if (!(await canLeave({ stay: true }))) return
+    setRenaming({ from, to })
+  }
+  const renamed = (from: string, done: RenameDone & { to: string }) => {
+    // The folder closed while it ran: what's said and changed here would be about another one
+    if (!alive.current) return
+    const { to } = done
+    setRenaming(null)
+    // The project's label list follows once no label file has the old name: it gives way to the new, keeping its colour
+    const has = (n: string) => project.classes.some((c) => c.name === n)
+    if (has(from) && !done.left && done.changed.length) {
+      setProject({ ...project, classes: has(to) ? project.classes.filter((c) => c.name !== from) : project.classes.map((c) => (c.name === from ? { ...c, name: to } : c)) })
+    }
+    // So do the labels found in the files, and the label new shapes get. The config's labels stay listed.
+    if (!done.left && done.changed.length) {
+      forgetLabel(from)
+      // The label list keeps its order: the new name takes the old one's place
+      const kept = keptLabels.current
+      if (kept) keptLabels.current = kept.includes(to) ? kept.filter((l) => l !== from) : kept.map((l) => (l === from ? to : l))
+      setActive((a) => ((a === undefined ? classes[0]?.name : a) === from ? to : a))
+    }
+    if (done.changed.length) reloadImages(done.changed)
+    setLabelsChanged((n) => n + 1)
+    const told = [`${done.stopped ? 'Stopped after renaming' : 'Renamed'} ${counted(done.shapes, 'shape')} in ${counted(done.changed.length, 'image')} from “${from}” to “${to}”.`]
+    // Why files were left alone: one that can't be read is left whatever it holds, and isn't to be taken for one with the label
+    const { unreadable, shared, file } = done.skipped
+    if (unreadable) {
+      told.push(file ? `${file} can't be read, so it was left alone.` : `${counted(unreadable, "label file that can't be read was", "label files that can't be read were")} left alone.`)
+    }
+    if (shared) {
+      told.push(file ? `${file} holds the labels of several images, so it was left alone.`
+        : `${counted(shared, 'label file that several images share was', 'label files that several images share were')} left alone.`)
+    }
+    if (has(from) && done.left) told.push(`“${from}” stays in the label list while ${counted(done.left, 'image has', 'images have')} it.`)
+    setNotice(told.join(' '))
+    if (done.failed.length) {
+      const [first] = done.failed
+      onError(`${counted(done.failed.length, "label file couldn't", "label files couldn't")} be renamed. ${first.name}: ${first.reason}`)
+    }
+  }
+  const openStats = async () => {
+    if (!(await canLeave({ stay: true }))) return
+    setStatsOpen(true)
+  }
+
   const addClass = () => {
     const name = newClass.trim()
     if (!name || classes.some((c) => c.name === name)) return
@@ -2222,7 +2466,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     // The folder's classes and this label: the list's other labels aren't classes, and stay in their places
     keptLabels.current = [...classes.map((c) => c.name), name]
     setProject({ ...project, classes: withClass(project.classes, name, color) }, classes)
-    setPicked(name)
+    setActive(name)
     setNewClass('')
   }
   const recolor = (name: string, color: string) => {
@@ -2345,6 +2589,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       return onError(`It couldn't be moved to the trash: ${plainError(e)}`)
     }
     history.current.delete(name)
+    markStale([name])
     const left = images.length - 1
     setImages((all) => all.filter((i) => i.name !== name))
     setIndex((i) => Math.max(0, Math.min(i, left - 1)))
@@ -2502,6 +2747,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     review_accept_all: { label: 'Accept all here, then next', run: acceptAll, shortcut: 'review_accept_all' },
     order_certainty: { label: 'Least certain first', run: () => setSort((s) => (s === 'certainty' ? 'name' : 'certainty')), checked: () => sort === 'certainty' },
     prelabel_pick: { label: 'Choose a model…', run: pickModel },
+    check_labels: { label: 'Check labels', run: checkLabels, enabled: () => images.length > 0 },
+    dataset_stats: { label: 'Statistics…', run: openStats, enabled: () => images.length > 0 },
     ai_models: { label: 'AI models…', run: () => setModelsOpen(true), enabled: () => !!models },
     prelabel_one: { label: 'Pre-label this image', run: prelabelOne, enabled: () => has() && !batch && !busyAi && !boxesOnly },
     prelabel_all: { label: `Pre-label ${toPrelabel.length} images`, run: prelabelAll, enabled: () => !batch && toPrelabel.length > 0 && !boxesOnly },
@@ -2536,12 +2783,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }
   const commandsRef = useRef(commands)
   commandsRef.current = commands
-  const showRef = useRef(show)
-  showRef.current = show
+  const handleRef = useRef({ showImage, reloadImages, show })
+  handleRef.current = { showImage, reloadImages, show }
   useImperativeHandle(ref, () => ({
     get commands() { return commandsRef.current },
-    canLeave: (folder = false) => (folder ? canLeaveFolder() : canLeave()),
-    show: (name: string) => showRef.current(name),
+    canLeave: (how = {}) => (how.folder ? canLeaveFolder() : canLeave(how)),
+    showImage: (name, shape) => handleRef.current.showImage(name, shape),
+    reloadImages: (names) => handleRef.current.reloadImages(names),
+    show: (name) => handleRef.current.show(name),
     busy
   }), [canLeave, canLeaveFolder, busy])
 
@@ -2560,6 +2809,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       if (target.closest?.('.menubar, .menu')) return
       if (target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || (target.tagName === 'INPUT' && (target as HTMLInputElement).type !== 'range' && (target as HTMLInputElement).type !== 'checkbox')) return
+      // Tab moves the focus through the docks' controls: only from the canvas, or with nothing focused, does it skip an AI shape
+      if (e.key === 'Tab' && target !== document.body && target !== canvasRef.current) return
+      // Enter and Space press the Problems dock's buttons and tick its box, as they would anywhere, rather than finish a shape or verify the image.
+      // A click on a row leaves the focus here, so Space held down still pans under a drag, which takes the focus to the canvas: the button isn't pressed
+      if ((e.key === 'Enter' || e.code === 'Space') && target.closest?.('section.problems') && (target.tagName === 'BUTTON' || target.tagName === 'INPUT')) {
+        if (e.code === 'Space') { space.current = e.type === 'keydown'; spaceTap.current = null }
+        return
+      }
       if (e.code === 'Space') {
         e.preventDefault()
         if (e.type === 'keydown') {
@@ -2673,6 +2930,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }, [images])
   const largest = Math.max(1, ...Object.values(totals))
   const tally = (test: (i: ImageItem) => boolean) => images.filter(test).length
+  const problemCount = check ? tally((i) => problemImages.has(i.name)) : 0
   const doneShare = images.length ? tally(FILTERS[3].test) / images.length : 0
   const reviewShare = images.length ? tally(FILTERS[2].test) / images.length : 0
   const current = selected.length === 1 && shapes[selected[0]] && isAi(shapes[selected[0]]) ? shapes[selected[0]] : null
@@ -2707,11 +2965,19 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
             <i className="review" style={{ width: `${reviewShare * 100}%` }} />
           </div>
           <div className="seg small filters">
-            {FILTERS.map((f) => (
-              <button key={f.key} className={filter === f.key ? 'on' : ''} onClick={() => setFilter(f.key)} title={f.title}>
-                <b>{tally(f.test)}</b>{f.name}
-              </button>
-            ))}
+            {FILTERS.map((f) => {
+              const n = tally(f.test)
+              return (
+                <button key={f.key} className={filter === f.key ? 'on' : ''} onClick={() => setFilter(f.key)} title={`${f.title}${n > 9999 ? `: ${n.toLocaleString('en-GB')}` : ''}`}>
+                  <b>{few(n)}</b><span>{f.name}</span>
+                </button>
+              )
+            })}
+            <button className={filter === 'problems' ? 'on' : ''} onClick={() => setFilter('problems')} disabled={!check}
+              title={check ? `An error or a warning in the last check${problemCount > 9999 ? `: ${problemCount.toLocaleString('en-GB')}` : ''}`
+                : 'Check the labels first: Dataset > Check labels'}>
+              <b>{check ? few(problemCount) : '–'}</b><span>Problems</span>
+            </button>
           </div>
           <label className="sort">Order
             <select value={sort} onChange={(e) => { setSort(e.target.value as typeof sort); e.target.blur() }}>
@@ -2877,7 +3143,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         </footer>
       </main>
 
-      {(settings.docks.labels || settings.docks.flags || settings.docks.shapes) && (
+      {(settings.docks.labels || settings.docks.flags || settings.docks.shapes || settings.docks.problems) && (
         <aside className="panel right">
           {settings.docks.labels && (
             <section aria-label="Labels">
@@ -2885,7 +3151,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
               <div className="classes">
                 {classes.map((c, i) => (
                   <div key={c.name} className={`class ${i === activeClass ? 'on' : ''}`} role="button" tabIndex={0}
-                    onClick={() => (i === activeClass && !selected.length ? setPicked(null) : chooseClass(i))}
+                    onClick={() => (i === activeClass && !selected.length ? setActive(null) : chooseClass(i))}
                     title={i === activeClass ? 'New shapes get this label. Click again to be asked each time.' : 'Label new shapes with this'}>
                     <label className="swatch" style={{ background: c.color }} onClick={(e) => e.stopPropagation()} title="Change colour">
                       <input type="color" value={c.color} onChange={(e) => recolor(c.name, e.target.value)} aria-label={`Colour of ${c.name}`} />
@@ -2990,6 +3256,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
               )}
             </section>
           )}
+          {settings.docks.problems && (
+            <Problems root={root} current={images[index]?.name ?? null} summary={check} running={checking} stale={stale.current}
+              unsaved={saved !== 'saved' && !readOnly && loadedName.current ? loadedName.current : null}
+              folded={problemsFolded} onFold={() => setProblemsFolded((f) => !f)} onCheck={checkLabels} onStop={() => window.api.checkStop(root)}
+              onClose={() => setSettings((s) => ({ ...s, docks: { ...s.docks, problems: false } }))}
+              onShow={(row) => row.image && showImage(row.image, row.shape)} onFix={fixProblem}
+              onRename={(row) => row.label !== undefined && openRename(row.label, row.to ?? '')}
+              onReveal={(file) => window.api.checkReveal(root, file)} />
+          )}
         </aside>
       )}
 
@@ -3007,24 +3282,20 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
           }} />
       )}
       {pointsPrompt && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setPointsPrompt(null)}>
-          <form className="dialog small" onSubmit={(e) => {
-            e.preventDefault()
-            const n = Math.max(1, Math.min(100, Math.round(pointsPrompt.count)))
-            const s = shapesRef.current[pointsPrompt.shape]
-            if (s) setShapes(shapesRef.current.map((q, i) => (i === pointsPrompt.shape ? addPointsToEdge(q, pointsPrompt.edge, n) : q)))
-            setPointsPrompt(null)
-          }}>
-            <label>Points to add along this edge
-              <input type="number" min={1} max={100} autoFocus value={pointsPrompt.count} onChange={(e) => setPointsPrompt({ ...pointsPrompt, count: +e.target.value })}
-                onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setPointsPrompt(null) }} />
-            </label>
-            <div className="actions">
-              <button type="button" className="ghost" onClick={() => setPointsPrompt(null)}>Cancel</button>
-              <button className="primary">Add</button>
-            </div>
-          </form>
-        </div>
+        <Modal label="Add points to edge" className="small" onClose={() => setPointsPrompt(null)} onSubmit={() => {
+          const n = Math.max(1, Math.min(100, Math.round(pointsPrompt.count)))
+          const s = shapesRef.current[pointsPrompt.shape]
+          if (s) setShapes(shapesRef.current.map((q, i) => (i === pointsPrompt.shape ? addPointsToEdge(q, pointsPrompt.edge, n) : q)))
+          setPointsPrompt(null)
+        }}>
+          <label>Points to add along this edge
+            <input type="number" min={1} max={100} autoFocus value={pointsPrompt.count} onChange={(e) => setPointsPrompt({ ...pointsPrompt, count: +e.target.value })} />
+          </label>
+          <div className="actions">
+            <button type="button" className="ghost" onClick={() => setPointsPrompt(null)}>Cancel</button>
+            <button className="primary">Add</button>
+          </div>
+        </Modal>
       )}
       {modelsOpen && models && (
         <Models models={models} progress={download} onClose={() => setModelsOpen(false)} onLink={(url) => window.api.openLink(url)}
@@ -3043,36 +3314,39 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
           }} />
       )}
       {bcOpen && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setBcOpen(false)}>
-          <div className="dialog small" role="dialog" aria-label="Brightness and contrast" onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setBcOpen(false) }}>
-            {(['brightness', 'contrast'] as const).map((k) => (
-              <label key={k} className="slider wide">{k[0].toUpperCase() + k.slice(1)}
-                <input type="range" min={0} max={3} step={0.02} value={bc[k]} aria-label={k} onChange={(e) => setBc({ ...bc, [k]: +e.target.value })} />
-                <span className="muted">{Math.round(bc[k] * 100)}%</span>
-              </label>
-            ))}
-            <div className="actions">
-              <button className="ghost" onClick={() => setBc({ brightness: 1, contrast: 1 })}>Reset</button>
-              <button className="primary" onClick={() => setBcOpen(false)}>Done</button>
-            </div>
+        <Modal label="Brightness and contrast" className="small" onClose={() => setBcOpen(false)}>
+          {(['brightness', 'contrast'] as const).map((k) => (
+            <label key={k} className="slider wide">{k[0].toUpperCase() + k.slice(1)}
+              <input type="range" min={0} max={3} step={0.02} value={bc[k]} aria-label={k} onChange={(e) => setBc({ ...bc, [k]: +e.target.value })} />
+              <span className="muted">{Math.round(bc[k] * 100)}%</span>
+            </label>
+          ))}
+          <div className="actions">
+            <button className="ghost" onClick={() => setBc({ brightness: 1, contrast: 1 })}>Reset</button>
+            <button className="primary" onClick={() => setBcOpen(false)}>Done</button>
           </div>
-        </div>
+        </Modal>
       )}
       {colorPrompt && (
-        <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && setColorPrompt(null)}>
-          <form className="dialog small" role="dialog" aria-label={COLOR_TITLES[colorPrompt.kind]}
-            onSubmit={(e) => { e.preventDefault(); setColor(colorPrompt.kind, colorPrompt.value) }}
-            onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') setColorPrompt(null) }}>
-            <label className="slider wide">{COLOR_TITLES[colorPrompt.kind]}
-              <input type="color" value={colorPrompt.value} aria-label="Colour" autoFocus onChange={(e) => setColorPrompt({ ...colorPrompt, value: e.target.value })} />
-            </label>
-            <div className="actions">
-              <button type="button" className="ghost" onClick={() => setColor(colorPrompt.kind, null)}>Label's colour</button>
-              <button type="button" className="ghost" onClick={() => setColorPrompt(null)}>Cancel</button>
-              <button className="primary">OK</button>
-            </div>
-          </form>
-        </div>
+        <Modal label={COLOR_TITLES[colorPrompt.kind]} className="small" onClose={() => setColorPrompt(null)} onSubmit={() => setColor(colorPrompt.kind, colorPrompt.value)}>
+          <label className="slider wide">{COLOR_TITLES[colorPrompt.kind]}
+            <input type="color" value={colorPrompt.value} aria-label="Colour" autoFocus onChange={(e) => setColorPrompt({ ...colorPrompt, value: e.target.value })} />
+          </label>
+          <div className="actions">
+            <button type="button" className="ghost" onClick={() => setColor(colorPrompt.kind, null)}>Label's colour</button>
+            <button type="button" className="ghost" onClick={() => setColorPrompt(null)}>Cancel</button>
+            <button className="primary">OK</button>
+          </div>
+        </Modal>
+      )}
+      {statsOpen && (
+        <Statistics root={root} prefer={settings.format} labels={listedLabels} colorOf={colorOf} version={labelsChanged}
+          onRename={(label) => openRename(label)} onError={onError} onClose={() => setStatsOpen(false)} />
+      )}
+      {renaming && (
+        <RenameDialog root={root} from={renaming.from} to={renaming.to} prefer={settings.format} labels={classes.map((c) => c.name)} totals={totals}
+          allowed={config.validate_label === 'exact' ? config.labels ?? [] : null} canLeave={() => canLeave({ stay: true })}
+          onClose={(done) => (done ? renamed(renaming.from, done) : setRenaming(null))} />
       )}
       {ghostMenu && (
         <ContextMenu at={ghostMenu} items={['copy_here', 'move_here']} config={config} mac={mac}

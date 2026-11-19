@@ -1,5 +1,5 @@
 import { createHash } from 'crypto'
-import { existsSync, promises as fs } from 'fs'
+import { constants, existsSync, promises as fs } from 'fs'
 import path from 'path'
 import {
   addClasses, FORMAT_EXT, FORMAT_NAMES, type LabelFormat, looksLikeCreateML, readClasses, readCreateML, readVoc, readYolo, removeCreateML, writeClasses,
@@ -7,9 +7,17 @@ import {
 } from '../shared/formats'
 import { FORMAT_VERSION, isAi, type LabelDoc, LabelFileError, parseLabelFile, serializeLabelFile, type Shape } from '../shared/labelfile'
 import { EMPTY_SUMMARY, hasArea, type Summary, summarize } from '../shared/labels'
+import { nameKey } from './names'
 
 // What Chromium or libvips can show. labelme takes whatever Qt can read, which is much the same.
 export const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.jfif', '.png', '.bmp', '.gif', '.tif', '.tiff', '.webp', '.avif'])
+
+/**
+ * The image list's order: numbers in names by their value, so img_2 comes before img_10. One
+ * collator for every comparison: localeCompare with options makes a new one each time, which
+ * took seconds to sort a folder of 100,000 images.
+ */
+export const nameOrder = new Intl.Collator(undefined, { numeric: true }).compare
 
 export type LabelClass = { name: string; color: string }
 export type ProjectInfo = { name: string; classes: LabelClass[] }
@@ -42,6 +50,8 @@ type Root = {
   dir: string; outputDir: string | null; outputFile: string | null; images: Map<string, ImageItem>; embedded: Map<string, string>
   /** File names, without extensions, that more than one image has, in different folders */
   shared: Set<string>
+  /** How many images have each path without its extension, as the file system compares names: a.jpg and a.png share a.json */
+  stems: Map<string, number>
   /** The image whose labels the window opened last, to edit */
   editing: string | null
   /** Each image's label files as they were when the window was last told of them, so a refresh tells only changes */
@@ -58,6 +68,8 @@ export function serial<T>(fn: () => Promise<T>) {
   writes = result.catch(() => {})
   return result
 }
+/** Runs fn at once: for work already in serial()'s turn, which would wait for itself there */
+export const inTurn = <T>(fn: () => Promise<T>) => fn()
 
 const posix = (p: string) => p.split(path.sep).join('/')
 export const meta = (root: string, ...p: string[]) => path.join(root, '.myseg', ...p)
@@ -80,6 +92,19 @@ export function imagePath(dir: string, name: string): string {
 export function isEmbedded(dir: string, name: string) {
   return getRoot(dir).embedded.has(name)
 }
+
+/** The one -O file every image's labels go to, when the folder was opened with one */
+export const outputFileOf = (dir: string) => getRoot(dir).outputFile
+
+/** Has another image of the folder this one's path but for its extension, as a.jpg and a.png have? */
+export const sharesStem = (dir: string, name: string) => (getRoot(dir).stems.get(nameKey(stemOf(name))) ?? 0) > 1
+
+/**
+ * An open folder as this opening of it, for what whole-folder passes keep of it: each opening
+ * is a new one, so what they keep goes with the folder when it's closed, however late a pass
+ * that was reading it ends. Undefined when it isn't open.
+ */
+export const opening = (dir: string): object | undefined => roots.get(dir)
 
 /** Where an image's labels live in a format: beside it, or in the output folder. */
 export function labelPath(dir: string, name: string, format: LabelFormat = 'labelme'): string {
@@ -216,13 +241,22 @@ let trash = (file: string) => fs.rm(file, { force: true })
 export function setTrash(fn: (file: string) => Promise<void>) {
   trash = fn
 }
+/** Moves a file to the trash the window set, where it can be restored from */
+export const sendToTrash = (file: string) => trash(file)
 
 export function rootsOpen() {
   return [...roots.keys()]
 }
 
-// One collator for the whole sort: localeCompare with options makes one for every comparison
-const byName = new Intl.Collator(undefined, { numeric: true }).compare
+/**
+ * An open folder as a whole-folder pass reads it: its images in list order, where their
+ * labels go (-O folder or file), the images kept inside their label files, and the file names
+ * that more than one image has
+ */
+export function folderOf(dir: string) {
+  const r = getRoot(dir)
+  return { dir: r.dir, images: [...r.images.keys()], outputDir: r.outputDir, outputFile: r.outputFile, embedded: new Map(r.embedded), shared: new Set(r.shared) }
+}
 
 async function scan(dir: string): Promise<string[]> {
   const found: string[] = []
@@ -242,7 +276,7 @@ async function scan(dir: string): Promise<string[]> {
     }
   }
   await walk('')
-  return found.sort(byName)
+  return found.sort(nameOrder)
 }
 
 export async function readText(file: string): Promise<string | null> {
@@ -260,15 +294,67 @@ export async function readDoc(file: string): Promise<LabelDoc | null> {
   return text === null ? null : parseLabelFile(text)
 }
 
+// On Windows an antivirus scanner, the search indexer or a sync client such as OneDrive can hold a
+// file that was just written for a moment, and renaming it, or a folder holding it, fails with
+// EPERM, EACCES or EBUSY until they let go. As graceful-fs does for npm, such a rename is tried
+// again, here for a few seconds; anywhere else those errors don't pass, so they're thrown at once.
+const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY'])
+export async function renameRetrying(from: string, to: string, patience = 5000) {
+  const start = Date.now()
+  for (let wait = 10; ; wait = Math.min(wait + 10, 100)) {
+    try {
+      return await fs.rename(from, to)
+    } catch (e) {
+      if (process.platform !== 'win32' || !BUSY.has((e as NodeJS.ErrnoException).code ?? '') || Date.now() - start >= patience) throw e
+      await new Promise((resolve) => setTimeout(resolve, wait))
+    }
+  }
+}
+
 export async function writeAtomic(file: string, text: string) {
   await fs.mkdir(path.dirname(file), { recursive: true })
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
-  await fs.writeFile(tmp, text)
   try {
-    await fs.rename(tmp, file)
+    await fs.writeFile(tmp, text)
+    await renameRetrying(tmp, file)
   } catch (e) {
     await fs.rm(tmp, { force: true })
     throw e
+  }
+}
+
+/**
+ * Writes a file in place of one that goes to the trash, where it can be restored from. The new
+ * text is written beside the old file first, so a full disk leaves that as it was; then the old
+ * file goes to the trash and the new one takes its name. Should something hold the new file
+ * past renameRetrying's patience, it's copied into place instead, which needs only to read it:
+ * the image is never left with its labels in the trash alone.
+ */
+export async function writeTrashing(file: string, text: string) {
+  const base = path.basename(file)
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  try {
+    await fs.writeFile(tmp, text)
+  } catch (e) {
+    await fs.rm(tmp, { force: true })
+    throw new Error(`${base}'s new labels couldn't be written, so it's left unchanged: ${(e as Error).message}`)
+  }
+  try {
+    await trash(file)
+  } catch (e) {
+    await fs.rm(tmp, { force: true })
+    throw new Error(`${base} couldn't go to the trash, so it's left unchanged: ${(e as Error).message}`)
+  }
+  try {
+    await renameRetrying(tmp, file)
+  } catch (e) {
+    try {
+      // Never over a file that has taken the name since
+      await fs.copyFile(tmp, file, constants.COPYFILE_EXCL)
+    } catch {
+      throw new Error(`${base} is in the trash, but its new labels couldn't take its name: they're in ${tmp} (${(e as Error).message})`)
+    }
+    await fs.rm(tmp, { force: true, maxRetries: 3 }).catch(() => {})
   }
 }
 
@@ -461,6 +547,16 @@ function sharedStems(names: string[]) {
   return shared
 }
 
+/** How many images have each path without its extension, as the file system compares names */
+function stemCounts(names: string[]) {
+  const stems = new Map<string, number>()
+  for (const name of names) {
+    const stem = nameKey(stemOf(name))
+    stems.set(stem, (stems.get(stem) ?? 0) + 1)
+  }
+  return stems
+}
+
 /** A label file opened on its own: its image, or the image inside it */
 async function imageOfLabelFile(file: string) {
   const doc = await readDoc(file)
@@ -521,7 +617,7 @@ export async function openProject(target: string, output: string | null, started
   const outputFile = output && output.toLowerCase().endsWith('.json') ? path.resolve(output) : null
   const outputDir = output && !outputFile ? path.resolve(output) : null
   names ??= await scan(dir)
-  const r: Root = { dir, outputDir, outputFile, images: new Map(), embedded: new Map(), shared: new Set(), editing: null, sent: new Map(), classes: [] }
+  const r: Root = { dir, outputDir, outputFile, images: new Map(), embedded: new Map(), shared: new Set(), stems: new Map(), editing: null, sent: new Map(), classes: [] }
   if (embeddedFile) {
     const name = posix(path.relative(dir, embeddedFile))
     r.embedded.set(name, embeddedFile)
@@ -529,6 +625,7 @@ export async function openProject(target: string, output: string | null, started
     select = name
   }
   r.shared = sharedStems(names)
+  r.stems = stemCounts(names)
   roots.set(dir, r)
   // Which images have labels, by their folders' listings: asked file by file, a big folder on a network
   // share keeps the main process from answering for as long as all those questions take
@@ -592,6 +689,7 @@ export async function refreshProject(dir: string) {
       r.sent.delete(name)
     }
     r.shared = sharedStems(names)
+    r.stems = stemCounts(names)
     const added: ImageItem[] = []
     for (const name of names) {
       if (r.images.has(name)) continue
@@ -626,11 +724,13 @@ function listings() {
 }
 
 /** `changedOnly` after a refresh: only images whose label files changed since the window was last told are sent */
+// `only` names the images to count again, after their label files were written outside the window
 export async function summarizeAll(
-  dir: string, send: (batch: { root: string; items: ImageItem[]; labels: string[] }) => void, prefer: LabelFormat = 'labelme', changedOnly = false
+  dir: string, send: (batch: { root: string; items: ImageItem[]; labels: string[] }) => void, prefer: LabelFormat = 'labelme', changedOnly = false,
+  only?: string[]
 ) {
   const r = getRoot(dir)
-  const names = [...r.images.keys()]
+  const names = only ? only.filter((n) => r.images.has(n)) : [...r.images.keys()]
   let batch: ImageItem[] = []
   let labels = new Set<string>()
   let last = Date.now()
@@ -724,14 +824,15 @@ const unreadable = (file: string, e: unknown, as = '') =>
 /**
  * Saves in the image's format. labelme's own is merged into what the file holds so unknown
  * keys survive; LabelImg's are written whole, as LabelImg writes them. A file that can't be
- * read in its format is never written over.
+ * read in its format is never written over. `queue` is inTurn for a caller that reads and
+ * writes an image's labels in one serial() turn of its own.
  */
-export async function saveLabels(dir: string, name: string, req: SaveRequest, fromImage: FromImage = {}): Promise<Saved> {
+export async function saveLabels(dir: string, name: string, req: SaveRequest, fromImage: FromImage = {}, queue: typeof serial = serial): Promise<Saved> {
   const r = getRoot(dir)
   const embedded = r.embedded.has(name)
   // An image kept inside its label file can only be saved there
   const format: LabelFormat = embedded ? 'labelme' : req.format ?? 'labelme'
-  return serial(async () => {
+  return queue(async () => {
     const file = req.target ? path.resolve(req.target) : labelPath(dir, name, format)
     const image = imagePath(dir, name)
     const verified = !!req.verified
@@ -765,6 +866,13 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
     const imageData = fromImage.imageData ? await fromImage.imageData() : req.imageData
     const text = await readText(file)
     let replaced: string | undefined
+    // A file of the other format that has the name gives way: it goes to the trash once the new one is written beside it
+    let givesWay = false
+    const put = async (out: string) => {
+      if (!givesWay) return writeAtomic(file, out)
+      await writeTrashing(file, out)
+      replaced = file
+    }
     if (format === 'labelme') {
       let doc: LabelDoc | null = null
       if (text !== null && looksLikeCreateML(text)) {
@@ -776,9 +884,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
           throw unreadable(file, e)
         }
         if (rest !== null) throw new Error(`${path.basename(file)} holds CreateML labels of other images too, so it's left unchanged`)
-        await trash(file)
-        if (own) await wrote(dir, name, file, 'createml')
-        replaced = file
+        givesWay = true
       } else if (text !== null) {
         try {
           doc = parseLabelFile(text)
@@ -789,7 +895,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
       const other = { ...(doc?.other ?? {}) }
       if (verified) other.verified = true
       else delete other.verified
-      await writeAtomic(file, serializeLabelFile({
+      await put(serializeLabelFile({
         version: doc?.version ?? FORMAT_VERSION,
         flags: req.flags,
         shapes: req.shapes,
@@ -841,9 +947,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
         } catch (e) {
           throw unreadable(file, e)
         }
-        await trash(file)
-        if (own) await wrote(dir, name, file, 'labelme')
-        replaced = file
+        givesWay = true
       }
       let out: string
       try {
@@ -851,7 +955,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
       } catch (e) {
         throw unreadable(file, e, ' as CreateML')
       }
-      await writeAtomic(file, out)
+      await put(out)
     }
     if (own) {
       const stamp = await wrote(dir, name, file, format)
@@ -945,7 +1049,10 @@ export async function trashImage(dir: string, name: string) {
     if (isYolo(labelPath(dir, name, 'yolo'))) labels.push({ format: 'yolo', file: labelPath(dir, name, 'yolo') })
     // The image first: if it can't go, its labels stay with it
     await trash(image)
-    r.images.delete(name)
+    if (r.images.delete(name)) {
+      const stem = nameKey(stemOf(name))
+      r.stems.set(stem, Math.max(0, (r.stems.get(stem) ?? 0) - 1))
+    }
     r.sent.delete(name)
     const kept: string[] = []
     for (const found of labels) {

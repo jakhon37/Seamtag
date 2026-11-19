@@ -10,6 +10,16 @@
   --selected: #dbe7ff; --canvas: #d7dadf; --menu: #ffffff; --shadow: #0003;
   color-scheme: light;
 }
+/* Amber for words and icons: the light theme's is too pale for either on white */
+:root { --warn-text: var(--warn); }
+:root[data-theme="light"] { --warn-text: #8a5c00; }
+/* Muted words on a chosen row: the muted grey falls under 4.5:1 on the selection's blue */
+:root { --muted-on-selected: #b4bac4; }
+:root[data-theme="light"] { --muted-on-selected: #4b5563; }
+/* Words on the page's grey and the raised grey, as under the pointer: the muted grey, the blue and the red fall just
+   under 4.5:1 there, the light theme's all three and the dark theme's blue */
+:root { --muted-on-grey: var(--muted); --accent-text: #5591ff; --danger-text: var(--danger); }
+:root[data-theme="light"] { --muted-on-grey: #5d6573; --accent-text: #1f5fd6; --danger-text: #c42f2f; }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
 html, body, #root { height: 100%; margin: 0; }
@@ -62,7 +72,7 @@ input, select { font: inherit; color: var(--text); background: var(--bg); border
 .error { background: #4a2024; color: #ffc9c9; padding: 7px 14px; cursor: pointer; flex: none; white-space: pre-wrap; }
 :root[data-theme="light"] .error { background: #fde2e2; color: #7a1c1c; }
 .error.static { border-radius: 8px; cursor: default; }
-.warn { color: var(--warn); margin: 6px 0 0; }
+.warn { color: var(--warn-text); margin: 6px 0 0; }
 .empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; }
 .empty p { color: var(--muted); max-width: 440px; margin: 0; }
 .page { flex: 1; min-height: 0; }
@@ -139,9 +149,44 @@ canvas:focus { outline: none; }
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px;
   box-shadow: 0 12px 32px var(--shadow); }
 .dialog.label-dialog { transform: none; }
+/* A window holds the focus itself when none of its controls has it: that needs no ring */
+.dialog:focus { outline: none; }
 .dialog.small { width: 300px; }
 .dialog.about { width: 420px; align-items: center; text-align: center; }
 .dialog.about p { margin: 0; }
+.dialog.about > p { text-wrap: balance; }
+.dialog.about .terms { display: flex; flex-direction: column; gap: 4px; }
+.dialog.about .terms p { text-wrap: balance; }
+.dialog.about .whole { white-space: nowrap; }
+.dialog.about .actions { flex-wrap: wrap; justify-content: center; }
+/* Help > About Seamtag > Licence or Third-party notices: the files as shipped, the title and Close always in view */
+.dialog.legal { width: 760px; top: 6vh; }
+.dialog.legal h3 { margin: 0; }
+.legal-text { max-height: 72vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; }
+.legal-text section + section { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--line); }
+.legal-text h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+.legal-text pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.legal-text p { margin: 0; font-size: 12px; }
+.legal-text .muted { color: var(--muted-on-grey); }
+/* NOTICE.md as its page would read; the licences in its fenced blocks keep their lines */
+.legal-text .md { font-size: 12px; }
+.legal-text .md > * { margin: 0; }
+.legal-text .md > * + * { margin-top: 8px; }
+.legal-text .md > .md-h:not(:first-child) { margin-top: 16px; }
+.legal-text .md-h { font-weight: 600; }
+.legal-text .md-h1 { font-size: 15px; }
+.legal-text .md-h2 { font-size: 13px; }
+.legal-text .md-h3 { font-size: 12px; }
+.legal-text .md pre { padding: 8px 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+.legal-text .md code { font: 11.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: break-word; }
+.legal-text .md table { border-collapse: collapse; width: 100%; }
+/* A cell breaks a path only where it would overflow, so the columns are as wide as their longest name */
+.legal-text .md th, .legal-text .md td { border: 1px solid var(--line); padding: 3px 6px; text-align: left; vertical-align: top; overflow-wrap: break-word; }
+.legal-text .md th { font-weight: 600; background: var(--panel); }
+.legal-text .md ul, .legal-text .md ol { padding-left: 20px; }
+.legal-text .md blockquote { padding-left: 10px; border-left: 3px solid var(--line); color: var(--muted-on-grey); }
+.legal-text .md hr { border: 0; border-top: 1px solid var(--line); }
+.legal-text .md a { color: var(--accent-text); }
 .dialog.shortcuts { width: 560px; max-height: 76vh; overflow: auto; }
 .dialog.models { width: 680px; max-height: 76vh; overflow: auto; }
 .dialog.models h3 { margin: 0; }
@@ -179,7 +224,13 @@ input.group { width: 110px; }
 .panel.right section { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: none; }
 .panel.right section.grow { flex: 1; }
 .panel.right .classes { max-height: 260px; }
-.panel.right .shapes { min-height: 120px; }
+/* On a short window the Labels list gives way first, down to two rows; the Shapes section keeps its
+   title and two rows, and Difficult and Delete shape under them, and never paints over the dock below it.
+   A list of one label, or none, has no row to give, and stays as tall as what it holds */
+.panel.right > section[aria-label="Labels"]:has(> .classes > .class + .class) { flex: 0 1 auto; min-height: 140px; }
+.panel.right > section[aria-label="Labels"]:has(> .classes > .class + .class) .classes { flex: 0 1 auto; min-height: 59px; }
+.panel.right > section.grow { min-height: 89px; overflow: clip; overflow-clip-margin: 3px; }
+.panel.right > section.grow:has(> .row.selection) { min-height: 136px; }
 .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; position: relative; cursor: pointer; }
 .swatch input { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; padding: 0; border: 0; cursor: pointer; }
 .class { cursor: pointer; }
@@ -204,3 +255,269 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .status .verify { display: inline-flex; align-items: center; gap: 4px; padding: 0; }
 .status .verify.verified { color: var(--ok); }
 .topbar select.format { width: auto; padding: 3px 6px; font-size: 12px; }
+
+/* Dataset > Check labels: the Problems dock under the Shapes list, sharing the column's height with it and the Labels list */
+.panel.right section.problems { flex: 2 1 0; min-height: 170px; max-height: max-content; border-top: 1px solid var(--line); padding-top: 8px; }
+/* With the dock open, the problems take up to half the column, and the Labels and Shapes lists a quarter each, down to
+   two rows at the smallest; what one needn't, the others take, so a short list of shapes leaves the problems room at
+   960 x 600, and a short list of problems leaves the labels room. Problems.tsx keeps the dock's height while it's filtered */
+.panel.right:has(> section.problems:not(.folded)) > section.grow,
+.panel.right:has(> section.problems:not(.folded)) > section[aria-label="Labels"]:has(> .classes > .class + .class) { flex: 1 1 0; max-height: max-content; }
+.panel.right section.problems.folded { flex: none; min-height: 0; }
+.problems-head { margin: 0; gap: 6px; }
+.problems-fold { display: flex; align-items: center; gap: 4px; min-height: 24px; margin: -3px 0; padding: 0; color: inherit; font: inherit; letter-spacing: inherit; text-transform: inherit; }
+.problems-badge { color: var(--text); background: var(--raised); border-radius: 8px; padding: 0 6px; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+/* The title row's buttons take the pointer over 24 px, as WCAG 2.2 asks of a target, and lay out at 18 px, so
+   the row keeps its height and the time its room */
+.problems-head .icon { width: 24px; height: 24px; margin: -3px; padding: 0; flex: none; display: flex; align-items: center; justify-content: center; }
+/* The time of the check, or that it's out of date, in the dock's title row */
+.problems-head .problems-status { flex: 1; min-width: 0; text-align: right; font-size: 12px; font-weight: 400; letter-spacing: 0; text-transform: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* This image only has a line of its own, so it stays under the pointer whatever counts the buttons above it show */
+.problems-bar { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.seg.small.problems-severities button { flex: none; align-items: center; gap: 4px; padding: 3px 6px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted-on-grey); }
+.seg.small.problems-severities button.on { color: var(--text); }
+.seg.small.problems-severities button:not(.on) svg { opacity: .55; }
+.warn-text { color: var(--warn-text); }
+.problems-empty { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.problems-empty p { margin: 0; font-size: 12px; }
+.sev-error { color: var(--danger); flex: none; }
+.sev-warning { color: var(--warn-text); flex: none; }
+.sev-info { color: var(--accent); flex: none; }
+.problems-only { margin: 0; font-size: 12px; flex: none; white-space: nowrap; }
+.problems-only input { margin: 0; }
+.problems-list { flex: 1; min-height: 60px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; margin: 0 -4px; padding: 0 4px; }
+.problems-group { display: flex; flex-direction: column; gap: 1px; flex: none; }
+.problems-title { display: flex; align-items: flex-start; gap: 5px; padding: 4px 2px; text-align: left; font-size: 12px; font-weight: 600; border-radius: 5px; }
+.problems-title:hover { background: var(--raised); }
+.problems-title svg { flex: none; margin-top: 2px; }
+.problems-title span { flex: 1; min-width: 0; }
+.problems-title b { font-weight: 600; color: var(--muted); font-variant-numeric: tabular-nums; }
+.problems-title:hover b { color: var(--muted-on-grey); }
+.problem { position: relative; display: flex; flex-direction: column; gap: 1px; padding: 4px 6px 5px 22px; border-radius: 6px; font-size: 12px; flex: none;
+  content-visibility: auto; contain-intrinsic-size: auto 48px; }
+.problem.opens { cursor: pointer; }
+.problem.opens:hover { background: var(--raised); }
+.problem.opens:not(.picked):hover .problem-what { color: var(--muted-on-grey); }
+/* A row saved or changed since the check keeps its words as they are, with a clock in its margin */
+.problem-late { position: absolute; left: 5px; top: 10px; color: var(--warn-text); }
+/* The image's name takes what the buttons leave, cut short in the middle; the buttons keep to its first line */
+.problem-where { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.problem-where .name { flex: 0 1 auto; display: flex; font-weight: 550; }
+.cut-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cut-tail { flex: none; white-space: nowrap; }
+.problem-open { padding: 0; text-align: left; color: inherit; font: inherit; font-weight: 550; }
+.problem-what { color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+/* The row clicked last, or holding the focus, shows its whole message, and its image's whole name, as the name's tooltip
+   does to the mouse; on the picked row's colour, in the text's colour */
+.problem.picked { background: var(--selected); }
+.problem.picked .problem-what, .problem:focus-within .problem-what { display: block; overflow: visible; }
+.problem.picked .problem-where .name, .problem:focus-within .problem-where .name { display: block; white-space: normal; overflow-wrap: anywhere; }
+.problem.picked .name > span, .problem:focus-within .name > span { white-space: normal; }
+.problem.picked .problem-what { color: var(--text); }
+/* On its own background, so the accent keeps its contrast on a picked row */
+.problem-act { flex: none; margin-left: auto; padding: 0 6px; font-size: 11px; line-height: 18px; border: 1px solid var(--line); border-radius: 5px; color: var(--accent);
+  background: var(--panel); }
+.problem-where .problem-act { line-height: 22px; }
+.problem-act + .problem-act { margin-left: 0; }
+.problem-act:hover { background: var(--raised); color: var(--accent-text); }
+.problems-more { margin: 2px 0 4px 22px; padding: 2px 8px; font-size: 12px; align-self: flex-start; }
+/* The Files dock's five filters, with Problems, share its width: each as wide as it needs, with room for
+   four-digit counts in all five, and past that a name is cut short rather than the row leaving the dock */
+.seg.small.filters button { flex: 1 1 auto; min-width: 0; overflow: hidden; padding-left: 1px; padding-right: 1px; }
+.seg.small.filters button > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The Problems filter before the first check: off, its dash for a count saying so, and as plain to see as the others */
+.seg.small.filters button:disabled { opacity: 1; }
+
+/* Renaming a label across the folder */
+.dialog.rename { width: 420px; }
+.dialog.rename h3, .dialog.rename p { margin: 0; }
+.rename-label { color: var(--text); font-weight: 600; }
+.rename-plan { display: flex; flex-direction: column; gap: 6px; font-size: 12px; overflow-wrap: anywhere; max-height: 40vh; overflow-y: auto; }
+.rename-skipped { margin: 0; padding-left: 18px; }
+.dialog.rename .batch { flex: 1; }
+
+/* Dataset > Statistics */
+.dialog.stats { width: 780px; top: 5vh; max-height: 90vh; overflow-y: auto; gap: 8px; }
+.dialog.stats h3 { margin: 0; justify-content: flex-start; gap: 10px; flex-wrap: wrap; }
+.dialog.stats h4 { margin: 6px 0 0; font-size: 12px; font-weight: 600; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.dialog.stats h4 .muted { font-weight: 400; }
+.dialog.stats p { margin: 0; font-size: 12px; }
+/* The eight tiles in one row, to leave the labels table the height, while their counts fit it; once they don't, in two
+   rows of four. Each half of the row is no narrower than its tiles' counts and names, and its tiles share it evenly */
+.stats-tiles { display: flex; flex-wrap: wrap; gap: 6px; }
+.stats-half { flex: 1 1 0; min-width: min-content; display: grid; grid-template-columns: repeat(4, minmax(max-content, 1fr)); gap: 6px; }
+.stats-tile { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; display: flex; flex-direction: column; }
+.stats-tile b { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.stats-tile span { color: var(--muted-on-grey); font-size: 12px; white-space: nowrap; }
+.stats-tile.bad-tile b { color: var(--danger-text); }
+.stats-table { overflow-x: auto; max-height: min(300px, 30vh); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; flex: none; }
+/* On a shorter window a long table gives way first, down to three rows, so the window itself needn't scroll as well */
+.stats-table:has(tbody > tr:nth-child(4)) { flex: 0 1 auto; min-height: 117px; }
+.stats-table .problems-more { margin: 6px 8px; }
+.stats-labels, .stats-sizes { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+.stats-labels th, .stats-sizes th { background: var(--panel); color: var(--muted); font-weight: 500; text-align: right; padding: 0; white-space: nowrap; }
+/* The labels table scrolls on its own, under its header */
+.stats-labels th { position: sticky; top: 0; z-index: 1; }
+.stats-labels th button { display: inline-flex; align-items: center; gap: 3px; padding: 5px 8px; color: inherit; font: inherit; width: 100%; justify-content: flex-end; }
+.stats-labels th.left button { justify-content: flex-start; }
+.stats-labels th[aria-sort="ascending"], .stats-labels th[aria-sort="descending"] { color: var(--text); }
+.stats-labels td { padding: 4px 8px; border-top: 1px solid var(--line); text-align: right; white-space: nowrap; }
+.stats-labels .left { text-align: left; }
+.stats-labels td.left:first-child { display: flex; align-items: center; gap: 6px; max-width: 220px; }
+.stats-name { overflow: hidden; text-overflow: ellipsis; }
+.stats-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.stats-labels td.wide { width: 34%; }
+.stats-labels td.wide b { font-weight: 550; margin-left: 6px; }
+.stats-bar { display: inline-block; width: calc(100% - 56px); max-width: 220px; height: 6px; background: var(--raised); border-radius: 3px; overflow: hidden; vertical-align: middle; }
+.stats-bar i { display: block; height: 100%; border-radius: 3px; opacity: .85; }
+.stats-labels .problem-act { margin: 0; }
+.stats-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.stats-pair section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.stats-histogram { display: flex; align-items: flex-end; gap: 3px; height: 130px; padding: 4px 0 0; border-bottom: 1px solid var(--line); }
+.stats-column { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 2px; font-size: 11px; font-variant-numeric: tabular-nums; }
+/* A bar's share of the height its count above it and its name below leave, so neither is squeezed by the tallest */
+.stats-column i { flex: none; width: 100%; max-width: 34px; height: calc((100% - 2lh - 4px) * var(--share)); min-height: 1px; background: var(--accent);
+  border-radius: 3px 3px 0 0; opacity: .8; }
+.stats-column span { flex: none; white-space: nowrap; overflow: hidden; max-width: 100%; }
+.stats-column > span:last-child { color: var(--muted); }
+.stats-sizes th, .stats-sizes td { padding: 4px 8px; text-align: right; }
+.stats-sizes td { border-top: 1px solid var(--line); }
+.stats-sizes .left { text-align: left; }
+/* Each range under its name: Medium's, the longest, doesn't fit beside it */
+.stats-sizes td.left > .muted { display: block; }
+.dialog .stats-train { flex-direction: row; align-items: center; justify-content: flex-end; gap: 4px; color: var(--muted); }
+.stats-train input { width: 72px; padding: 2px 4px; text-align: right; }
+.stats-train input.invalid { border-color: var(--danger); }
+.stats-image-sizes { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px; font-variant-numeric: tabular-nums; }
+/* Over the labels table's header, which sticks as it scrolls under the buttons */
+.dialog.stats .actions { align-items: center; position: sticky; bottom: -12px; z-index: 2; background: var(--panel); padding: 10px 0 0; margin-top: 0; border-top: 1px solid var(--line); }
+.stats-saved { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+
+/* File > Export dataset…: options on the left, what the export holds on the right, between a title and
+   buttons ruled off as the Import window's are. A large screen shows the posed formats' options whole */
+.dialog.export-dialog { width: 1000px; height: min(960px, calc(100vh - 32px)); top: 50%; transform: translate(-50%, -50%); padding: 0; gap: 0; }
+.dialog.export-dialog.done { width: 760px; height: auto; max-height: calc(100vh - 32px); }
+.export-dialog > h3 { margin: 0; padding: 12px 16px 10px; border-bottom: 1px solid var(--line); }
+.export-dialog h4 { font-size: 11px; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 10px 0 0; }
+.export-dialog h4:first-child { margin-top: 0; }
+.export-dialog .seg.small button { flex: auto; text-transform: none; white-space: nowrap; padding: 4px 8px; }
+.export-dialog .seg.small button.on { background: var(--selected); font-weight: 600; }
+.export-dialog .check { margin: 1px 0; }
+.export-dialog .link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.export-dialog .actions { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); align-items: center; }
+.export-dialog > .error.static, .export-dialog > .export-note { margin: 0 16px 10px; }
+.export-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); gap: 16px; padding: 12px 16px 10px; }
+.export-options { border: 0; margin: 0; padding: 0 8px 4px 0; min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.export-check { min-width: 0; min-height: 0; overflow-y: auto; padding: 0 4px 4px 16px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+.export-check > div { display: flex; flex-direction: column; gap: 6px; }
+.export-formats { display: flex; flex-direction: column; gap: 1px; }
+.dialog label.export-format { flex-direction: row; align-items: flex-start; gap: 8px; padding: 3px 8px; border-radius: 6px; color: var(--text); cursor: pointer; }
+.export-format:hover { background: var(--raised); }
+.export-format.on { background: var(--selected); }
+.export-format input { width: auto; margin: 3px 0 0; accent-color: var(--accent); }
+.export-format > span { display: flex; flex-direction: column; min-width: 0; }
+.export-format b { font-weight: 600; }
+.export-format small { color: var(--muted); font-size: 12px; }
+.export-format.on small { color: var(--muted-on-selected); }
+.export-file { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.export-file > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.export-file .ghost { flex: none; padding: 4px 9px; }
+.export-shares { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.dialog .export-shares label { gap: 2px; font-size: 12px; }
+.export-shares input { padding: 4px 6px; }
+.export-hint, .export-note { margin: 0; color: var(--muted); font-size: 12px; }
+.export-make { align-self: flex-start; padding: 4px 9px; }
+.export-lead { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.export-busy { display: flex; flex-direction: column; gap: 6px; color: var(--muted); }
+.export-busy.inline { flex-direction: row; }
+.export-stale { opacity: .45; pointer-events: none; }
+.export-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-variant-numeric: tabular-nums; }
+.export-table th, .export-table td { padding: 3px 8px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.export-table th:first-child, .export-table td:first-child { text-align: left; width: 38%; padding-left: 0; }
+.export-table th { color: var(--muted); font-weight: 500; }
+.export-table tr.total td { font-weight: 600; }
+.export-table tr.none td { color: var(--muted); }
+.export-table .name { display: block; overflow: hidden; text-overflow: ellipsis; }
+.export-more { align-self: flex-start; margin-top: 4px; }
+.export-issues-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.export-issues-title span { text-transform: none; letter-spacing: 0; font-weight: 400; font-size: 12px; }
+/* The errors, first in the column and set apart, as they stop the export; each with what fixes it, where the window can */
+.export-errors { display: flex; flex-direction: column; gap: 2px; padding: 2px 0; border: 1px solid var(--line); border-left: 3px solid var(--danger); border-radius: 6px; }
+.export-fixes { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 6px 6px 47px; }
+.export-fixes .ghost { padding: 3px 9px; font-size: 12px; }
+.export-status .link { text-align: left; }
+.export-status .link:hover { text-decoration: underline; }
+.export-group-head { display: flex; align-items: center; gap: 6px; width: 100%; padding: 4px 6px; border-radius: 6px; text-align: left; }
+.export-group-head:hover { background: var(--raised); }
+.export-group-head b, .export-accepted b { font-weight: 600; font-variant-numeric: tabular-nums; }
+.export-sev { flex: none; }
+.export-sev.is-error { color: var(--danger); }
+.export-sev.is-warning { color: var(--warn-text); }
+.export-sev.is-info { color: var(--muted); }
+.export-sev.is-ok { color: var(--ok); }
+/* An opened group's messages grow in the column, which scrolls, a page of them at a time: they don't scroll inside it */
+.export-rows { list-style: none; margin: 0 0 6px; padding: 2px 6px 2px 47px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.export-rows li { overflow-wrap: anywhere; }
+.export-status { flex: 1; min-width: 0; font-size: 12px; }
+/* The summary's numbers end where the buttons under them do: room is kept for its scrollbar, there or not, in its 16 px
+   edge, and the counts' last column has no edge of its own */
+.export-done { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; display: flex; flex-direction: column; gap: 8px; padding: 12px 6px 12px 16px; }
+.export-done .export-table th:last-child, .export-done .export-table td:last-child { padding-right: 0; }
+.export-path { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
+.export-done .kv b { overflow-wrap: anywhere; }
+.export-accepted { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.export-accepted li { display: flex; align-items: center; gap: 8px; }
+
+/* File > Import dataset: a scrolling body between a fixed title and buttons, so it fits a 960 x 600 window */
+.dialog.import { width: 780px; top: 5vh; max-height: 90vh; padding: 0; gap: 0; }
+.dialog.import > h3 { margin: 0; padding: 12px 16px 10px; border-bottom: 1px solid var(--line); }
+.import-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px 16px 14px; display: flex; flex-direction: column; gap: 14px; }
+.import-body p { margin: 0; }
+.dialog.import .actions { margin: 0; padding: 10px 16px; border-top: 1px solid var(--line); align-items: center; }
+.import-sum { flex: 1; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-pick { display: flex; flex-wrap: wrap; gap: 8px; }
+.import-source { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.import-source b { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-source .muted { flex: none; }
+.import-section { display: flex; flex-direction: column; gap: 6px; }
+.import-section h4 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.import-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.import-line .ghost { padding: 3px 9px; }
+.import-seg { display: flex; flex-wrap: wrap; gap: 2px; padding: 2px; width: fit-content; max-width: 100%; background: var(--bg); border-radius: 8px; }
+.import-seg button { padding: 4px 12px; border-radius: 6px; color: var(--muted); font-weight: 550; }
+.import-seg button:hover:not(.on) { color: var(--text); }
+.import-seg button.on { background: var(--raised); color: var(--text); }
+/* The light theme's raised grey is hardly darker than the track: the chosen one is white, with an edge */
+:root[data-theme="light"] .import-seg button.on { background: var(--panel); box-shadow: 0 0 0 1px var(--line), 0 1px 2px #0002; }
+.import-seg.ask { box-shadow: 0 0 0 1px var(--warn-text); }
+/* While the task is asked, those the rows fit read in the text colour, the others stay muted */
+.import-seg.ask button.fits { color: var(--text); }
+.import-body .warn.ask { margin: 0; font-weight: 550; }
+.import-labels { max-height: 184px; overflow-y: auto; border: 1px solid var(--line); border-radius: 6px; }
+.import-labels table { width: 100%; border-collapse: collapse; }
+.import-labels th { position: sticky; top: 0; background: var(--panel); text-align: left; color: var(--muted); font-weight: 500; padding: 4px 10px; border-bottom: 1px solid var(--line); }
+.import-labels td { padding: 3px 10px; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
+.import-labels tr:first-child td { border-top: 0; }
+.import-labels .n { width: 96px; text-align: right; font-variant-numeric: tabular-nums; }
+/* The light theme's blue in both: white on the dark theme's lighter one is under 4.5:1 */
+.tag.new { margin-left: 8px; background: #2f6fe8; color: #fff; }
+.import-groups { display: flex; flex-direction: column; gap: 1px; }
+.import-group > button { display: flex; align-items: center; gap: 8px; width: 100%; padding: 5px 6px; border-radius: 6px; text-align: left; }
+.import-group > button:hover { background: var(--raised); }
+.import-group .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-group .count { color: var(--muted); font-variant-numeric: tabular-nums; }
+.import-group .sev { flex: none; }
+.import-group.is-error .sev { color: var(--danger); }
+.import-group.is-warning .sev { color: var(--warn-text); }
+.import-group.is-info .sev { color: var(--muted); }
+/* As the Export window's: an opened group's messages grow in the window's body, which scrolls */
+.import-rows { list-style: none; margin: 2px 0 8px 28px; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+.import-rows li { overflow-wrap: anywhere; }
+.import-rows .more { padding: 0; color: var(--accent); }
+.import-busy { gap: 8px; padding-top: 18px; padding-bottom: 18px; }
+.import-bar { height: 6px; border-radius: 3px; background: var(--raised); overflow: hidden; }
+.import-bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .15s; }
+.import-bar.busy i { width: 30%; animation: import-slide 1.2s linear infinite; }
+@keyframes import-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+.import-result { font-weight: 550; }

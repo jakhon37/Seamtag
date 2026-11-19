@@ -4,30 +4,30 @@
 
 <h1 align="center">Seamtag</h1>
 
-<p align="center"><b>Label images in LabelMe, Pascal VOC, YOLO or CreateML format, with labelme 7's and LabelImg's tools, a brush and eraser, AI that finds objects from a click, a box or words, and review of a model's proposals. For Windows, macOS and Linux.</b></p>
+<p align="center"><b>Label images in LabelMe, Pascal VOC, YOLO or CreateML format, with polygons, rectangles, rotated boxes, circles, lines and points, a brush and eraser, AI that finds objects from a click, a box or words, and review of a model's proposals. Check a whole folder's labels, and export it to COCO or Ultralytics YOLO, or import from them. For Windows, macOS and Linux.</b></p>
 
 <p align="center">
   <a href="https://github.com/jakhon37/Seamtag/actions/workflows/ci.yml"><img src="https://github.com/jakhon37/Seamtag/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-blue" alt="GPL-3.0-only"></a>
 </p>
 
-![Seamtag editing a polygon on one of labelme's example photos](docs/media/label.webp)
+![Seamtag editing a polygon around a person pushing a pram on a city crossing](docs/media/label.webp)
 
-Seamtag is the labelling half of [Seamline](https://github.com/jakhon37/Seamline), on its own. It reads and writes the same JSON files as [labelme](https://github.com/wkentaro/labelme), takes labelme 7's command line and config keys (labelme 5's still work), and offers its tools, so a folder labelled in either opens in the other. It does the same for [LabelImg](https://github.com/HumanSignal/labelImg): its Pascal VOC, YOLO and CreateML files, its command line and its tools. Everything runs on your computer: images, labels and AI models never leave it.
+Seamtag is a desktop app for labelling images. Each image's labels are saved in a file beside it, as LabelMe JSON, Pascal VOC, YOLO or CreateML, so a folder labelled in labelme or LabelImg opens as it is, and they open Seamtag's files too. Everything runs on your computer: images, labels and AI models never leave it.
 
 ## What it does
 
-**labelme's tools.** Polygons, rectangles, rotated boxes, circles, lines, line strips and points, drawn by labelme's rules: click the first point to close, Shift for a square, lines stop at the image edge unless `canvas.allow_out_of_bounds_points` lets them past. A rotated box takes two clicks along one side and a third for its width; dragging a corner keeps it square, and the handles on its sides turn it. Edit labels with labelme's dialog (completion, flags per label pattern, group ID, description, and `--validate-label exact`), tick image flags, hide or reorder shapes, copy and paste them between images, lock them, merge polygons or masks of one label, add and remove points (Alt+click, Add point to edge on the right-click menu, or `Ctrl+M` for several along an edge), keep the previous image's shapes, and adjust brightness and contrast. `Ctrl`+arrow selects the next shape that way, and Fit to selection keeps the selected shapes in view.
+**Drawing and editing.** Polygons, rectangles, rotated boxes, circles, lines, line strips and points: click the first point to close, Shift for a square, lines stop at the image edge unless `canvas.allow_out_of_bounds_points` lets them past. A rotated box takes two clicks along one side and a third for its width; dragging a corner keeps it square, and the handles on its sides turn it. Edit labels in the label dialog (completion, flags per label pattern, group ID, description, and `--validate-label exact`), tick image flags, hide or reorder shapes, copy and paste them between images, lock them, merge polygons or masks of one label, add and remove points (Alt+click, Add point to edge on the right-click menu, or `Ctrl+M` for several along an edge), keep the previous image's shapes, and adjust brightness and contrast. `Ctrl`+arrow selects the next shape that way, and Fit to selection keeps the selected shapes in view.
 
-**LabelImg's formats.** Save labels as Pascal VOC (`name.xml`), YOLO (`name.txt`, with the class names in `classes.txt`) or CreateML (`name.json`) instead of LabelMe JSON: the files are LabelImg's to the byte. Pick the format in the top bar or under File → Save format. As in LabelImg, an image keeps the format of the label file it has, and new label files take the format last used. Switching saves the image in the new format and moves its old file to the trash, so each image has one label file; if the image already has labels in the new format, those open instead, and nothing is converted. These formats hold boxes, so other shapes become the box around them, and AI polygon and AI mask draw boxes. Pre-labelling keeps its proposals in LabelMe JSON, so it works in that format.
+**Pascal VOC, YOLO and CreateML.** Save labels as Pascal VOC (`name.xml`), YOLO (`name.txt`, with the class names in `classes.txt`) or CreateML (`name.json`) instead of LabelMe JSON, byte for byte as LabelImg writes them. Pick the format in the top bar or under File → Save format. An image keeps the format of the label file it has, and new label files take the format last used. Switching saves the image in the new format and moves its old file to the trash, so each image has one label file; if the image already has labels in the new format, those open instead, and nothing is converted. These formats hold boxes, so other shapes become the box around them, and the AI tools make boxes. Pre-labelling keeps its proposals in LabelMe JSON, so it works in that format.
 
-**LabelImg's tools.** Tap `Space` to mark an image verified: the background turns green, the file list shows it, and Pascal VOC and CreateML files keep it. Mark boxes difficult, as Pascal VOC records it. Boxes are drawn square with Shift or Ctrl held, or always with Draw squares; any of the four corners can be dragged, and the status bar gives the size of the box being drawn or pointed at. Show labels on the boxes, copy the previous image's boxes, read an annotation file onto the image, show one label's boxes at a time, delete an image to the trash, and right-drag a box to copy or move it. Single class mode labels each new box with the label picked in the Labels list, LabelImg's default label; turned off, each box asks. Advanced mode keeps a tool on; turned off, it's LabelImg's beginner mode, one box and then back to editing. Boxes can have their own line and fill colours.
+**Verified images and box tools.** Tap `Space` to mark an image verified: the background turns green, the file list shows it, and Pascal VOC and CreateML files keep it. Mark boxes difficult, as Pascal VOC records it. Boxes are drawn square with Shift or Ctrl held, or always with Draw squares; any of the four corners can be dragged, and the status bar gives the size of the box being drawn or pointed at. Show labels on the boxes, copy the previous image's boxes, read an annotation file onto the image, show one label's boxes at a time, delete an image to the trash, and right-drag a box to copy or move it. Single class mode labels each new box with the label picked in the Labels list; turned off, each box asks. Advanced mode keeps a tool on; turned off, the tool goes back to editing after each shape. Boxes can have their own line and fill colours.
 
-**AI points, AI box and the text prompt.** Click an object, or drag a box around it, and the model outlines it; Shift+click marks background. What it finds becomes the shape picked beside the tool: polygons (one for each part of the object, grouped), a mask, a rectangle, a circle or a rotated box, as in labelme 7. Repeats of one object are dropped, and with `ai.suppress_existing_shape_matches` so are objects already drawn. The text prompt takes words, such as `dog,cat`, and boxes everything they name with YOLO-World, each box labelled with its word and score. The models are labelme's (EfficientSAM in two sizes, SAM2 in three, and YOLO-World), downloaded once from the addresses labelme uses and kept in the same cache, so a model labelme fetched is already here; AI → AI models lists them, with their sizes and licences, and downloads or deletes them. labelme's SAM and SAM 3 aren't among them: their image encoders need blocks of memory larger than Electron allows.
+**AI points, AI box and the text prompt.** Click an object, or drag a box around it, and the model outlines it; Shift+click marks background. What it finds becomes the shape picked beside the tool: polygons (one for each part of the object, grouped), a mask, a rectangle, a circle or a rotated box. Repeats of one object are dropped, and with `ai.suppress_existing_shape_matches` so are objects already drawn. The text prompt takes words, such as `dog,cat`, and boxes everything they name with YOLO-World, each box labelled with its word and score. The models are EfficientSAM in two sizes, SAM2 in three, and YOLO-World, run as ONNX files. Each is downloaded once, when you agree, into `~/.cache/osam`, the folder labelme keeps its models in too, so a model either app has downloaded is there for the other; AI → AI models lists them, with their sizes and licences, and downloads or deletes them. SAM and SAM 3 aren't offered: their image encoders need blocks of memory larger than Electron allows.
 
-![SAM2 outlining a bus from two clicks](docs/media/ai.webp)
+![SAM2 outlining a red bus from two clicks](docs/media/ai.webp)
 
-![YOLO-World boxing the people and the bottle in a photo from the words person,bottle](docs/media/text.webp)
+![YOLO-World boxing the people and the bicycles at a pavement café from the words person,bicycle](docs/media/text.webp)
 
 **Pre-label with your own model.** Train one in [Seamline](https://github.com/jakhon37/Seamline) on the same folder and choose Export for Seamtag, and it's listed under AI → Model for pre-labelling; any other segmentation model exported to ONNX works too. It proposes shapes for every unlabelled image, each with a score. Proposals stay dashed until you accept them: `W` accepts, `S` rejects, `Tab` skips, and the list can put the least certain images first.
 
@@ -37,7 +37,15 @@ Seamtag is the labelling half of [Seamline](https://github.com/jakhon37/Seamline
 
 **Labels that are hard to lose.** Saves go through one queue to a temporary file and then into place. A label file that can't be read is shown read-only and never written over, and closing the window saves first, or asks when saving isn't automatic. A label file another app, such as Seamline, changed after Seamtag read it is never written over or trashed either: Seamtag reloads it and says so.
 
-![labelme's label dialog, with flags for the person label, a group ID and a description](docs/media/dialog.webp)
+![The label dialog for the person pushing the pram, with the flags occluded and truncated, group ID 1 and a description](docs/media/dialog.webp)
+
+**Check a folder's labels.** Dataset → Check labels reads every label file in the folder and lists what it finds in a Problems panel under the shapes. As errors and warnings: label files or images that can't be read, label files that give another image size, name another image, have no image or serve several images, masks that can't be read, shapes with no label, the wrong number of points or no area, repeated points, polygons that cross themselves, shapes reaching outside the image, exact and near copies, one label written several ways (`Cat` and `cat`) or missing from the label list, AI proposals not yet accepted, and identical images. As notes, hidden until asked for: images never labelled, labelled with no shapes or not verified, and labels in the list that no shape uses. That's 23 checks in all. Clicking a problem opens its image with the shape selected. Repeated points, exact copies and boxes past the image's edge have a Fix, undone like any edit, and a label can be renamed in every label file of the folder, from the Problems panel or Statistics, with the old files sent to the trash. An image is checked again as it's saved, and the image list can show only the images with an error or a warning. Dataset → Statistics counts images by state, objects and images by label with each label's shapes by type, objects per image, object sizes as COCO ranges them at full size and at a training size, and image sizes, and saves the labels table as CSV.
+
+![The Problems panel after Dataset → Check labels, with a cargo bike outline that reaches past its photo's right edge picked from its row](docs/media/check.webp)
+
+**COCO and YOLO datasets.** File → Export dataset writes the folder as COCO (objects, or objects with keypoints) or Ultralytics YOLO (detect, segment, pose or rotated boxes, with its `data.yaml`): whole, split by ratio with a seed, or split as its folders already are, with the images copied, hard-linked or, for COCO, left where they are. Everything is checked before anything is written, including what each format can't hold, and the dataset appears in its folder only once it's complete. File → Import dataset reads a COCO file or a YOLO dataset (Ultralytics', Roboflow's, CVAT's or X-AnyLabeling's layout) into each image's own label file, as LabelMe JSON whatever the save format. Images are matched by their path, or by a file name only one image on each side has, and never guessed: a name that fits several images is listed and left out. Images that already have labels are skipped, added to or replaced; a replaced file, or a Pascal VOC, YOLO or CreateML file added to, goes to the trash. The image's own label file stays the one you work on; datasets are made from it and read into it.
+
+![The Export dataset window splitting four street photos 70/20/10 for YOLO segment, with each split's counts and two warnings](docs/media/export.webp)
 
 ## Install
 
@@ -64,13 +72,13 @@ npm run dev
 
 ## Use
 
-Open a folder of images: labels are saved beside each image as `name.json`, in labelme's format, or in the format picked in the top bar. Images in subfolders are listed too. The command line is labelme's:
+Open a folder of images: labels are saved beside each image as `name.json` (LabelMe JSON), or in the format picked in the top bar. Images in subfolders are listed too. The command line takes labelme's options:
 
 ```bash
 seamtag images/ --labels labels.txt --flags night,blurry --label-flags '{person: [occluded]}' -O labels/
 ```
 
-LabelImg's works too: a folder of images, a file of classes, and a folder for the labels.
+LabelImg's command line works too: a folder of images, a file of classes, and a folder for the labels.
 
 ```bash
 seamtag images/ predefined_classes.txt annotations/
@@ -83,12 +91,18 @@ seamtag images/ predefined_classes.txt annotations/
 | `--label-flags YAML\|FILE` | Flags for shapes whose label matches a pattern |
 | `--validate-label exact` | Only allow listed labels |
 | `-O`, `--output DIR\|FILE.json` | Save label files somewhere else |
-| `--with-image-data`, `--no-auto-save`, `--keep-prev`, `--no-sort-labels`, `--epsilon N` | As in labelme 7; labelme 5's `--nodata`, `--autosave`, `--nosortlabels`, `--labelflags` and `--validatelabel` work too |
+| `--with-image-data` | Put the image in each label file |
+| `--no-auto-save` | Don't save automatically |
+| `--keep-prev` | Give an image with no labels the previous image's shapes |
+| `--no-sort-labels` | Keep labels in the order given |
+| `--epsilon N` | How close, in screen pixels, counts as on a point or an edge |
 | `--config FILE\|YAML` | A config file, such as your `~/.labelmerc`, or YAML overrides; `--config '{label_format: yolo}'` saves new labels as YOLO |
+
+labelme 5's spellings work too: `--nodata`, `--autosave`, `--nosortlabels`, `--labelflags` and `--validatelabel`.
 
 Seamtag keeps one window. Started again while it's open, as Seamline's Label in Seamtag starts it, it brings that window forward and opens the image or folder there. It saves unsaved work first, or asks about it when saving by hand, and stops pre-labelling for another folder only if you agree. While a dialog or menu is open or a shape is being drawn, or when the image or folder isn't there, it opens nothing and says why, and you can start it again. A second start's options other than the image, folder and `-O` are left out: they take effect when Seamtag starts.
 
-Started on an image in a subfolder of a Seamline project, one with `.myseg/project.json` in a folder above, Seamtag opens the whole project on that image, as Seamline lists it, whether it starts then or is open already. Open recent then lists the project, which opens on that image. A start with no file opens the last folder or file opened in the window, so after such a start while Seamtag was open, it opens the project on that image too. File → Open and a dropped image open the image's own folder, as in labelme, and are remembered that way.
+Started on an image in a subfolder of a Seamline project, one with `.myseg/project.json` in a folder above, Seamtag opens the whole project on that image, as Seamline lists it, whether it starts then or is open already. Open recent then lists the project, which opens on that image. A start with no file opens the last folder or file opened in the window, so after such a start while Seamtag was open, it opens the project on that image too. File → Open and a dropped image open the image's own folder, and are remembered that way.
 
 Settings live in `~/.seamtagrc`, which takes labelme's keys, so a `~/.labelmerc` can be copied in as it is. File → Open config file opens it. [docs/config.md](docs/config.md) lists every key, including the shortcuts.
 
@@ -96,11 +110,11 @@ Settings live in `~/.seamtagrc`, which takes labelme's keys, so a `~/.labelmerc`
 
 | Key | Action |
 |---|---|
-| `P` `R` `V` | Polygon, rectangle, edit (labelme's `Ctrl+Shift+V`, `Ctrl+Shift+B` and `Ctrl+Shift+C` work too, and LabelImg's `Ctrl+J`) |
+| `P` `R` `V` | Polygon, rectangle, edit (`Ctrl+Shift+V`, `Ctrl+Shift+B` and `Ctrl+Shift+C` work too, and `Ctrl+J` for edit) |
 | `B` `E`, `[` `]` | Brush, eraser, smaller and larger |
 | `1`-`9` | Pick a label, or relabel the selected shapes |
 | `A` `D` | Previous and next image; with `Ctrl+Shift`, copy this image's shapes over |
-| `W` `S` `Tab`, `Shift+W` | Accept, reject or skip an AI proposal; accept all here and move on |
+| `W` `S` `Tab`, `Shift+W` | Accept, reject or skip an AI proposal (`Tab` with the image focused); accept all here and move on |
 | `Enter`, `Space`, double-click | Finish a polygon, line strip or AI points shape |
 | `Alt`+click | Add a point on an edge, or remove one |
 | `Ctrl+M`, `Ctrl+Shift+M` | Add several points along an edge; merge selected polygons, or masks of one label |
@@ -114,7 +128,7 @@ Settings live in `~/.seamtagrc`, which takes labelme's keys, so a `~/.labelmerc`
 | Right drag on a shape | Copy or move it |
 | Wheel, `Space`+drag, `0` | Zoom, pan, fit |
 
-Help → Keyboard shortcuts lists them all. Where LabelImg gives a key another job than labelme does (`W`, `Ctrl+V`, `Ctrl+Y`, `Ctrl+Shift+D`, `Ctrl+Shift+A`, `Ctrl+Shift+L`, `Ctrl+Shift+F`), Seamtag keeps labelme's; [docs/config.md](docs/config.md#labelimgs-keys) has the lines that switch to LabelImg's. On a Mac, `Ctrl` is Command.
+Help → Keyboard shortcuts lists them all. A few keys do other jobs here than in LabelImg (`W`, `Ctrl+V`, `Ctrl+Y`, `Ctrl+=`, `Ctrl+Shift+D`, `Ctrl+Shift+A`, `Ctrl+Shift+L`, `Ctrl+Shift+F`); [docs/config.md](docs/config.md#labelimgs-keys) has the lines that give them LabelImg's jobs. On a Mac, `Ctrl` is Command.
 
 ### Pre-labelling models
 
@@ -132,31 +146,28 @@ A model Seamline exported finds the same pixels in both apps, bar the odd one wh
 
 Pixels are scaled to 0-1, then each channel has `mean` taken away and is divided by `std`. Seamline's runs take pixels scaled to 0-1 and nothing more, so their `model.json` says mean 0 and std 1; a model without these keys gets ImageNet's mean `[0.485, 0.456, 0.406]` and std `[0.229, 0.224, 0.225]`, which many models trained elsewhere expect. Without `classes`, the label list names the classes, in order. Images bigger than `tile` go through tile by tile, each tile resized to `input_size` (height, width; without it, the model's own fixed size, or 512 × 512) with OpenCV's bilinear, as Seamline's pre-labelling resizes it, and its classes and confidence back with OpenCV's nearest and bilinear. Each shape's score is the model's mean confidence inside it, useful for ranking rather than as a probability.
 
-## Working with labelme and LabelImg
+## Compatibility
 
-The point is that files go both ways, so it's tested from both sides:
+Label files go both ways with [labelme](https://github.com/wkentaro/labelme) and [LabelImg](https://github.com/HumanSignal/labelImg), and datasets with COCO and Ultralytics YOLO tools; each way is tested:
 
 - Saving a file that labelme 5 wrote gives back the same bytes, including Python's float format and key order.
-- Every `.json` in labelme's examples and test data opens.
+- Every `.json` in labelme's examples and test data opens. The tests fetch labelme's example files from its repository, at a fixed commit, and check each against its hash.
 - In CI, labelme 7.9.1 and 5.8.1 load the files this app writes with each drawing tool and turn every shape into pixels with `shapes_to_label`, as labelme's export scripts do. CI has no SAM models; run locally with one, AI mask shapes pass the same check.
 - On the test photo, AI masks are the same as osam's, pixel for pixel, for EfficientSAM and SAM2, and YOLO-World finds the same boxes with the same scores as labelme 7.9.1. That needed Pillow's bilinear resize ported exactly, which a test checks against Pillow 13.
 - Unit tests compare what AI results become with what labelme 7.9.1's own code makes of the same test masks: polygons at each detail, circles, rotated boxes, the removal of repeats and of objects already drawn, osam's non-maximum suppression, and CLIP's tokens for text prompts.
 - labelme 7.9.1's whole default config loads with every key known, and labelme 5.8.1's migrates as labelme 7 migrates it.
 - Pascal VOC, YOLO and CreateML files are written as LabelImg writes them, byte for byte: down to Python's rounding of halves, its number format, and LabelImg's rule that saved boxes are whole pixels starting from 1. Unit tests compare them with files LabelImg 1.8.6 and its master branch wrote, and read those files back as LabelImg reads them. One difference is on purpose: a byte order mark at the start of `classes.txt`, which some editors write, isn't kept in the first class's name, as Seamline reads it too.
 - In CI, LabelImg 1.8.6 and its master branch read every Pascal VOC, YOLO and CreateML file the app writes, and write the same bytes for the same boxes. The one difference is CreateML's verified mark, which master writes and 1.8.6 leaves out.
-
-labelme's export scripts in [examples/](examples) (to VOC or COCO) work on these files with `pip install labelme`.
+- COCO's numbers, the runs of its masks, their areas and boxes, are ported from pycocotools 2.0.11's C code and compared with it on 251 masks, polygons, boxes, merges and runs, to the pixel and the byte. Objects are made from the label files' shapes as labelme 7.9.1's `labelme2coco` makes them. In CI, pycocotools loads every COCO file the app writes, from the unit tests and from the Export dataset window, decodes each mask and scores the export against itself: AP 1.0 for boxes, masks and keypoints.
+- In CI, Ultralytics 8.4.211's own label check (`verify_image_label`) accepts every YOLO dataset the app writes, for all four tasks, and its YAML reader gives back the class names Seamtag wrote. An object of several parts becomes one row, joined as Ultralytics' `merge_multi_segment` joins COCO's. Ultralytics' code is fetched for the test, checked against its hash, and isn't kept here.
+- Import is tested on what `labelme2coco` writes, on pycocotools' compressed masks and CVAT's COCO (lists of runs, rotated boxes), and on Ultralytics', Roboflow's, CVAT's and X-AnyLabeling's YOLO layouts.
 
 ## How it's built
 
-An Electron app in TypeScript. The main process reads and writes files, builds tile pyramids with libvips (through sharp), and runs ONNX models with onnxruntime, so no Python is needed; pre-labelling outlines its shapes in a worker thread, which keeps the main process free. The window is React, drawing on a canvas; the LabelMe format lives in one shared module, [`src/shared/labelfile.ts`](src/shared/labelfile.ts), and LabelImg's three in [`src/shared/formats.ts`](src/shared/formats.ts), ported from its Python. labelme 7's AI pipeline (masks to shapes, the removal of repeats, non-maximum suppression, CLIP's tokenizer) is ported in [`src/main`](src/main) beside the models. Unit tests (Vitest) cover the formats, config, geometry, the AI pipeline and the resizes; end-to-end tests (Playwright) drive the real app on Windows, macOS and Linux, each launch with a home folder and profile of its own. Installers are built by electron-builder on each system.
-
-## History
-
-This repository continues [LabelMeV2](https://github.com/jakhon37/LabelMeV2), a fork of labelme that made big images load faster and added 5000% zoom, points along an edge, polygon merge and dark mode: those are its first 29 commits. The labeller of Seamline's desktop app joined with its own history in [`6204364`](https://github.com/jakhon37/Seamtag/commit/6204364), so its files keep their commits, and replaced the Qt app in [`c2cc715`](https://github.com/jakhon37/Seamtag/commit/c2cc715). Version 3.0 is the first on the new stack; [CHANGELOG.md](CHANGELOG.md) has the rest.
+An Electron app in TypeScript. The main process reads and writes files, builds tile pyramids with libvips (through sharp), and runs ONNX models with onnxruntime, so no Python is needed; pre-labelling outlines its shapes in a worker thread, which keeps the main process free. The window is React, drawing on a canvas; LabelMe JSON lives in one shared module, [`src/shared/labelfile.ts`](src/shared/labelfile.ts), and Pascal VOC, YOLO and CreateML in [`src/shared/formats.ts`](src/shared/formats.ts). The AI pipeline (masks to shapes, the removal of repeats, non-maximum suppression, CLIP's tokenizer) is in [`src/main`](src/main) beside the models. COCO with its mask runs, and Ultralytics' YOLO, are in [`src/shared/coco.ts`](src/shared/coco.ts), [`rle.ts`](src/shared/rle.ts) and [`ultralytics.ts`](src/shared/ultralytics.ts), and the folder's checks and statistics in [`checks.ts`](src/shared/checks.ts) and [`stats.ts`](src/shared/stats.ts); the main process reads a whole folder's labels with a cache, and reads COCO files in a worker of their own. Unit tests (Vitest) cover the formats, config, geometry, the AI pipeline and the resizes; end-to-end tests (Playwright) drive the real app on Windows, macOS and Linux, each launch with a home folder and profile of its own. Installers are built by electron-builder on each system.
 
 ## License
 
-GPL-3.0, as labelme. The Pascal VOC, YOLO and CreateML code is ported from LabelImg, under its MIT licence, whose notice is kept in [`src/shared/formats.ts`](src/shared/formats.ts). CLIP's tokenizer vocabulary, in [`resources/clip`](resources/clip), is OpenAI's, under the MIT licence beside it. The AI models are downloaded from their authors' releases under their own licences: SAM2 and EfficientSAM are Apache-2.0, YOLO-World is GPL-3.0.
+[GPL-3.0-only](LICENSE). Copyright © 2026 Jakhongir Nodirov.
 
-Thanks to Kentaro Wada for [labelme](https://github.com/wkentaro/labelme) and [osam](https://github.com/wkentaro/osam), and to Tzutalin and LabelImg's contributors for [LabelImg](https://github.com/HumanSignal/labelImg).
+Code from other projects is included under their own licences, listed in [NOTICE.md](NOTICE.md).

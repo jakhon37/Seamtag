@@ -1,9 +1,19 @@
+import type { ExportOptions, ExportProgress, ExportResult, KeypointsSummary, Preflight } from '../../main/export'
 import type { AiOutput, Config } from '../../shared/config'
+import type { Issue } from '../../shared/dataset'
 import type { LabelFormat } from '../../shared/formats'
 import type { LabelDoc, Shape } from '../../shared/labelfile'
+import type { LegalKind, LegalText } from '../../shared/legal'
 import type { Summary } from '../../shared/labels'
+import type {
+  CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped
+} from '../../main/checking'
+import type { ImportPolicy, ImportPreview, ImportProgress, ImportReport, ImportRequest, IssueGroup } from '../../main/import'
 
 export type { Config, LabelDoc, LabelFormat, Shape }
+// Dataset > Check labels, Statistics and renames: one definition, in the main process
+export type { CheckRequest, CheckSummary, ProblemPage, ProblemQuery, ProblemRow, Progress, RenameDone, RenamePlanView, StatsRequest, StatsView, Stopped }
+export type { ImportPolicy, ImportPreview, ImportProgress, ImportReport, ImportRequest, IssueGroup }
 
 export type LabelClass = { name: string; color: string }
 export type ProjectInfo = { name: string; classes: LabelClass[] }
@@ -105,6 +115,7 @@ declare global {
       reveal(root: string, name: string): Promise<void>
       openConfig(): Promise<void>
       openLink(url: string): Promise<void>
+      legal(kind: LegalKind): Promise<LegalText[]>
       pathForFile(file: File): string
       onSummaries(fn: (p: { root: string; items: ImageItem[]; labels: string[] }) => void): () => void
       onFocus(fn: () => void): () => void
@@ -128,6 +139,37 @@ declare global {
       prelabelRun(root: string, model: string, names: string[], classes: string[], batch?: boolean): Promise<{ done: number; total: number; stopped: boolean; failed: string[]; nothing: string[]; error?: string }>
       prelabelStop(): Promise<void>
       onPrelabel(fn: (p: { root: string; name: string; shapes: Shape[] | null; done: number; total: number; changed: boolean }) => void): () => void
+      checkRun(root: string, req: CheckRequest): Promise<CheckSummary | Stopped>
+      checkStop(root: string): Promise<void>
+      checkView(root: string, query: ProblemQuery): Promise<ProblemPage | null>
+      checkFix(root: string, issue: Pick<ProblemRow, 'code' | 'image' | 'shape'>, shapes: Shape[]): Promise<Shape[] | null>
+      checkReveal(root: string, file: string): Promise<void>
+      onCheck(fn: (p: Progress & { root: string }) => void): () => void
+      renamePlan(root: string, from: string, prefer: LabelFormat): Promise<RenamePlanView | Stopped>
+      renameRun(root: string, from: string, to: string, prefer: LabelFormat): Promise<RenameDone>
+      renameStop(root: string): Promise<void>
+      onRename(fn: (p: Progress & { root: string }) => void): () => void
+      statsRead(root: string, req: StatsRequest): Promise<StatsView | Stopped>
+      statsStop(root: string): Promise<void>
+      statsSave(root: string): Promise<string | null>
+      onStats(fn: (p: Progress & { root: string }) => void): () => void
+      exportCheck(root: string, options: ExportOptions, read: string): Promise<Preflight>
+      exportIssues(id: number, key: string, from: number): Promise<Issue[]>
+      exportFolder(root: string): Promise<{ path: string; problem: string | null } | null>
+      exportKeypoints(): Promise<KeypointsSummary | null>
+      exportMakeKeypoints(root: string, prefer: LabelFormat): Promise<KeypointsSummary | null>
+      exportRun(root: string, options: ExportOptions, out: string): Promise<ExportResult>
+      exportStop(): Promise<void>
+      exportClose(): Promise<void>
+      exportReveal(out: string): Promise<void>
+      onExportProgress(fn: (p: ExportProgress) => void): () => void
+      /** File > Import dataset: reads a dataset into the open folder without writing; null when stopped */
+      importRead(root: string, req: ImportRequest): Promise<ImportPreview | null>
+      importRows(list: 'issues' | 'skipped', code: string, offset: number): Promise<string[]>
+      importWrite(policy: ImportPolicy): Promise<ImportReport>
+      importStop(): Promise<void>
+      importClose(): Promise<void>
+      onImportProgress(fn: (p: ImportProgress) => void): () => void
     }
   }
 }

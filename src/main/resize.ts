@@ -1,3 +1,38 @@
+/*!
+ * Bilinear resize translated from Pillow's src/libImaging/Resample.c
+ * (https://github.com/python-pillow/Pillow), under Pillow's MIT-CMU licence:
+ *
+ * The Python Imaging Library (PIL) is
+ *
+ *     Copyright © 1997-2011 by Secret Labs AB
+ *     Copyright © 1995-2011 by Fredrik Lundh and contributors
+ *
+ * Pillow is the friendly PIL fork. It is
+ *
+ *     Copyright © 2010 by Jeffrey 'Alex' Clark and contributors
+ *
+ * Like PIL, Pillow is licensed under the open source MIT-CMU License:
+ *
+ * By obtaining, using, and/or copying this software and/or its associated
+ * documentation, you agree that you have read, understood, and will comply
+ * with the following terms and conditions:
+ *
+ * Permission to use, copy, modify and distribute this software and its
+ * documentation for any purpose and without fee is hereby granted,
+ * provided that the above copyright notice appears in all copies, and that
+ * both that copyright notice and this permission notice appear in supporting
+ * documentation, and that the name of Secret Labs AB or the author not be
+ * used in advertising or publicity pertaining to distribution of the software
+ * without specific, written prior permission.
+ *
+ * SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS
+ * SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+ * IN NO EVENT SHALL SECRET LABS AB OR THE AUTHOR BE LIABLE FOR ANY SPECIAL,
+ * INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+ * LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
+ * OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+ * PERFORMANCE OF THIS SOFTWARE.
+ */
 // Pillow's bilinear resize (Resample.c), to the bit: osam resizes with it before SAM sees the
 // image, so the masks here come out as labelme's do. Fixed point with 22 bits, a horizontal
 // pass, then a vertical one, each rounded to 8 bits.
@@ -84,6 +119,20 @@ export function pilResize(data: Uint8Array, width: number, height: number, outWi
   return horizontal(vertical(data, width, height, outHeight, channels), width, outHeight, outWidth, channels)
 }
 
+
+/*!
+ * Bilinear resize translated to TypeScript from OpenCV's modules/imgproc/src/resize.cpp, as it is
+ * in OpenCV 4.13.0 and 5.0.0 (https://github.com/opencv/opencv). OpenCV is licensed under the
+ * Apache License, Version 2.0 (https://www.apache.org/licenses/LICENSE-2.0) since 4.5.0, and
+ * resize.cpp's older code under the BSD-3-Clause licence in its header:
+ *
+ * Copyright (C) 2000-2008, 2017, Intel Corporation, all rights reserved.
+ * Copyright (C) 2009, Willow Garage Inc., all rights reserved.
+ * Copyright (C) 2014-2015, Itseez Inc., all rights reserved.
+ * Third party copyrights are property of their respective owners.
+ *
+ * NOTICE.md holds both licences in full, with OpenCV's COPYRIGHT file.
+ */
 
 // OpenCV's bilinear resize of 8-bit images (cv::resize with INTER_LINEAR, imgproc/src/resize.cpp),
 // to the bit: Seamline's predict resizes each tile to its model's input with it, through

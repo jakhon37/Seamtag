@@ -17,3 +17,5 @@ node_modules/
 /test-results/
 /playwright-report/
 /.tools/
+# Made at build time by scripts/notices.mjs
+/THIRD-PARTY-NOTICES.txt

@@ -1,27 +1,19 @@
-import { readdirSync, readFileSync, statSync } from 'fs'
+import { readFileSync } from 'fs'
 import path from 'path'
 import { describe, expect, test } from 'vitest'
 import { accepted, LabelFileError, newShape, parseLabelFile, serializeLabelFile } from '../../src/shared/labelfile'
 import { summarize } from '../../src/shared/labels'
+import { LABELME_FILES, labelmeFile } from '../labelme-files'
 
-const DATA = path.resolve(__dirname, '../data')
 const FIXTURES = path.resolve(__dirname, '../fixtures')
-const EXAMPLES = path.resolve(__dirname, '../../examples')
-
-function labelFiles(dir: string): string[] {
-  return readdirSync(dir).flatMap((name) => {
-    const full = path.join(dir, name)
-    if (statSync(full).isDirectory()) return labelFiles(full)
-    if (!name.endsWith('.json')) return []
-    const doc = JSON.parse(readFileSync(full, 'utf8'))
-    return Array.isArray(doc.shapes) ? [full] : []
-  })
-}
 
 describe('reading', () => {
-  test("every label file in labelme's examples and test data reads", () => {
-    const files = [...labelFiles(DATA), ...labelFiles(EXAMPLES)]
-    expect(files.length).toBeGreaterThan(20)
+  test("every label file in labelme's examples and test data reads", async () => {
+    // labelme 5.11.4's examples, fetched; the label files in its test data are links to four of them
+    const json = Object.keys(LABELME_FILES['v5.11.4']).filter((file) => file.endsWith('.json'))
+    const files = (await Promise.all(json.map((file) => labelmeFile('v5.11.4', file))))
+      .filter((file) => Array.isArray(JSON.parse(readFileSync(file, 'utf8')).shapes))
+    expect(files).toHaveLength(18)
     for (const file of files) {
       const doc = parseLabelFile(readFileSync(file, 'utf8'))
       expect(doc.shapes.every((s) => s.points.length > 0), file).toBe(true)
@@ -92,8 +84,8 @@ describe('writing', () => {
     expect(serializeLabelFile(parseLabelFile(text))).toBe(text)
   })
 
-  test('older files come back in the current layout, with nothing lost', () => {
-    const text = readFileSync(path.join(DATA, 'annotated/2011_000003.json'), 'utf8')
+  test('older files come back in the current layout, with nothing lost', async () => {
+    const text = readFileSync(await labelmeFile('v5.11.4', 'examples/instance_segmentation/data_annotated/2011_000003.json'), 'utf8')
     const doc = parseLabelFile(text)
     const again = parseLabelFile(serializeLabelFile(doc))
     expect(again).toEqual(doc)

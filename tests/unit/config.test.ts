@@ -5,6 +5,7 @@ import { describe, expect, test } from 'vitest'
 import { defaultConfig, formatKeys, matches, mergeConfig, migrateConfig, parseKeys } from '../../src/shared/config'
 import { loadConfig, parseArgs } from '../../src/main/config'
 import { autoColor, LABEL_COLORMAP, labelColor } from '../../src/renderer/src/colors'
+import { labelmeFile } from '../labelme-files'
 
 const key = (k: string, mods: Partial<{ ctrl: boolean; shift: boolean; alt: boolean; meta: boolean }> = {}) =>
   ({ key: k, ctrlKey: !!mods.ctrl, shiftKey: !!mods.shift, altKey: !!mods.alt, metaKey: !!mods.meta })
@@ -61,10 +62,8 @@ describe('shortcuts, written as Qt writes them', () => {
 })
 
 describe('config', () => {
-  const fixture = (name: string) => path.join(__dirname, '../fixtures', name, 'default_config.yaml')
-
-  test("labelme 7.9.1's whole default config loads, every key known", () => {
-    const { config, warnings } = loadConfig(parseArgs(['--config', fixture('labelme7')]))
+  test("labelme 7.9.1's whole default config loads, every key known", async () => {
+    const { config, warnings } = loadConfig(parseArgs(['--config', await labelmeFile('v7.9.1', 'labelme/_config/default_config.yaml')]))
     expect(warnings).toEqual([])
     // labelme's own defaults where Seamtag's differ
     expect(config.display_label_popup).toBe(true)
@@ -75,8 +74,8 @@ describe('config', () => {
     expect(config.shape_color.mode).toBe('auto')
   })
 
-  test("labelme 5.8.1's whole default config, as labelme 5 copied it to ~/.labelmerc, migrates as labelme 7 migrates it", () => {
-    const { config, warnings } = loadConfig(parseArgs(['--config', fixture('labelme5')]))
+  test("labelme 5.8.1's whole default config, as labelme 5 copied it to ~/.labelmerc, migrates as labelme 7 migrates it", async () => {
+    const { config, warnings } = loadConfig(parseArgs(['--config', await labelmeFile('v5.8.1', 'labelme/config/default_config.yaml')]))
     expect(warnings).toEqual([])
     expect(config.with_image_data).toBe(true)
     expect(config.shape_color).toEqual({ mode: 'auto', auto: { shift: 0 }, uniform: { color: [0, 255, 0] }, by_label: { colors: null, fallback: [0, 255, 0] } })

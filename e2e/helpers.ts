@@ -56,11 +56,14 @@ export function appEnv(home: string) {
 
 /**
  * The app on a folder or file, with its own home folder and profile, so a test never reads or
- * writes the settings, config or recent files of the person running it.
+ * writes the settings, config or recent files of the person running it. `env` adds to its environment.
  */
-export async function launch(target: string | null, extra: string[] = [], home?: string) {
+export async function launch(target: string | null, extra: string[] = [], home?: string, env: Record<string, string> = {}) {
   const own = home ?? mkdtempSync(path.join(tmpdir(), 'seamtag-home-'))
-  const app = await electron.launch({ args: [path.resolve(__dirname, '..'), ...HEADLESS, ...(target ? [target] : []), ...extra], env: appEnv(own) })
+  const app = await electron.launch({
+    args: [path.resolve(__dirname, '..'), ...HEADLESS, ...(target ? [target] : []), ...extra],
+    env: { ...appEnv(own), ...env }
+  })
   const page = await app.firstWindow()
   const errors: string[] = []
   page.on('pageerror', (e) => errors.push(e.message))
