@@ -54,6 +54,11 @@ export const withClass = (classes: LabelClass[], name: string, color: string): L
 export const recolored = (classes: LabelClass[], name: string, color: string): LabelClass[] =>
   classes.some((c) => c.name === name) ? classes.map((c) => (c.name === name ? { ...c, color } : c)) : withClass(classes, name, color)
 
+// A pose's points and lines by side, as MMPose draws them: a left-right mix-up shows as crossed
+// colours. Bright, with a dark edge (HALO), so they read on any photo and in either theme.
+export const SIDE_COLORS = { left: '#3ddc84', right: '#ff8a3d', centre: '#4da3ff' } as const
+export const HALO = 'rgba(0, 0, 0, 0.6)'
+
 export function withAlpha(color: string, alpha: number) {
   const v = parseInt(color.slice(1), 16)
   return `rgba(${(v >> 16) & 255}, ${(v >> 8) & 255}, ${v & 255}, ${alpha})`

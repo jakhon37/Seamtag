@@ -1,20 +1,29 @@
 import {
   Check, CheckCheck, Circle, Eraser, Eye, EyeOff, Hexagon, Maximize, MousePointer2, Paintbrush, Plus, Redo2, SkipForward,
-  Slash, Sparkles, Spline, Square, Trash2, Undo2, Wand2, X, Dot, ScanLine, Lock, BadgeCheck, RectangleHorizontal, Type, Focus
+  Slash, Sparkles, Spline, Square, Trash2, Undo2, Wand2, X, Dot, ScanLine, Lock, BadgeCheck, RectangleHorizontal, Type, Focus,
+  PersonStanding, Accessibility, ChevronRight, ChevronDown
 } from 'lucide-react'
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { AI_OUTPUTS, type AiOutput, type Config, formatKeys, matches, type ShortcutName, shortcutList } from '../../shared/config'
+import type { KeypointSchema } from '../../shared/dataset'
 import {
   asBox, boxOf, FORMAT_NAMES, holdsBoxesOnly, keepsDifficult, keepsVerified, LABEL_FORMATS, type LabelFormat, NEXT_FORMAT
 } from '../../shared/formats'
 import { accepted, isAi, newShape, scoreOf, type Shape, type ShapeType } from '../../shared/labelfile'
 import { EMPTY_SUMMARY, summarize } from '../../shared/labels'
-import { labelColor, labelList, recolored, withAlpha, withClass } from './colors'
+import {
+  builtInKeypoints, type FolderKeypoints, isHidden, keypointNames, nextGroupId, type PoseGroup, poseShapes, posesIn, sidesOf
+} from '../../shared/skeleton'
+import { HALO, labelColor, labelList, recolored, SIDE_COLORS, withAlpha, withClass } from './colors'
 import { eraseShapes, paintShapes, strokeRegion } from './geometry'
 import LabelDialog, { flagsFor, type LabelChoice, type LabelRequest } from './LabelDialog'
 import { ContextMenu } from './Menu'
 import Modal from './Modal'
 import Models from './Models'
+import {
+  aiPosePoints, askedNow, classForModel, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseLayout, type PoseSession, regroup, type ReviewItem,
+  reviewItems, shapeRows, spoken, stepOf, swapSides, withHidden, withPoints, withSession
+} from './posing'
 import Problems, { counted, RenameDialog } from './Problems'
 import {
   addPointsToEdge, bounds, boxCenter, canRemovePoint, CLOSED, contains, describe, EDITABLE_POINTS, edges, insertPoint, mergePolygons,
@@ -27,13 +36,14 @@ import {
   type PrelabelModel, type ProblemRow, type ProjectInfo, type Progress, type ProposedShape, type RenameDone, type RunModel
 } from './types'
 
-export type Mode = 'edit' | 'polygon' | 'rectangle' | 'oriented_rectangle' | 'circle' | 'line' | 'point' | 'linestrip' | 'ai_points' | 'ai_box' | 'brush' | 'eraser'
-export const CREATE_MODES: Mode[] = ['polygon', 'rectangle', 'oriented_rectangle', 'circle', 'line', 'point', 'linestrip', 'ai_points', 'ai_box']
-// LabelImg's formats keep boxes only: AI shapes become the box around them
+export type Mode =
+  | 'edit' | 'polygon' | 'rectangle' | 'oriented_rectangle' | 'circle' | 'line' | 'point' | 'linestrip' | 'pose' | 'ai_points' | 'ai_box' | 'ai_pose' | 'brush' | 'eraser'
+export const CREATE_MODES: Mode[] = ['polygon', 'rectangle', 'oriented_rectangle', 'circle', 'line', 'point', 'linestrip', 'pose', 'ai_points', 'ai_box', 'ai_pose']
+// LabelImg's formats keep boxes only: AI shapes become the box around them. A pose's points have no place there.
 const BOX_MODES = new Set<Mode>(['edit', 'rectangle', 'ai_points', 'ai_box'])
 const AI_MODES = new Set<Mode>(['ai_points', 'ai_box'])
-// labelme 7's names for the AI tools, in its crosshair settings
-const CROSSHAIR: Partial<Record<Mode, string>> = { ai_points: 'ai_points_to_shape', ai_box: 'ai_box_to_shape' }
+// labelme 7's names for the AI tools, in its crosshair settings; the pose tools start with a box, so they follow the box tools'
+const CROSSHAIR: Partial<Record<Mode, string>> = { ai_points: 'ai_points_to_shape', ai_box: 'ai_box_to_shape', pose: 'rectangle', ai_pose: 'ai_box_to_shape' }
 export const AI_OUTPUT_NAMES: Record<AiOutput, string> = { polygon: 'Polygon', mask: 'Mask', rectangle: 'Rectangle', circle: 'Circle', oriented_rectangle: 'Rotated box' }
 
 export type Settings = {
@@ -50,6 +60,8 @@ export type Settings = {
   aiOutput: AiOutput
   /** The model for the AI text prompt */
   aiTextModel: string
+  /** The model for AI pose */
+  poseModel: string
   /** The pre-labelling model last picked with Choose a model…, for folders with no runs and none chosen */
   prelabelModel: string
   /** The pre-labelling model chosen for each folder: from its runs in the menu, or with Choose a model… */
@@ -145,22 +157,15 @@ const RELOADED = 'These labels changed in another app (such as Seamline), so the
 const COLOR_TITLES = { line: 'Shape line colour', fill: 'Shape fill colour', draw: 'Box line colour' }
 const MODE_NAMES: Record<Mode, string> = {
   edit: 'Edit', polygon: 'Polygon', rectangle: 'Rectangle', oriented_rectangle: 'Rotated box', circle: 'Circle', line: 'Line', point: 'Point',
-  linestrip: 'Line strip', ai_points: 'AI points', ai_box: 'AI box', brush: 'Brush', eraser: 'Eraser'
+  linestrip: 'Line strip', pose: 'Pose', ai_points: 'AI points', ai_box: 'AI box', ai_pose: 'AI pose', brush: 'Brush', eraser: 'Eraser'
 }
+// Other poses, while one is selected or being placed
+const DIM = 0.35
 
 /** The pre-labelling models chosen for folders, with this folder's choice: the last 50 folders' are kept */
 function chooseFor(chosen: Record<string, string>, root: string, model: string) {
   const { [root]: _, ...rest } = chosen
   return Object.fromEntries([...Object.entries(rest), [root, model]].slice(-50))
-}
-
-// Least certain first; shapes without a score come last
-function reviewOrder(list: Shape[]) {
-  return list
-    .map((s, i) => ({ s, i }))
-    .filter(({ s }) => isAi(s) && !s.hidden)
-    .sort((a, b) => (scoreOf(a.s) ?? 1) - (scoreOf(b.s) ?? 1) || a.i - b.i)
-    .map(({ i }) => i)
 }
 
 /** A shape's own colour, [r, g, b, a] as labelme 3 and 4 kept it and LabelImg sets it; null for its label's */
@@ -253,6 +258,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const [statsOpen, setStatsOpen] = useState(false)
   // Counts up when label files change outside the window's own saves, so Statistics reads them again
   const [labelsChanged, setLabelsChanged] = useState(0)
+  // The folder's keypoints file, which poses are drawn and placed with: COCO's person until it's read
+  const [keypoints, setKeypoints] = useState<FolderKeypoints>(() => ({ schema: builtInKeypoints(), file: null, problem: null }))
+  // The poses opened or folded by hand in the Shapes list, by group_id. Others are folded, unless
+  // some of their points are selected without their box.
+  const [poseOpen, setPoseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map())
+  // What the Pose tool asks for now, for the status bar; '' when no pose is being placed
+  const [poseStep, setPoseStep] = useState('')
+  // AI pose's score threshold: the config's, changed in its toolbar for the session
+  const [poseScore, setPoseScore] = useState(config.ai.pose_score)
   const [, setTick] = useState(0)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -337,12 +351,25 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const prelabelling = useRef<Promise<unknown> | null>(null)
   const batchRef = useRef(batch)
   batchRef.current = batch
+  // A pose being placed, one keypoint at a time, and the last one placed, for the guide the next is placed over
+  const posing = useRef<PoseSession | null>(null)
+  const lastLayout = useRef<PoseLayout | null>(null)
+  const poseCache = useRef<{ shapes: Shape[]; schema: KeypointSchema; poses: PoseGroup[] } | null>(null)
+  // Set each render: ends the pose being placed, keeping what's placed
+  const endPoseRef = useRef<() => void>(() => {})
 
+  // Keypoint names name a pose's points, not classes: they stay out of the label list, its keys and counts
+  const notClasses = useMemo(() => {
+    const names = keypointNames(keypoints.schema)
+    for (const cls of Object.keys(keypoints.schema.classes)) names.delete(cls)
+    return names
+  }, [keypoints.schema])
+  const poses = useMemo(() => posesIn(shapes, keypoints.schema), [shapes, keypoints.schema])
   // The label list as it was when a label was last added or recoloured here, which keeps its order
   const keptLabels = useRef<string[] | null>(null)
   // The label list: config labels, then a Seamline project's classes, then labels found in the files
-  const classes = useMemo(() => labelList(config, project.classes, [...discovered, ...shapes.map((s) => s.label)], keptLabels.current),
-    [config, project.classes, discovered, shapes])
+  const classes = useMemo(() => labelList(config, project.classes, [...discovered, ...shapes.map((s) => s.label)].filter((l) => !notClasses.has(l)), keptLabels.current),
+    [config, project.classes, discovered, shapes, notClasses])
   // A label gone from the list, as a class another app deleted, is picked again if it comes back; meanwhile new shapes ask for theirs
   const activeAt = classes.findIndex((c) => c.name === active)
   const activeClass = active === undefined ? 0 : activeAt < 0 ? null : activeAt
@@ -350,8 +377,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   useEffect(() => {
     if (active === undefined && classes.length) setActive(classes[0].name)
   }, [classes, active])
-  const opts = useRef({ showShapes, settings, classes, mode, activeClass, brushSize, bc })
-  opts.current = { showShapes, settings, classes, mode, activeClass, brushSize, bc }
+  const opts = useRef({ showShapes, settings, classes, mode, activeClass, brushSize, bc, keypoints: keypoints.schema })
+  opts.current = { showShapes, settings, classes, mode, activeClass, brushSize, bc, keypoints: keypoints.schema }
   // labelme 7's allow_out_of_bounds_points: points may go past the image's edge
   const free = config.canvas.allow_out_of_bounds_points
   const imageSize = (): [number, number] | null => (free || !metaRef.current ? null : [metaRef.current.width, metaRef.current.height])
@@ -362,6 +389,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     return at >= 0 ? list[at].color : labelColor(label, list.length, config)
   }, [config])
   const currentLabel = () => (activeClass !== null ? classes[activeClass]?.name : undefined)
+  /** The poses in a list of shapes, worked out again only when the list or the keypoints change */
+  const posesOf = (list: Shape[]) => {
+    const schema = opts.current.keypoints
+    const c = poseCache.current
+    if (c?.shapes === list && c.schema === schema) return c.poses
+    const found = posesIn(list, schema)
+    poseCache.current = { shapes: list, schema, poses: found }
+    return found
+  }
 
   const setSelected = (next: number[]) => {
     selectedRef.current = next
@@ -373,6 +409,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       setNotice(`${FORMAT_NAMES[formatRef.current]} keeps boxes only: switch the save format to LabelMe JSON to draw other shapes.`)
       return
     }
+    // A pose being placed keeps what's placed, as Escape leaves it
+    endPoseRef.current()
     draft.current = null
     aiSeq.current++
     setModeState(m)
@@ -478,9 +516,19 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const culling = config.performance.enable_viewport_culling
     const sel = new Set(selectedRef.current)
     const hv = hover.current
+    // A pose being placed is drawn as it would be added
+    const ps = posing.current
+    const list = ps ? withSession(shapesRef.current, ps) : shapesRef.current
+    const schema = o.keypoints
+    const posed = posesOf(list)
+    const poseOf = poseIndex(posed)
+    // While a pose is selected or placed, the others dim
+    const focused = new Set(posed.filter((p) => p.group === ps?.group || poseShapes(p).some((i) => sel.has(i))))
+    const fadeOf = (p: PoseGroup | undefined) => (p && (focused.size || ps) && !focused.has(p) ? DIM : 1)
     if (o.showShapes) {
-      shapesRef.current.forEach((s, i) => {
-        if (s.hidden) return
+      list.forEach((s, i) => {
+        // A pose's points are drawn with their pose, below
+        if (s.hidden || (poseOf.has(i) && poseOf.get(i)!.box !== i)) return
         if (culling) {
           const [a, b, c, d] = bounds(s)
           const pad = 10 / scale
@@ -490,24 +538,26 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         const fillColor = ownColor(s.other.fill_color) ?? colorOf(s.label)
         const isSel = sel.has(i)
         const isHover = hv?.shape === i
+        const fade = fadeOf(poseOf.get(i))
+        ctx.globalAlpha = fade
         if (s.shape_type === 'mask' && s.mask && s.points.length >= 2) {
           const c = maskCanvas(s.mask, fillColor, () => invalidate())
           if (c) {
-            ctx.globalAlpha = isSel ? Math.min(1, alpha + 0.25) : Math.max(alpha, 0.35)
+            ctx.globalAlpha = fade * (isSel ? Math.min(1, alpha + 0.25) : Math.max(alpha, 0.35))
             const [x0, y0] = S([Math.min(s.points[0][0], s.points[1][0]), Math.min(s.points[0][1], s.points[1][1])])
             ctx.imageSmoothingEnabled = false
             ctx.drawImage(c, x0, y0, c.width * scale, c.height * scale)
             ctx.imageSmoothingEnabled = scale < 2
-            ctx.globalAlpha = 1
+            ctx.globalAlpha = fade
           }
         }
         path(s)
         const closed = CLOSED.has(s.shape_type) || s.shape_type === 'point'
         if (closed && s.shape_type !== 'mask') {
-          ctx.globalAlpha = isSel ? Math.min(1, alpha + 0.2) : isHover ? Math.min(1, alpha + 0.08) : alpha
+          ctx.globalAlpha = fade * (isSel ? Math.min(1, alpha + 0.2) : isHover ? Math.min(1, alpha + 0.08) : alpha)
           ctx.fillStyle = fillColor
           ctx.fill('evenodd')
-          ctx.globalAlpha = 1
+          ctx.globalAlpha = fade
         }
         ctx.strokeStyle = isSel ? '#ffffff' : color
         ctx.lineWidth = isSel ? 2.5 : isHover ? 2 : 1.5
@@ -566,7 +616,123 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
             ctx.stroke()
           }
         }
+        ctx.globalAlpha = 1
       })
+      // Poses: the keypoints file's lines between a pose's points, then the points, each in its
+      // side's colour, whatever the labels' colours and the fill. Hidden points are rings, with
+      // dashed lines to them. Points keep their size on screen at any zoom.
+      const radius = pointRadius + 1
+      const notes: { text: string; x: number; y: number; fade: number }[] = []
+      for (const p of posed) {
+        const kps = schema.classes[p.cls] ?? []
+        const sides = sidesOf(schema, p.cls)
+        const fade = fadeOf(p)
+        const shown = (k: number) => {
+          const i = k < 0 ? null : p.points[k]
+          return i === null || list[i].hidden ? null : list[i]
+        }
+        ctx.globalAlpha = fade
+        for (const [a, b] of schema.skeleton?.[p.cls] ?? []) {
+          const ka = kps.indexOf(a), kb = kps.indexOf(b)
+          const sa = shown(ka), sb = shown(kb)
+          if (!sa || !sb) continue
+          ctx.beginPath()
+          ctx.moveTo(...S(sa.points[0]))
+          ctx.lineTo(...S(sb.points[0]))
+          ctx.setLineDash(isHidden(sa) || isHidden(sb) ? [5, 4] : [])
+          ctx.strokeStyle = HALO
+          ctx.lineWidth = 4
+          ctx.stroke()
+          ctx.strokeStyle = SIDE_COLORS[sides[ka] === sides[kb] ? sides[ka] : 'centre']
+          ctx.lineWidth = 2
+          ctx.stroke()
+        }
+        ctx.setLineDash([])
+        // A pose selected or being placed shows its points' numbers; names show on hover and with Display labels.
+        // Points selected without their box are ringed.
+        const numbered = focused.has(p)
+        const whole = p.box !== null && sel.has(p.box)
+        const dot = (i: number, k: number | null) => {
+          const s = list[i]
+          if (s.hidden) return
+          const side = sides[k ?? kps.indexOf(s.label)] ?? 'centre'
+          const [px, py] = S(s.points[0])
+          const lit = hv?.shape === i
+          ctx.beginPath()
+          ctx.arc(px, py, lit ? radius + 1.5 : radius, 0, Math.PI * 2)
+          if (isHidden(s)) {
+            ctx.strokeStyle = HALO
+            ctx.lineWidth = 4.5
+            ctx.stroke()
+            ctx.strokeStyle = SIDE_COLORS[side]
+            ctx.lineWidth = 2
+            ctx.stroke()
+          } else {
+            ctx.fillStyle = SIDE_COLORS[side]
+            ctx.fill()
+            ctx.strokeStyle = HALO
+            ctx.lineWidth = 1.5
+            ctx.stroke()
+          }
+          if (sel.has(i) && !whole) {
+            ctx.beginPath()
+            ctx.arc(px, py, radius + 3.5, 0, Math.PI * 2)
+            ctx.strokeStyle = '#ffffff'
+            ctx.lineWidth = 2
+            ctx.stroke()
+          }
+          const text = [numbered && k !== null ? String(k + 1) : '', lit || o.settings.displayLabels ? spoken(s.label) : ''].filter(Boolean).join(' ')
+          if (text) notes.push({ text, x: px + radius + 5, y: py, fade })
+        }
+        p.points.forEach((i, k) => i !== null && dot(i, k))
+        for (const i of p.extra) dot(i, null)
+        ctx.globalAlpha = 1
+      }
+      // The guide: the last pose placed here, scaled into the box of the one being placed, its
+      // keypoint asked for now ringed
+      const guide = ps?.box && lastLayout.current?.cls === ps.cls ? placeLayout(lastLayout.current, boxOf(ps.box)) : null
+      if (ps && guide) {
+        const kps = schema.classes[ps.cls] ?? []
+        const sides = sidesOf(schema, ps.cls)
+        const now = askedNow(ps)
+        ctx.globalAlpha = 0.3
+        ctx.strokeStyle = '#ffffff'
+        ctx.lineWidth = 1.5
+        for (const [a, b] of schema.skeleton?.[ps.cls] ?? []) {
+          const ga = guide[kps.indexOf(a)], gb = guide[kps.indexOf(b)]
+          if (!ga || !gb) continue
+          ctx.beginPath()
+          ctx.moveTo(...S(ga))
+          ctx.lineTo(...S(gb))
+          ctx.stroke()
+        }
+        guide.forEach((at, k) => {
+          if (!at) return
+          ctx.globalAlpha = k === now ? 0.9 : 0.4
+          ctx.beginPath()
+          ctx.arc(...S(at), k === now ? radius + 3 : radius - 1, 0, Math.PI * 2)
+          ctx.strokeStyle = SIDE_COLORS[sides[k] ?? 'centre']
+          ctx.lineWidth = 2
+          ctx.stroke()
+        })
+        ctx.globalAlpha = 1
+      }
+      if (notes.length) {
+        ctx.font = '600 11px system-ui, sans-serif'
+        ctx.textBaseline = 'middle'
+        ctx.lineJoin = 'round'
+        for (const n of notes) {
+          ctx.globalAlpha = n.fade
+          ctx.strokeStyle = HALO
+          ctx.lineWidth = 3
+          ctx.strokeText(n.text, n.x, n.y)
+          ctx.fillStyle = '#ffffff'
+          ctx.fillText(n.text, n.x, n.y)
+        }
+        ctx.globalAlpha = 1
+        ctx.textBaseline = 'alphabetic'
+        ctx.lineJoin = 'miter'
+      }
       const g = ghost.current
       if (g) {
         ctx.setLineDash([5, 4])
@@ -584,12 +750,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         }
         ctx.setLineDash([])
       }
-      // LabelImg's Display Labels: each label at its shape's top left, inside when there's no room above
+      // LabelImg's Display Labels: each label at its shape's top left, inside when there's no room above;
+      // a pose's points have their names beside them
       if (o.settings.displayLabels) {
         ctx.font = '600 12px system-ui, sans-serif'
         ctx.textBaseline = 'middle'
-        shapesRef.current.forEach((s) => {
-          if (s.hidden || !s.label) return
+        list.forEach((s, i) => {
+          if (s.hidden || !s.label || (poseOf.has(i) && poseOf.get(i)!.box !== i)) return
           const text = s.group_id !== null ? `${s.label} (${s.group_id})` : s.label
           const [x0, y0] = bounds(s)
           const [lx, top] = S([x0, y0])
@@ -713,6 +880,36 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       ctx.stroke()
       ctx.setLineDash([])
     }
+    // The Pose tool's badge by the pointer: the keypoint asked for, a ring with Shift for a hidden one
+    const asked = ps ? askedNow(ps) : null
+    if (ps && asked !== null && overCanvas.current) {
+      const kps = schema.classes[ps.cls] ?? []
+      const text = `${asked + 1}/${kps.length} ${spoken(kps[asked] ?? '')}${shift.current ? ' · hidden' : ''}`
+      ctx.font = '600 12px system-ui, sans-serif'
+      ctx.textBaseline = 'middle'
+      const w = ctx.measureText(text).width + 24, h = 22
+      const [mx, my] = S(mouse.current)
+      const bx = mx + 16 + w > W ? mx - 16 - w : mx + 16
+      const by = my + 16 + h > H ? my - 16 - h : my + 16
+      ctx.fillStyle = 'rgba(16, 18, 22, 0.88)'
+      ctx.beginPath()
+      ctx.roundRect(bx, by, w, h, 5)
+      ctx.fill()
+      const color = SIDE_COLORS[sidesOf(schema, ps.cls)[asked] ?? 'centre']
+      ctx.beginPath()
+      ctx.arc(bx + 10, by + h / 2, 4, 0, Math.PI * 2)
+      if (shift.current) {
+        ctx.strokeStyle = color
+        ctx.lineWidth = 2
+        ctx.stroke()
+      } else {
+        ctx.fillStyle = color
+        ctx.fill()
+      }
+      ctx.fillStyle = '#ffffff'
+      ctx.fillText(text, bx + 19, by + h / 2 + 0.5)
+      ctx.textBaseline = 'alphabetic'
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [colorOf, config])
 
@@ -743,7 +940,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     // Drawn open until it's closed
     if (md === 'polygon' || md === 'linestrip') return newShape('', 'linestrip', [...dr.points, p])
     if (md === 'rectangle') return newShape('', 'rectangle', [first, squareNow() ? squareFrom(first, p) : p])
-    if (md === 'ai_box') return newShape('', 'rectangle', [first, p])
+    if (md === 'ai_box' || md === 'pose' || md === 'ai_pose') return newShape('', 'rectangle', [first, p])
     if (md === 'oriented_rectangle') {
       // Two corners make one side; then the pointer sets how wide it is
       if (dr.points.length === 1) return newShape('', 'line', [first, p])
@@ -808,7 +1005,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     else setNotice(RELOADED)
   }, [onError, root])
   /** Nothing here that reading the labels again would lose: no unsaved change, and nothing being drawn, dragged or asked */
-  const idle = useCallback(() => !dirty.current && !drag.current && !draft.current && !document.querySelector('.modal-back, .context'), [])
+  const idle = useCallback(() => !dirty.current && !drag.current && !draft.current && !posing.current && !document.querySelector('.modal-back, .context'), [])
 
   // Saving: a moment after each change when saving is automatic, or when asked
   const doSave = useCallback(async (job: NonNullable<typeof pending.current>, target?: string) => {
@@ -900,6 +1097,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
 
   /** Before another image or folder opens: save, or ask when saving isn't automatic */
   const canLeave = useCallback(async ({ stay = false }: { stay?: boolean } = {}) => {
+    // A pose being placed is kept as far as it's placed, then saved with the rest
+    endPoseRef.current()
     if (!dirty.current) return true
     if (settingsRef.current.autoSave) return flush()
     const name = loadedName.current
@@ -937,7 +1136,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   /** What here waits on the user, which opening another image or folder would cut short: '' when nothing does */
   const busy = useCallback(() => {
     if (window.api.asking() || document.querySelector('.modal-back, .context')) return 'A dialog or menu is open here: close it, then try again.'
-    if (draft.current || (drag.current && drag.current.kind !== 'pan')) return 'A shape is being drawn here: finish it, then try again.'
+    if (draft.current || posing.current || (drag.current && drag.current.kind !== 'pan')) return 'A shape is being drawn here: finish it, then try again.'
     return ''
   }, [])
 
@@ -1005,6 +1204,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         undo.current = kept?.undo ?? []
         redo.current = kept?.redo ?? []
         draft.current = null
+        setPosing(null)
         drag.current = null
         hover.current = null
         flagsRef.current = flags
@@ -1031,6 +1231,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         setMeta(m)
         setShapesState(loaded)
         setSelected([])
+        if (!again) setPoseOpen(new Map())
+        // Until a pose is placed here, the guide is the last pose of the first image that has one
+        if (!lastLayout.current) {
+          lastLayout.current = posesOf(loaded).map((p) => layoutOf(loaded, p)).filter((l) => l !== null).pop() ?? null
+        }
         dirty.current = false
         pending.current = null
         setSaved('saved')
@@ -1049,8 +1254,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         if (copied) queueSave()
         if (broken) onError(`${name}: its label file can't be read, so it's shown without labels and won't be changed. ${broken}`)
         if (undoHere) stepHistory(undo, redo)
-        const first = reviewOrder(shapesRef.current)[0]
-        if ((fromReview || undoHere) && first !== undefined) selectForReview(first, shapesRef.current)
+        const first = reviewSteps(shapesRef.current)[0]
+        if ((fromReview || undoHere) && first) selectStep(first, shapesRef.current)
         const pick = selectOnLoad.current
         selectOnLoad.current = null
         if (pick?.name === name && pick.shape !== undefined && shapesRef.current[pick.shape]) selectForReview(pick.shape, shapesRef.current)
@@ -1071,6 +1276,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         redo.current = []
         drag.current = null
         draft.current = null
+        setPosing(null)
         setMeta(null)
         setShapesState([])
         setSelected([])
@@ -1084,7 +1290,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [images[index]?.name, root, reload])
 
-  useEffect(invalidate, [showShapes, settings.fill, settings.fillDrawing, settings.displayLabels, verified, selected, mode, activeClass, brushSize, classes, bc, invalidate])
+  useEffect(invalidate, [showShapes, settings.fill, settings.fillDrawing, settings.displayLabels, verified, selected, mode, activeClass, brushSize, classes, bc, keypoints, invalidate])
   // LabelImg's formats keep boxes: a tool for other shapes gives way to the rectangle
   useEffect(() => {
     if (holdsBoxesOnly(settings.format) && !BOX_MODES.has(mode)) setModeState('rectangle')
@@ -1096,7 +1302,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     return () => clearTimeout(timer)
   }, [notice])
   useEffect(() => {
-    document.querySelector('.shape.on')?.scrollIntoView({ block: 'nearest' })
+    // A keypoint's own row when its pose is open, else its pose's
+    ;(document.querySelector('.shapes .shape.on') ?? document.querySelector('.shapes .pose-row.on'))?.scrollIntoView({ block: 'nearest' })
   }, [selected])
   useEffect(() => {
     document.querySelector('.file.on')?.scrollIntoView({ block: 'nearest' })
@@ -1147,6 +1354,44 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   useEffect(() => {
     window.api.prelabelModels(root).then((list) => alive.current && setRunModels(list)).catch(() => alive.current && setRunModels([]))
   }, [root])
+  // The folder's keypoints file, read as the folder opens and again as the window comes back, as
+  // another app may change it; what's wrong with it is said when that changes
+  const keypointsRef = useRef(keypoints)
+  const takeKeypoints = (k: FolderKeypoints) => {
+    const was = keypointsRef.current
+    keypointsRef.current = k
+    if (JSON.stringify(was) !== JSON.stringify(k)) setKeypoints(k)
+    if (k.problem && k.problem !== was.problem) onError(k.problem)
+  }
+  const readKeypoints = useRef(async () => {})
+  readKeypoints.current = async () => {
+    try {
+      const k = await window.api.keypointsGet(root)
+      if (alive.current) takeKeypoints(k)
+    } catch (e) {
+      if (alive.current) onError(`The folder's keypoints file can't be read: ${plainError(e)}`)
+    }
+  }
+  useEffect(() => {
+    readKeypoints.current()
+  }, [root])
+  /** Dataset > Keypoints: the folder's keypoints file made from COCO's person, a file chosen, or the folder's own poses */
+  const changeKeypoints = async (how: 'coco' | 'choose' | 'make') => {
+    // A pose being placed is placed with the keypoints it started with
+    endPose()
+    // Made from the label files, with the open image's changes saved first
+    if (how === 'make' && !(await canLeave({ stay: true }))) return
+    try {
+      const k = how === 'coco' ? await window.api.keypointsSet(root, builtInKeypoints())
+        : how === 'choose' ? await window.api.keypointsChoose(root)
+          : await window.api.keypointsMake(root, formatRef.current)
+      if (!k || !alive.current) return
+      takeKeypoints(k)
+      setNotice(`Keypoints: ${Object.entries(k.schema.classes).map(([cls, names]) => `${cls}, ${counted(names.length, 'point')}`).join('; ')}.`)
+    } catch (e) {
+      onError(plainError(e))
+    }
+  }
   // The folder as another app, such as Seamline, left it: models it exported, images added or
   // removed, label files rewritten. One read at a time; the window coming back meanwhile reads it once more.
   const refreshFolder = useCallback(async () => {
@@ -1199,7 +1444,10 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         onError('These labels changed in another app (such as Seamline). Saving will reload them, and the changes made here since will be lost: copy any shapes you want to keep first.', `${root}\n${name}`)
       }
     }
-    if (alive.current) refreshFolder()
+    if (alive.current) {
+      refreshFolder()
+      readKeypoints.current()
+    }
   }), [root, idle, reloadChanged, onError, refreshFolder])
   useEffect(() => window.api.onAiDownload((p) => setDownload(p.done >= p.total ? null : p)), [])
   useEffect(() => window.api.onCheck(({ root: at, ...p }) => {
@@ -1321,6 +1569,116 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     else if (md === 'linestrip' && dr.points.length >= 2) finishShape('linestrip', dr.points)
     invalidate()
   }
+  /** A box made with a two-corner tool: the shape, or what AI box, AI pose or the Pose tool make of it */
+  const boxDone = (md: Mode, a: Pt, b: Pt) => {
+    if (md === 'ai_box') runBox(a, b)
+    else if (md === 'ai_pose') runPose(a, b)
+    else if (md === 'pose') startPose(a, b)
+    else finishShape(md as ShapeType, [a, b])
+  }
+
+  // The Pose tool: a box, dragged or one the image has, then each keypoint of its class in turn
+  /** The pose being placed, with what it asks for now in the status bar */
+  const setPosing = (s: PoseSession | null) => {
+    posing.current = s
+    const k = s ? askedNow(s) : null
+    const names = s ? opts.current.keypoints.classes[s.cls] ?? [] : []
+    setPoseStep(s && k !== null ? `${k + 1}/${names.length} ${spoken(names[k] ?? '')}` : '')
+    invalidate()
+  }
+  /** The class a pose drawn now takes: the class picked, if it has keypoints, else the keypoints file's first */
+  const poseClass = () => {
+    const schema = opts.current.keypoints
+    const picked = currentLabel()
+    return picked !== undefined && Object.hasOwn(schema.classes, picked) ? picked : Object.keys(schema.classes)[0] ?? null
+  }
+  /** With validate_label: exact, a pose's box takes only a listed label, as any shape does */
+  const listedLabel = (label: string) => {
+    if (config.validate_label !== 'exact' || (config.labels ?? []).includes(label)) return true
+    onError(`“${label}” isn't in the label list, and only listed labels are allowed.`)
+    return false
+  }
+  const startPose = (a: Pt, b: Pt) => {
+    const cls = poseClass()
+    if (!cls) return setNotice('The keypoints file names no class to pose.')
+    if (!listedLabel(cls)) return
+    const box = newShape(cls, 'rectangle', [[Math.min(a[0], b[0]), Math.min(a[1], b[1])], [Math.max(a[0], b[0]), Math.max(a[1], b[1])]], {
+      group_id: nextGroupId(shapesRef.current), flags: flagsFor(cls, config.label_flags)
+    })
+    setSelected([])
+    setPosing({ cls, group: box.group_id!, box, fresh: true, asked: opts.current.keypoints.classes[cls].map((_, k) => k), done: [] })
+  }
+  /** The topmost of the image's shapes under a point that could be a pose's box: closed, of a class with keypoints; -1 when there's none */
+  const poseBoxAt = (p: Pt) => {
+    const list = shapesRef.current
+    const schema = opts.current.keypoints
+    const tol = tolerance()
+    for (let i = list.length - 1; i >= 0; i--) {
+      const s = list[i]
+      if (!s.hidden && CLOSED.has(s.shape_type) && Object.hasOwn(schema.classes, s.label) && contains(s, p, tol)) return i
+    }
+    return -1
+  }
+  /** Carries on the pose of a box the image has: its keypoints not placed yet are asked for */
+  const continuePose = (i: number) => {
+    const list = shapesRef.current
+    const box = list[i]
+    const names = opts.current.keypoints.classes[box.label] ?? []
+    const pose = box.group_id === null ? undefined : posesOf(list).find((p) => p.group === box.group_id)
+    const missing = names.map((_, k) => k).filter((k) => !pose || pose.points[k] === null)
+    if (!missing.length) {
+      setSelected(pose ? poseShapes(pose) : [i])
+      return setNotice('This pose has every keypoint.')
+    }
+    setSelected([])
+    setPosing({ cls: box.label, group: box.group_id ?? nextGroupId(list), box, fresh: false, asked: missing, done: [] })
+  }
+  /** The next click places one keypoint a pose is missing */
+  const placeMissing = (pose: PoseGroup, k: number) => {
+    const list = shapesRef.current
+    setPosing({ cls: pose.cls, group: pose.group, box: pose.box === null ? null : list[pose.box], fresh: false, asked: [k], done: [] })
+  }
+  /** The keypoint asked for, seen or hidden, or null to skip it */
+  const answerKeypoint = (point: Shape | null) => {
+    const s = posing.current
+    if (!s) return
+    const next = { ...s, done: [...s.done, point] }
+    if (askedNow(next) === null) endPose(next)
+    else setPosing(next)
+  }
+  const placeKeypoint = (at: Pt, hidden: boolean) => {
+    const s = posing.current
+    const k = s ? askedNow(s) : null
+    const name = s && k !== null ? opts.current.keypoints.classes[s.cls]?.[k] : undefined
+    if (!s || name === undefined) return
+    answerKeypoint(newShape(name, 'point', [[at[0], at[1]]], {
+      group_id: s.group, flags: { ...flagsFor(name, config.label_flags), ...(hidden ? { difficult: true } : {}) }
+    }))
+  }
+  /** Back one keypoint; before the first, a box drawn for the pose goes too */
+  const backKeypoint = () => {
+    const s = posing.current
+    if (!s) return false
+    setPosing(s.done.length ? { ...s, done: s.done.slice(0, -1) } : null)
+    return true
+  }
+  /** Ends the pose being placed, keeping what's placed, as one step to undo, and selects it */
+  const endPose = (s = posing.current) => {
+    setPosing(null)
+    if (!s) return
+    const list = shapesRef.current
+    const next = withSession(list, s)
+    if (next === list) return
+    setShapes(next)
+    const pose = posesOf(next).find((p) => p.group === s.group)
+    // One keypoint placed for N stays selected, so N goes on from it
+    setSelected(!pose || (!s.fresh && s.asked.length === 1) ? [next.length - 1] : poseShapes(pose))
+    const layout = pose && layoutOf(next, pose)
+    if (layout) lastLayout.current = layout
+    // LabelImg's beginner mode: one shape, then back to editing
+    if (s.fresh && !settingsRef.current.advanced) setMode('edit')
+  }
+  endPoseRef.current = () => endPose()
 
   // labelme 7's AI tools: AI points (each click refines the object), AI box, and the text prompt
   const toShape = (p: ProposedShape) =>
@@ -1336,7 +1694,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const info = models?.find((x) => x.name === name)
     if (!info) return false
     if (info.downloaded) return true
-    const ok = await window.api.ask(`Download ${info.title}?`, `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once and kept in ~/.cache/osam, which labelme uses too.`, ['Download', 'Cancel'])
+    const ok = await window.api.ask(`Download ${info.title}?`,
+      `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once and kept in ~/.cache/osam, which labelme uses too.${info.note ? ` ${info.note}` : ''}`,
+      ['Download', 'Cancel'])
     if (ok !== 0) return false
     try {
       setBusyAi('Downloading the model…')
@@ -1458,6 +1818,126 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       if (seq === aiSeq.current) setBusyAi('')
     }
   }
+
+  // AI pose: a person's keypoints in a box, from a pose model such as RTMPose
+  const poseModels = (models ?? []).filter((m) => m.pose)
+  // The model picked, else the config's, else the first there is
+  const poseModel = (poseModels.find((m) => m.name === settings.poseModel) ?? poseModels.find((m) => m.name === config.ai.pose_model) ?? poseModels[0])?.name ?? ''
+  /** AI pose's model, and the class of the keypoints file its keypoints go to; null, said why, when there's none */
+  const poseTarget = () => {
+    const info = poseModels.find((m) => m.name === poseModel)
+    if (!info) {
+      setNotice('There is no AI pose model.')
+      return null
+    }
+    const cls = info.keypoints?.length ? classForModel(opts.current.keypoints, info.keypoints) : poseClass()
+    if (!cls) {
+      setNotice(`No class in the keypoints file has ${info.title}'s keypoints.`)
+      return null
+    }
+    return { model: info.name, cls }
+  }
+  /**
+   * AI pose on boxes: the image's own, which their points join, and new ones, which come with
+   * theirs as AI shapes; each pose under one group_id, all of them one step to undo
+   */
+  const poseInBoxes = async (target: { model: string; cls: string }, own: Shape[], found: Shape[], seq: number, name: string) => {
+    const all = [...own, ...found]
+    setBusyAi('Finding poses…')
+    try {
+      const answer = await window.api.aiPose({ root, name, model: target.model, boxes: all.map((s) => boxOf(s)) })
+      const m = metaRef.current
+      if (seq !== aiSeq.current || loadedName.current !== name || !m) return
+      const before = shapesRef.current
+      let next = before
+      const added: Shape[] = []
+      const chosen: number[] = []
+      let group = nextGroupId(before)
+      let made = 0
+      all.forEach((box, k) => {
+        const mine = k < own.length
+        // One of the image's boxes taken away meanwhile gets nothing
+        const at = mine ? next.indexOf(box) : -1
+        if (mine && at < 0) return
+        const g = mine && box.group_id !== null ? box.group_id : group
+        const { points, score } = aiPosePoints(opts.current.keypoints, target.cls, answer.names, answer.poses[k] ?? [], {
+          size: [m.width, m.height], threshold: poseScore, group: g, flagsOf: (label) => flagsFor(label, config.label_flags)
+        })
+        if (!points.length) return
+        made++
+        if (g === group) group++
+        if (mine) {
+          if (box.group_id !== g) {
+            if (next === before) next = [...before]
+            next[at] = { ...box, group_id: g }
+          }
+          chosen.push(at)
+        } else added.push({ ...box, group_id: g, flags: { ...box.flags, ai: true }, other: { ...box.other, score } })
+        added.push(...points)
+      })
+      const none = `no keypoint scored ${percent(poseScore)} or more`
+      if (!made) return setNotice(all.length === 1 ? `The model found ${none} in that box.` : `The model found ${none} in any of the ${all.length} boxes.`)
+      setShapes([...next, ...added])
+      setSelected([...chosen, ...added.map((_, k) => next.length + k)])
+      const missed = all.length - made
+      setNotice(`Found ${counted(made, 'pose')}.${missed ? ` In ${counted(missed, 'box', 'boxes')}, the model found ${none}.` : ''}`)
+    } catch (e) {
+      if (seq === aiSeq.current) onError(`AI pose failed: ${plainError(e)}`)
+    } finally {
+      if (seq === aiSeq.current) setBusyAi('')
+    }
+  }
+  /** AI pose in a box dragged: the box and its keypoints, as AI shapes */
+  const runPose = async (a: Pt, b: Pt) => {
+    const name = loadedName.current
+    const target = poseTarget()
+    if (!name || !target || !listedLabel(target.cls)) return
+    // Escape or another tool while the model downloads drops the box
+    const seq = ++aiSeq.current
+    if (!(await ensureModel(target.model)) || seq !== aiSeq.current) return
+    const box = newShape(target.cls, 'rectangle', [[Math.min(a[0], b[0]), Math.min(a[1], b[1])], [Math.max(a[0], b[0]), Math.max(a[1], b[1])]], {
+      flags: flagsFor(target.cls, config.label_flags)
+    })
+    await poseInBoxes(target, [], [box], seq, name)
+  }
+  /**
+   * AI pose on the image's boxes of the pose's class that have no keypoints yet: those given, by
+   * index, or else every one; with none at all, on the people YOLO-World finds first
+   */
+  const poseBoxes = async (which?: number[]) => {
+    const name = loadedName.current
+    const target = poseTarget()
+    if (!name || readOnlyRef.current || !target) return
+    const list = shapesRef.current
+    const posed = new Set(posesOf(list).map((p) => p.box))
+    const own = (which ?? list.map((_, i) => i)).filter((i) => list[i].label === target.cls && CLOSED.has(list[i].shape_type) && !list[i].hidden && !posed.has(i))
+    if (which && !own.length) return setNotice(`Click a ${target.cls} box that has no keypoints yet, or drag a box.`)
+    if (!own.length && !listedLabel(target.cls)) return
+    const seq = ++aiSeq.current
+    if (!(await ensureModel(target.model)) || seq !== aiSeq.current) return
+    let found: Shape[] = []
+    if (!own.length) {
+      const textModel = settingsRef.current.aiTextModel
+      if (!(await ensureModel(textModel)) || seq !== aiSeq.current) return
+      setBusyAi('Finding people…')
+      try {
+        const result = await window.api.aiText({
+          root, name, model: textModel, texts: ['person'], output: 'rectangle', detail: config.mask_polygonization.detail, drawn: drawnShapes(),
+          groups: groupsInUse(), outside: free, iou: aiIou, score: aiScore
+        })
+        if (seq !== aiSeq.current || loadedName.current !== name) return
+        if (result.notice) return setNotice(result.notice)
+        found = result.shapes.map((p) => newShape(target.cls, 'rectangle', p.points, { description: p.description ?? '', flags: flagsFor(target.cls, config.label_flags) }))
+      } catch (e) {
+        if (seq === aiSeq.current) onError(`Finding people failed: ${plainError(e)}`)
+        return
+      } finally {
+        if (seq === aiSeq.current) setBusyAi('')
+      }
+      if (!found.length) return setNotice('Nobody new found here.')
+    }
+    await poseInBoxes(target, own.map((i) => list[i]), found, seq, name)
+  }
   const busyAiRef = useRef('')
   busyAiRef.current = busyAi
 
@@ -1468,6 +1948,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       if (!list[i].hidden && contains(list[i], p, tol)) return i
     }
     return -1
+  }
+  /** What a click on a shape selects: a pose's box selects the whole pose */
+  const pickOf = (i: number) => {
+    const pose = posesOf(shapesRef.current).find((p) => p.box === i)
+    return pose ? poseShapes(pose) : [i]
   }
   const findHover = (p: Pt): Hover => {
     const list = shapesRef.current
@@ -1507,8 +1992,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       // LabelImg's right drag: a copy follows the pointer, then Copy here or Move here. Elsewhere it pans.
       const hit = hitShape(p)
       if (hit >= 0) {
-        const sel = selectedRef.current.includes(hit) ? selectedRef.current : [hit]
-        if (!selectedRef.current.includes(hit)) setSelected([hit])
+        const sel = withPoints(selectedRef.current.includes(hit) ? selectedRef.current : pickOf(hit), posesOf(shapesRef.current))
+        if (!selectedRef.current.includes(hit)) setSelected(pickOf(hit))
         drag.current = { kind: 'ghost', shapes: sel, x: p[0], y: p[1], press, active: false }
         return
       }
@@ -1521,6 +2006,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (e.button !== 0) return
     const md = mode
     const ro = !!readOnlyRef.current
+    // A pose being placed: a click places the keypoint asked for, Shift+click a hidden one
+    if (!ro && posing.current) {
+      if (onImage(p)) placeKeypoint(p, e.shiftKey)
+      return
+    }
     if (!ro && (md === 'polygon' || md === 'linestrip')) {
       const dr = draft.current
       if (dr) {
@@ -1537,16 +2027,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       return
     }
-    if (!ro && (md === 'rectangle' || md === 'circle' || md === 'line' || md === 'ai_box')) {
+    if (!ro && (md === 'rectangle' || md === 'circle' || md === 'line' || md === 'ai_box' || md === 'pose' || md === 'ai_pose')) {
       const dr = draft.current
       if (dr) {
         const q = livePoint()!
         draft.current = null
         const second = md === 'rectangle' && squareKeys(e) ? squareFrom(dr.points[0], q) : q
-        if (Math.hypot(second[0] - dr.points[0][0], second[1] - dr.points[0][1]) > 0.5) {
-          if (md === 'ai_box') runBox(dr.points[0], second)
-          else finishShape(md, [dr.points[0], second])
-        }
+        if (Math.hypot(second[0] - dr.points[0][0], second[1] - dr.points[0][1]) > 0.5) boxDone(md, dr.points[0], second)
         invalidate()
       } else if (onImage(p)) {
         draft.current = { points: [p], labels: [], preview: [], matched: [] }
@@ -1632,12 +2119,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const hit = hitShape(p)
     if (hit >= 0) {
       const sel = selectedRef.current
+      const group = pickOf(hit)
       if (multi) {
-        setSelected(sel.includes(hit) ? sel.filter((i) => i !== hit) : [...sel, hit])
+        setSelected(group.every((i) => sel.includes(i)) ? sel.filter((i) => !group.includes(i)) : [...sel, ...group.filter((i) => !sel.includes(i))])
         return
       }
-      const moving = (sel.includes(hit) ? sel : [hit]).filter((i) => !list[i].locked)
-      if (!sel.includes(hit)) setSelected([hit])
+      const moving = withPoints(sel.includes(hit) ? sel : group, posesOf(list)).filter((i) => !list[i].locked)
+      if (!sel.includes(hit)) setSelected(group)
       if (!ro && moving.length) drag.current = { kind: 'move', shapes: moving, x: p[0], y: p[1], press, active: false, start: list }
       return
     }
@@ -1665,7 +2153,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
           invalidate()
         }
       }
-      if (draft.current || mode === 'brush' || mode === 'eraser' || (config.canvas.crosshair as Record<string, boolean>)[CROSSHAIR[mode] ?? mode]) invalidate()
+      if (draft.current || posing.current || mode === 'brush' || mode === 'eraser' || (config.canvas.crosshair as Record<string, boolean>)[CROSSHAIR[mode] ?? mode]) invalidate()
       return
     }
     if ((d.kind === 'vertex' || d.kind === 'move' || d.kind === 'pan' || d.kind === 'ghost' || d.kind === 'rotate') && !('active' in d ? d.active : d.moved)) {
@@ -1750,9 +2238,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         const q = livePoint()!
         const second = mode === 'rectangle' && squareKeys(e) ? squareFrom(dr.points[0], q) : q
         draft.current = null
-        if (Math.hypot(second[0] - dr.points[0][0], second[1] - dr.points[0][1]) > 0.5) {
-          if (mode === 'ai_box') runBox(dr.points[0], second)
-          else finishShape(mode as ShapeType, [dr.points[0], second])
+        if (Math.hypot(second[0] - dr.points[0][0], second[1] - dr.points[0][1]) > 0.5) boxDone(mode, dr.points[0], second)
+      } else if (dr && (mode === 'pose' || mode === 'ai_pose')) {
+        // A click on a box of a class with keypoints carries on its pose, or has AI pose it
+        const at = poseBoxAt(dr.points[0])
+        if (at >= 0) {
+          draft.current = null
+          if (mode === 'pose') continuePose(at)
+          else poseBoxes([at])
         }
       }
       invalidate()
@@ -1852,8 +2345,10 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     apply(prev)
   }
   const removeSelected = () => {
-    const sel = new Set(selectedRef.current.filter((i) => !shapesRef.current[i]?.locked))
-    if (sel.size < selectedRef.current.length) setNotice('Locked shapes stay: unlock them first.')
+    // A pose's box goes with its points
+    const which = withPoints(selectedRef.current, posesOf(shapesRef.current))
+    const sel = new Set(which.filter((i) => !shapesRef.current[i]?.locked))
+    if (sel.size < which.length) setNotice('Locked shapes stay: unlock them first.')
     if (!sel.size) return
     setShapes(shapesRef.current.filter((_, i) => !sel.has(i)))
     setSelected([])
@@ -1864,7 +2359,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }
   const chooseClass = (i: number) => {
     setActive(classes[i].name)
-    if (selectedRef.current.length) relabel(selectedRef.current, classes[i].name)
+    // A pose's points keep their keypoints' names
+    const points = new Set(posesOf(shapesRef.current).flatMap((p) => poseShapes(p).filter((k) => k !== p.box)))
+    relabel(selectedRef.current.filter((k) => !points.has(k)), classes[i].name)
   }
 
   /** labelme's Edit Label: fields that differ across the selection can't be changed */
@@ -2002,38 +2499,49 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     reviewOnLoad.current = true
     goTo(next.i)
   }
+  /** Review's steps on these shapes, least certain first, an AI pose as one */
+  const reviewSteps = (list: Shape[]) => reviewItems(list, posesOf(list))
+  /** A step of review selected and in view: an AI pose with all its shapes */
+  const selectStep = (step: ReviewItem, list: Shape[]) => {
+    if (!step.pose) return selectForReview(step.shapes[0], list)
+    setSelected(poseShapes(step.pose))
+    setMode('edit')
+    focusShape(list[step.pose.box ?? step.shapes[0]])
+  }
+  const selectedStep = (list: Shape[]) => stepOf(reviewSteps(list), selectedRef.current)
   const reviewNext = (list: Shape[]) => {
-    const first = reviewOrder(list)[0]
-    if (first !== undefined) selectForReview(first, list)
+    const first = reviewSteps(list)[0]
+    if (first) selectStep(first, list)
     else nextReviewImage()
   }
   // Only once this image's shapes are in: keys can arrive faster than images load
   const reviewReady = () => !drag.current && loadedName.current === images[index]?.name && !readOnlyRef.current
-  const one = () => (selectedRef.current.length === 1 ? selectedRef.current[0] : null)
+  // Accepting or rejecting any shape of an AI pose accepts or rejects all its AI shapes
   const acceptSelected = () => {
     if (!reviewReady()) return
     const list = shapesRef.current
-    const s = one()
-    if (s === null || !isAi(list[s])) return reviewNext(list)
-    const next = list.map((x, i) => (i === s ? accepted(x) : x))
+    const step = selectedStep(list)
+    if (!step) return reviewNext(list)
+    const next = list.map((x, i) => (step.shapes.includes(i) ? accepted(x) : x))
     setShapes(next)
     reviewNext(next)
   }
   const rejectSelected = () => {
     if (!reviewReady()) return
     const list = shapesRef.current
-    const s = one()
-    if (s === null || !isAi(list[s])) return reviewNext(list)
-    const next = list.filter((_, i) => i !== s)
+    const step = selectedStep(list)
+    if (!step) return reviewNext(list)
+    const next = list.filter((_, i) => !step.shapes.includes(i))
     setShapes(next)
     reviewNext(next)
   }
   const skipShape = () => {
     if (!reviewReady()) return
     const list = shapesRef.current
-    const order = reviewOrder(list)
-    if (!order.length) return nextReviewImage()
-    selectForReview(order[(order.indexOf(one() ?? -1) + 1) % order.length], list)
+    const steps = reviewSteps(list)
+    if (!steps.length) return nextReviewImage()
+    const now = selectedStep(list)
+    selectStep(steps[(steps.findIndex((step) => step.shapes[0] === now?.shapes[0]) + 1) % steps.length], list)
   }
   const acceptAll = () => {
     if (!reviewReady()) return
@@ -2042,15 +2550,17 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }
 
   const copySelected = () => {
-    const sel = selectedRef.current
+    // A pose's box is copied with its points
+    const sel = withPoints(selectedRef.current, posesOf(shapesRef.current))
     if (!sel.length) return
     clipboard.current = sel.map((i) => ({ ...shapesRef.current[i], hidden: undefined }))
     setTick((t) => t + 1)
   }
   const paste = () => {
     if (!clipboard.current.length || readOnlyRef.current || !metaRef.current) return
-    // Pasted onto a smaller image, shapes are kept inside it
-    const fitIn = forFormat(clipboard.current.map((s) => ({ ...s, points: s.points.map(clampPoint) })))
+    // Pasted onto a smaller image, shapes are kept inside it; a pose pasted is a pose of its own
+    const copies = regroup(clipboard.current, shapesRef.current, opts.current.keypoints)
+    const fitIn = forFormat(copies.map((s) => ({ ...s, points: s.points.map(clampPoint) })))
     const next = [...shapesRef.current, ...fitIn]
     setShapes(next)
     setSelected(fitIn.map((_, k) => next.length - fitIn.length + k))
@@ -2133,6 +2643,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const removeHoveredPoint = () => {
     const h = hover.current
     const list = shapesRef.current
+    // A pose's keypoint under the pointer goes, as a polygon's point does: it's not labelled then
+    const k = keypointUnder()
+    if (k !== null && !list[k].locked) {
+      setShapes(list.filter((_, i) => i !== k))
+      setSelected(selectedRef.current.filter((i) => i !== k).map((i) => (i > k ? i - 1 : i)))
+      hover.current = null
+      return true
+    }
     if (!h || h.vertex < 0 || !canRemovePoint(list[h.shape])) return false
     setShapes(list.map((q, i) => (i === h.shape ? { ...accepted(q), points: q.points.filter((_, k) => k !== h.vertex) } : q)))
     hover.current = null
@@ -2145,12 +2663,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   }
   const nudge = (dx: number, dy: number) => {
     const m = metaRef.current
-    const which = selectedRef.current.filter((i) => !shapesRef.current[i]?.locked)
+    const which = withPoints(selectedRef.current, posesOf(shapesRef.current)).filter((i) => !shapesRef.current[i]?.locked)
     if (!m || !which.length) return
     const next = moveShapes(shapesRef.current, which, dx, dy, m.width, m.height)
     if (next !== shapesRef.current) setShapes(next)
   }
   const undoLastPoint = () => {
+    // Placing a pose, it's back one keypoint
+    if (backKeypoint()) return true
     const dr = draft.current
     if (!dr) return false
     if (mode === 'oriented_rectangle' && dr.points.length === 4) dr.points = [dr.points[0]]
@@ -2162,6 +2682,62 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     else if (mode === 'ai_points') runAi()
     invalidate()
     return true
+  }
+
+  // The pose keys: hidden or seen, left and right, and stepping through a pose's keypoints
+  /** The poses with shapes among those given */
+  const posesAmong = (which: number[]) => posesOf(shapesRef.current).filter((p) => poseShapes(p).some((i) => which.includes(i)))
+  /** A pose's keypoint under the pointer, by index; null when there's none */
+  const keypointUnder = () => {
+    const h = hover.current
+    if (!h || !overCanvas.current) return null
+    const pose = posesOf(shapesRef.current).find((p) => p.box !== h.shape && poseShapes(p).includes(h.shape))
+    return pose ? h.shape : null
+  }
+  /** Q: the keypoint under the pointer, or else those selected, hidden, or seen when they all are */
+  const toggleHidden = () => {
+    const list = shapesRef.current
+    const points = new Set(posesOf(list).flatMap((p) => poseShapes(p).filter((i) => i !== p.box)))
+    const under = keypointUnder()
+    const which = under !== null ? [under] : selectedRef.current.filter((i) => points.has(i))
+    if (!which.length) return setNotice('Point at a keypoint, or select some, first.')
+    const hide = !which.every((i) => isHidden(list[i]))
+    setShapes(list.map((s, i) => (which.includes(i) ? withHidden(s, hide, flagsFor(s.label, config.label_flags)) : s)))
+  }
+  /** M: left and right swapped on the poses selected; with only some of a pose's points selected, on their pairs */
+  const swapSelectedSides = () => {
+    const sel = selectedRef.current
+    const touched = posesAmong(sel)
+    if (!touched.length) return setNotice('Select a pose first.')
+    const schema = opts.current.keypoints
+    if (touched.every((p) => !schema.flip?.[p.cls]?.length)) return setNotice(`The keypoints file has no left and right pairs for ${touched[0].cls}.`)
+    const chosen = new Set(sel)
+    let next = shapesRef.current
+    for (const p of touched) next = swapSides(next, p, schema, p.box !== null && chosen.has(p.box) ? undefined : chosen)
+    if (next !== shapesRef.current) setShapes(next)
+  }
+  /** Shift+M: the poses selected mirrored inside their boxes */
+  const mirrorSelected = () => {
+    const touched = posesAmong(selectedRef.current)
+    if (!touched.length) return setNotice('Select a pose first.')
+    let next = shapesRef.current
+    for (const p of touched) next = mirrorPose(next, p)
+    if (next !== shapesRef.current) setShapes(next)
+  }
+  /** N and Shift+N: the selected pose's next or previous keypoint selected, or, when it's missing, placed with the next click */
+  const stepKeypoint = (step: 1 | -1) => {
+    const sel = selectedRef.current
+    const asked = posing.current
+    // A keypoint waiting to be placed, from N before, counts as where N is
+    const pose = asked && !asked.fresh && asked.asked.length === 1 ? posesOf(shapesRef.current).find((p) => p.group === asked.group) : posesAmong(sel)[0]
+    if (!pose) return setNotice('Select a pose first.')
+    const n = pose.points.length
+    const from = asked?.group === pose.group && asked.asked.length === 1 ? asked.asked[0] : sel.length === 1 ? pose.points.indexOf(sel[0]) : -1
+    const k = from < 0 ? (step > 0 ? 0 : n - 1) : (from + step + n) % n
+    setPosing(null)
+    const at = pose.points[k]
+    if (at !== null) setSelected([at])
+    else placeMissing(pose, k)
   }
   const deleteLabelFile = async () => {
     const name = loadedName.current
@@ -2461,6 +3037,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const addClass = () => {
     const name = newClass.trim()
     if (!name || classes.some((c) => c.name === name)) return
+    if (notClasses.has(name)) return onError(`“${name}” names a keypoint in the folder's keypoints file, so it isn't a class.`)
     if (config.validate_label === 'exact' && !config.labels?.includes(name)) return onError(`“${name}” isn't in the label list, and only listed labels are allowed.`)
     const color = labelColor(name, classes.length, config)
     // The folder's classes and this label: the list's other labels aren't classes, and stay in their places
@@ -2607,7 +3184,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   // LabelImg's label filter above its box list: only shapes of one label show
   const filterLabel = (label: string) => {
     setLabelFilter(label)
-    const next = shapesRef.current.map((s) => ({ ...s, hidden: label && s.label !== label ? true : undefined }))
+    // A pose's points show with its class
+    const posed = new Set(posesOf(shapesRef.current).filter((p) => p.cls === label).flatMap(poseShapes))
+    const next = shapesRef.current.map((s, i) => ({ ...s, hidden: label && s.label !== label && !posed.has(i) ? true : undefined }))
     shapesRef.current = next
     setShapesState(next)
     invalidate()
@@ -2626,7 +3205,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const list = shapesRef.current
     const shifted = (s: Shape) => ({ ...s, points: s.points.map(([x, y]) => [x + g.dx, y + g.dy]) })
     if (how === 'copy') {
-      const copies = g.shapes.map((i) => shifted({ ...list[i], hidden: undefined }))
+      const copies = regroup(g.shapes.map((i) => shifted({ ...list[i], hidden: undefined })), list, opts.current.keypoints)
       setShapes([...list, ...copies])
       setSelected(copies.map((_, k) => list.length + k))
       return
@@ -2680,9 +3259,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     create_circle: { label: 'Create circle', run: () => setMode('circle'), shortcut: 'create_circle', checked: () => mode === 'circle', enabled: draws('circle') },
     create_line: { label: 'Create line', run: () => setMode('line'), shortcut: 'create_line', checked: () => mode === 'line', enabled: draws('line') },
     create_point: { label: 'Create point', run: () => setMode('point'), shortcut: 'create_point', checked: () => mode === 'point', enabled: draws('point') },
+    create_pose: { label: 'Create pose', run: () => setMode('pose'), shortcut: 'create_pose', checked: () => mode === 'pose', enabled: draws('pose') },
     create_linestrip: { label: 'Create line strip', run: () => setMode('linestrip'), shortcut: 'create_linestrip', checked: () => mode === 'linestrip', enabled: draws('linestrip') },
     create_ai_points: { label: 'AI points', run: () => setMode('ai_points'), shortcut: 'create_ai_points_to_shape', checked: () => mode === 'ai_points', enabled: () => has() && !!models },
     create_ai_box: { label: 'AI box', run: () => setMode('ai_box'), shortcut: 'create_ai_box_to_shape', checked: () => mode === 'ai_box', enabled: () => has() && !!models },
+    create_ai_pose: {
+      label: 'AI pose', run: () => setMode('ai_pose'), shortcut: 'create_ai_pose', checked: () => mode === 'ai_pose', enabled: () => draws('ai_pose')() && poseModels.length > 0
+    },
     create_brush: { label: 'Brush', run: () => setMode('brush'), shortcut: 'create_brush', checked: () => mode === 'brush', enabled: draws('brush') },
     create_eraser: { label: 'Eraser', run: () => setMode('eraser'), shortcut: 'create_eraser', checked: () => mode === 'eraser', enabled: draws('eraser') },
     draw_squares: { label: 'Draw squares', run: () => setSettings((s) => ({ ...s, drawSquares: !s.drawSquares })), shortcut: 'draw_squares', checked: () => settings.drawSquares },
@@ -2693,7 +3276,10 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     paste_shape: { label: 'Paste', run: paste, shortcut: 'paste_shape', enabled: () => has() && clipboard.current.length > 0 },
     delete_shape: { label: 'Delete', run: removeSelected, shortcut: 'delete_shape', enabled: () => has() && sel() },
     merge_shapes: { label: 'Merge shapes', run: merge, shortcut: 'merge_shapes', enabled: () => has() && selectedRef.current.length >= 2 && !boxesOnly },
-    undo: { label: 'Undo', run: () => (undoLastPoint() || stepHistory(undo, redo)), shortcut: 'undo', enabled: () => has() && (undo.current.length > 0 || !!draft.current || !!reviewBack.current) },
+    undo: {
+      label: 'Undo', run: () => (undoLastPoint() || stepHistory(undo, redo)), shortcut: 'undo',
+      enabled: () => has() && (undo.current.length > 0 || !!draft.current || !!posing.current || !!reviewBack.current)
+    },
     redo: { label: 'Redo', run: () => stepHistory(redo, undo), shortcut: 'redo', enabled: () => has() && redo.current.length > 0 },
     remove_selected_point: { label: 'Remove point', run: removeHoveredPoint, shortcut: 'remove_selected_point', enabled: has },
     add_multiple_points: { label: 'Add points to edge…', run: addMultiplePoints, shortcut: 'add_multiple_points', enabled: has },
@@ -2710,6 +3296,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       },
       shortcut: 'lock_shape', enabled: () => has() && sel(), checked: () => sel() && selectedRef.current.every((i) => shapesRef.current[i]?.locked)
     },
+    toggle_keypoint_hidden: { label: 'Hidden keypoint', run: toggleHidden, shortcut: 'toggle_keypoint_hidden', enabled: () => has() && !boxesOnly },
+    swap_keypoint_sides: { label: 'Swap left and right', run: swapSelectedSides, shortcut: 'swap_keypoint_sides', enabled: () => has() && sel() && !boxesOnly },
+    mirror_pose: { label: 'Mirror pose', run: mirrorSelected, shortcut: 'mirror_pose', enabled: () => has() && sel() && !boxesOnly },
+    next_keypoint: { label: 'Next keypoint', run: () => stepKeypoint(1), shortcut: 'next_keypoint', enabled: () => has() && !boxesOnly },
+    prev_keypoint: { label: 'Previous keypoint', run: () => stepKeypoint(-1), shortcut: 'prev_keypoint', enabled: () => has() && !boxesOnly },
     toggle_difficult: {
       label: 'Difficult', run: toggleDifficult, shortcut: 'toggle_difficult', enabled: () => has() && sel() && keepsDifficult(settings.format),
       checked: () => sel() && selectedRef.current.every((i) => shapesRef.current[i]?.flags.difficult === true)
@@ -2748,16 +3339,21 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     order_certainty: { label: 'Least certain first', run: () => setSort((s) => (s === 'certainty' ? 'name' : 'certainty')), checked: () => sort === 'certainty' },
     prelabel_pick: { label: 'Choose a model…', run: pickModel },
     check_labels: { label: 'Check labels', run: checkLabels, enabled: () => images.length > 0 },
+    keypoints_coco: { label: "Use COCO's person", run: () => changeKeypoints('coco') },
+    keypoints_choose: { label: 'Choose a keypoints file…', run: () => changeKeypoints('choose') },
+    keypoints_make: { label: "Make one from the folder's poses", run: () => changeKeypoints('make'), enabled: () => images.length > 0 },
     dataset_stats: { label: 'Statistics…', run: openStats, enabled: () => images.length > 0 },
     ai_models: { label: 'AI models…', run: () => setModelsOpen(true), enabled: () => !!models },
     prelabel_one: { label: 'Pre-label this image', run: prelabelOne, enabled: () => has() && !batch && !busyAi && !boxesOnly },
     prelabel_all: { label: `Pre-label ${toPrelabel.length} images`, run: prelabelAll, enabled: () => !batch && toPrelabel.length > 0 && !boxesOnly },
+    pose_everyone: { label: 'Pose every person', run: () => poseBoxes(), enabled: () => has() && poseModels.length > 0 && !busyAi && !boxesOnly },
     brush_smaller: { label: 'Smaller brush', run: () => setBrushSize((s) => Math.max(config.brush.min, s - 4)), shortcut: 'brush_smaller' },
     brush_larger: { label: 'Larger brush', run: () => setBrushSize((s) => Math.min(config.brush.max, s + 4)), shortcut: 'brush_larger' }
   }
   for (const m of models ?? []) {
     if (m.points || m.box) commands[`ai_model:${m.name}`] = { label: m.title, run: () => setSettings((s) => ({ ...s, aiModel: m.name })), checked: () => settings.aiModel === m.name }
     if (m.text) commands[`ai_text_model:${m.name}`] = { label: m.textTitle ?? m.title, run: () => setSettings((s) => ({ ...s, aiTextModel: m.name })), checked: () => settings.aiTextModel === m.name }
+    if (m.pose) commands[`pose_model:${m.name}`] = { label: m.title, run: () => setSettings((s) => ({ ...s, poseModel: m.name })), checked: () => poseModel === m.name }
   }
   for (const o of AI_OUTPUTS) {
     commands[`ai_output:${o}`] = { label: AI_OUTPUT_NAMES[o], run: () => setSettings((s) => ({ ...s, aiOutput: o })), checked: () => settings.aiOutput === o, enabled: () => !boxesOnly }
@@ -2829,7 +3425,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         spaceTap.current = null
         // Held a while, it was meant for panning
         if (pressed === null || Date.now() - pressed > 500 || drag.current || dialog || pointsPrompt || bcOpen || colorPrompt || ghostMenu) return
-        // labelme's Space finishes a shape being drawn
+        // labelme's Space finishes a shape being drawn, and a pose being placed
+        if (posing.current) return endPose()
         const drawing = opts.current.mode
         if (draft.current && (drawing === 'polygon' || drawing === 'linestrip' || drawing === 'ai_points')) {
           if (drawing === 'ai_points') finishAi()
@@ -2851,8 +3448,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       // Nothing may change the image, tool or shapes under a drag in progress
       if (drag.current && e.key !== 'Escape') return
       const all = commandsRef.current
-      // Ctrl+Z takes back the last point while drawing, as in labelme
-      if (draft.current && shortcutList(config.shortcuts.undo_last_point).some((k) => matches(k, e, mac))) {
+      // Ctrl+Z takes back the last point while drawing, as in labelme, and the last keypoint placed
+      if ((draft.current || posing.current) && shortcutList(config.shortcuts.undo_last_point).some((k) => matches(k, e, mac))) {
         e.preventDefault()
         undoLastPoint()
         return
@@ -2862,6 +3459,17 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         if (undoLastPoint() || removeHoveredPoint()) return
         removeSelected()
         return
+      }
+      // Placing a pose, X skips the keypoint asked for, and Enter or Escape ends the pose, keeping what's placed
+      if (posing.current && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (e.key === 'x' || e.key === 'X') {
+          e.preventDefault()
+          return answerKeypoint(null)
+        }
+        if (e.key === 'Enter' || e.key === 'Escape') {
+          e.preventDefault()
+          return endPose()
+        }
       }
       // Ctrl+Shift with next or previous copies this image's shapes over, as in labelme
       const copy = (e.ctrlKey || e.metaKey) && e.shiftKey
@@ -2916,7 +3524,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const [x0, y0, x1, y1] = boxOf(s)
     return `${Math.round(x1 - x0)} × ${Math.round(y1 - y0)}`
   })()
-  const shapeLabels = [...new Set(shapes.map((s) => s.label))].sort((a, b) => a.localeCompare(b))
+  // Keypoint names aren't classes: a pose shows with its class
+  const shapeLabels = [...new Set(shapes.map((s) => s.label))].filter((l) => !notClasses.has(l)).sort((a, b) => a.localeCompare(b))
   const aiCount = shapes.filter(isAi).length
   const counts = useMemo(() => {
     const out: Record<string, number> = {}
@@ -2928,16 +3537,19 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     images.forEach((i) => Object.entries(i.classes).forEach(([k, v]) => (out[k] = (out[k] ?? 0) + v)))
     return out
   }, [images])
-  const largest = Math.max(1, ...Object.values(totals))
+  const largest = Math.max(1, ...classes.map((c) => totals[c.name] ?? 0))
   const tally = (test: (i: ImageItem) => boolean) => images.filter(test).length
   const problemCount = check ? tally((i) => problemImages.has(i.name)) : 0
   const doneShare = images.length ? tally(FILTERS[3].test) / images.length : 0
   const reviewShare = images.length ? tally(FILTERS[2].test) / images.length : 0
-  const current = selected.length === 1 && shapes[selected[0]] && isAi(shapes[selected[0]]) ? shapes[selected[0]] : null
+  // The step of review selected, an AI shape or an AI pose, and how many there are
+  const steps = useMemo(() => reviewItems(shapes, poses), [shapes, poses])
+  const current = stepOf(steps, selected)
   const flagKeys = Object.keys(imageFlags)
   const tool = (m: Mode, icon: React.ReactNode, title: string, cmd: string) => (
     <button className={mode === m ? 'on' : ''} onClick={() => setMode(m)} disabled={(!!readOnly && m !== 'edit') || (boxesOnly && !BOX_MODES.has(m))}
-      title={`${title}${commands[cmd]?.shortcut ? ` (${(shortcutList(config.shortcuts[commands[cmd].shortcut!])[0]?.key ?? '').toUpperCase()})` : ''}`} aria-label={title}>{icon}</button>
+      title={`${title}${commands[cmd]?.shortcut && formatKeys(config.shortcuts[commands[cmd].shortcut!], mac) ? ` (${formatKeys(config.shortcuts[commands[cmd].shortcut!], mac)})` : ''}`}
+      aria-label={title}>{icon}</button>
   )
   const modeHint: Record<Mode, string> = {
     edit: 'Click to select, Ctrl+click for more · drag to move · Alt+click an edge adds a point, a point removes it',
@@ -2948,11 +3560,109 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     line: 'Click both ends',
     point: 'Click to place a point',
     linestrip: 'Click to add points · Ctrl+click, Enter or double-click to finish',
+    pose: "Drag a box, or click a box to go on with its pose, then click each keypoint",
     ai_points: 'Click the object · Shift+click marks background · Enter, Space or Ctrl+click to finish',
     ai_box: 'Drag a box around the object',
+    ai_pose: "Drag a box around a person, or click a person's box",
     brush: 'Paint the selected class · [ and ] change the size',
     eraser: 'Erase from the selected shape, or anything it touches'
   }
+
+  // The Shapes list: each pose one row, opened by hand or while some of its points are selected without its box
+  const opened = new Set(poses.filter((p) => (p.box === null || !selected.includes(p.box)) && poseShapes(p).some((i) => i !== p.box && selected.includes(i))).map((p) => p.group))
+  const rows = shapeRows(shapes.length, poses, (group) => poseOpen.get(group) ?? opened.has(group))
+  const waiting = poseStep ? posing.current : null
+  /** Shapes shown or hidden from the Shapes list: undone like any change; hidden shapes are never saved, so there's nothing to save */
+  const showOnly = (which: number[], show: boolean) => {
+    const next = shapesRef.current.map((q, k) => (which.includes(k) ? { ...q, hidden: !show || undefined } : q))
+    undo.current.push(shapesRef.current)
+    if (undo.current.length > config.canvas.num_backups) undo.current.shift()
+    redo.current = []
+    shapesRef.current = next
+    setShapesState(next)
+    invalidate()
+  }
+  /** A click on a row: alone, with Ctrl added or taken away, with Shift the rows between by index */
+  const pickRows = (e: React.MouseEvent, which: number[]) => {
+    const at = Math.min(...which)
+    if (e.ctrlKey || e.metaKey) setSelected(which.every((i) => selected.includes(i)) ? selected.filter((k) => !which.includes(k)) : [...selected, ...which.filter((k) => !selected.includes(k))])
+    else if (e.shiftKey && selected.length) {
+      const a = Math.min(selected[selected.length - 1], at), b = Math.max(selected[selected.length - 1], at)
+      const range = Array.from({ length: b - a + 1 }, (_, k) => a + k)
+      setSelected([...range, ...which.filter((k) => !range.includes(k))])
+    } else setSelected(which)
+    if (mode !== 'edit') setMode('edit')
+  }
+  const shapeRow = (i: number, pose?: PoseGroup, keypoint?: number) => {
+    const s = shapes[i]
+    const point = pose && i !== pose.box
+    const side = point ? sidesOf(keypoints.schema, pose.cls)[keypoint ?? (keypoints.schema.classes[pose.cls] ?? []).indexOf(s.label)] ?? 'centre' : null
+    return (
+      <div key={i} role="option" aria-selected={selected.includes(i)} draggable={!readOnly}
+        className={`shape ${pose ? 'in-pose' : ''} ${selected.includes(i) ? 'on' : ''} ${dragOver === i ? 'drop' : ''} ${s.hidden ? 'off' : ''}`}
+        onClick={(e) => pickRows(e, [i])}
+        onDoubleClick={() => { setSelected([i]); editLabel([i]) }}
+        onDragStart={(e) => e.dataTransfer.setData('text/x-shape', String(i))}
+        onDragOver={(e) => { if (e.dataTransfer.types.includes('text/x-shape')) { e.preventDefault(); setDragOver(i) } }}
+        onDragLeave={() => setDragOver(null)}
+        onDrop={(e) => {
+          setDragOver(null)
+          const from = Number(e.dataTransfer.getData('text/x-shape'))
+          if (Number.isNaN(from) || from === i) return
+          // Order matters: later shapes are drawn, and trained, on top
+          const next = [...shapesRef.current]
+          const [moved] = next.splice(from, 1)
+          next.splice(i, 0, moved)
+          setShapes(next)
+          setSelected([i])
+        }}>
+        <input type="checkbox" checked={!s.hidden} aria-label={`Show ${s.label}`} onClick={(e) => e.stopPropagation()}
+          onChange={(e) => showOnly(selectedRef.current.includes(i) ? selectedRef.current : [i], e.target.checked)} />
+        <i style={{ background: side ? SIDE_COLORS[side] : colorOf(s.label) }} />
+        <span className="name">{s.label}{s.group_id !== null && !point ? ` (${s.group_id})` : ''}
+          {Object.entries(s.flags).some(([k, v]) => v && k !== 'ai' && k !== 'difficult') && (
+            <span className="muted"> [{Object.entries(s.flags).filter(([k, v]) => v && k !== 'ai' && k !== 'difficult').map(([k]) => k).join(', ')}]</span>
+          )}
+        </span>
+        {s.locked && <Lock size={12} className="muted" aria-label="Locked" />}
+        {/* A keypoint marked difficult is hidden: COCO's visibility 1 */}
+        {point ? isHidden(s) && <span className="tag difficult">hidden</span> : s.flags.difficult === true && <span className="tag difficult">difficult</span>}
+        {isAi(s) && <span className="tag">AI{scoreOf(s) !== undefined ? ` ${percent(scoreOf(s)!)}` : ''}</span>}
+        <span className="muted">{keypoint !== undefined ? keypoint + 1 : describe(s)}</span>
+      </div>
+    )
+  }
+  const poseRow = (p: PoseGroup, open: boolean) => {
+    const members = poseShapes(p)
+    const placed = p.points.filter((i) => i !== null).length
+    const ai = members.filter((i) => isAi(shapes[i]))
+    const scores = ai.map((i) => scoreOf(shapes[i])).filter((v): v is number => v !== undefined)
+    const hidden = members.every((i) => shapes[i].hidden)
+    return (
+      <div key={`pose-${p.group}`} role="option" aria-selected={members.every((i) => selected.includes(i))} aria-expanded={open}
+        className={`pose-row ${members.some((i) => selected.includes(i)) ? 'on' : ''} ${hidden ? 'off' : ''}`}
+        onClick={(e) => pickRows(e, members)} onDoubleClick={() => { if (p.box !== null) { setSelected(members); editLabel([p.box]) } }}>
+        <button className="fold" aria-label={open ? 'Fold' : 'Open'} title={open ? 'Fold this pose' : 'List its keypoints'}
+          onClick={(e) => { e.stopPropagation(); setPoseOpen((was) => new Map(was).set(p.group, !open)) }}>
+          {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+        <input type="checkbox" checked={!hidden} aria-label={`Show ${p.cls} (${p.group})`} onClick={(e) => e.stopPropagation()}
+          onChange={(e) => showOnly(members, e.target.checked)} />
+        <i style={{ background: colorOf(p.cls) }} />
+        <span className="name">{p.cls} ({p.group}) · {placed}/{p.points.length}</span>
+        {ai.length > 0 && <span className="tag">AI{scores.length ? ` ${percent(Math.min(...scores))}` : ''}</span>}
+      </div>
+    )
+  }
+  const missingRow = (p: PoseGroup, k: number) => (
+    <div key={`missing-${p.group}-${k}`} role="option" aria-selected={false}
+      className={`pose-missing ${waiting?.group === p.group && waiting.asked.length === 1 && waiting.asked[0] === k ? 'on' : ''}`}
+      title="Not placed: click here, then on the image" onClick={() => { if (mode !== 'edit') setMode('edit'); placeMissing(p, k) }}>
+      <i style={{ borderColor: SIDE_COLORS[sidesOf(keypoints.schema, p.cls)[k] ?? 'centre'] }} />
+      <span className="name">{(keypoints.schema.classes[p.cls] ?? [])[k]}</span>
+      <span className="muted">{k + 1}</span>
+    </div>
+  )
 
   return (
     <div className="labeler" onDragOver={(e) => e.preventDefault()}>
@@ -3030,6 +3740,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
             {tool('line', <Slash size={16} />, 'Line', 'create_line')}
             {tool('linestrip', <Spline size={16} />, 'Line strip', 'create_linestrip')}
             {tool('point', <Dot size={16} />, 'Point', 'create_point')}
+            {tool('pose', <PersonStanding size={16} />, 'Pose', 'create_pose')}
           </div>
           <div className="seg">
             {tool('brush', <Paintbrush size={16} />, 'Brush: paint a class, joining shapes it touches', 'create_brush')}
@@ -3039,6 +3750,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
             <div className="seg">
               {tool('ai_points', <Wand2 size={16} />, 'AI points', 'create_ai_points')}
               {tool('ai_box', <ScanLine size={16} />, 'AI box', 'create_ai_box')}
+              {poseModels.length > 0 && tool('ai_pose', <Accessibility size={16} />, 'AI pose', 'create_ai_pose')}
             </div>
           )}
           {AI_MODES.has(mode) && models && (
@@ -3055,6 +3767,21 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
                   {AI_OUTPUTS.map((o) => <option key={o} value={o}>{AI_OUTPUT_NAMES[o]}</option>)}
                 </select>
               </label>
+            </>
+          )}
+          {mode === 'ai_pose' && poseModels.length > 0 && (
+            <>
+              <label className="slider">Model
+                <select value={poseModel} aria-label="AI pose model" onChange={(e) => { setSettings((s) => ({ ...s, poseModel: e.target.value })); e.target.blur() }}>
+                  {poseModels.map((m) => <option key={m.name} value={m.name}>{m.title}{m.downloaded ? '' : ' (download)'}</option>)}
+                </select>
+              </label>
+              <label className="slider" title="Keypoints scored below this are left out">Score
+                <input type="number" min={0} max={1} step={0.05} value={poseScore} aria-label="Keypoint score threshold"
+                  onChange={(e) => setPoseScore(Math.max(0, Math.min(1, +e.target.value)))} />
+              </label>
+              <button className="ghost" onClick={() => poseBoxes()} disabled={!!busyAi || !!readOnly}
+                title="On this image's boxes of the class that have no keypoints, or on the people YOLO-World finds">Pose every person</button>
             </>
           )}
           <button className="icon" onClick={() => commands.undo.run()} title="Undo (Ctrl+Z)" aria-label="Undo"><Undo2 size={16} /></button>
@@ -3113,11 +3840,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
             <div className="review-bar" data-testid="review-bar" onMouseDown={(e) => e.preventDefault()}>
               <span>
                 <b>{aiCount}</b> AI {aiCount === 1 ? 'shape' : 'shapes'}
-                {current && scoreOf(current) !== undefined && <> · this one <b className="certainty">{percent(scoreOf(current)!)}</b></>}
+                {current && current.score !== undefined && <> · this one <b className="certainty">{percent(current.score)}</b></>}
               </span>
               <button className="ghost" onClick={acceptSelected}><Check size={15} /> {current ? 'Accept' : 'Review'} <kbd>W</kbd></button>
               <button className="ghost" onClick={rejectSelected} disabled={!current}><X size={15} /> Reject <kbd>S</kbd></button>
-              <button className="ghost" onClick={skipShape} disabled={aiCount < 2 && !!current}><SkipForward size={15} /> Skip <kbd>Tab</kbd></button>
+              <button className="ghost" onClick={skipShape} disabled={steps.length < 2 && !!current}><SkipForward size={15} /> Skip <kbd>Tab</kbd></button>
               <button className="ghost" onClick={acceptAll}><CheckCheck size={15} /> Accept all <kbd>⇧W</kbd></button>
             </div>
           )}
@@ -3139,7 +3866,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
           )}
           <div className="spacer" />
           <span data-testid="save-state">{readOnly ? 'Read only' : saved === 'saved' ? 'Saved' : saved === 'saving' ? 'Saving…' : settings.autoSave ? 'Saving…' : 'Not saved'}</span>
-          <span className="muted hint">{modeHint[mode]}</span>
+          {poseStep && <span data-testid="pose-step">{poseStep}</span>}
+          <span className="muted hint">{poseStep ? 'Click to place · Shift+click: hidden · X skips · Backspace goes back · Enter ends' : modeHint[mode]}</span>
         </footer>
       </main>
 
@@ -3194,56 +3922,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
                 ) : <span className="muted">{shapes.length}</span>}
               </h3>
               <div className="shapes" role="listbox" aria-multiselectable>
-                {shapes.map((s, i) => (
-                  <div key={i} role="option" aria-selected={selected.includes(i)} draggable={!readOnly}
-                    className={`shape ${selected.includes(i) ? 'on' : ''} ${dragOver === i ? 'drop' : ''} ${s.hidden ? 'off' : ''}`}
-                    onClick={(e) => {
-                      if (e.ctrlKey || e.metaKey) setSelected(selected.includes(i) ? selected.filter((k) => k !== i) : [...selected, i])
-                      else if (e.shiftKey && selected.length) {
-                        const a = Math.min(selected[selected.length - 1], i), b = Math.max(selected[selected.length - 1], i)
-                        setSelected(Array.from({ length: b - a + 1 }, (_, k) => a + k))
-                      } else setSelected([i])
-                      if (mode !== 'edit') setMode('edit')
-                    }}
-                    onDoubleClick={() => { setSelected([i]); editLabel([i]) }}
-                    onDragStart={(e) => e.dataTransfer.setData('text/x-shape', String(i))}
-                    onDragOver={(e) => { if (e.dataTransfer.types.includes('text/x-shape')) { e.preventDefault(); setDragOver(i) } }}
-                    onDragLeave={() => setDragOver(null)}
-                    onDrop={(e) => {
-                      setDragOver(null)
-                      const from = Number(e.dataTransfer.getData('text/x-shape'))
-                      if (Number.isNaN(from) || from === i) return
-                      // Order matters: later shapes are drawn, and trained, on top
-                      const next = [...shapesRef.current]
-                      const [moved] = next.splice(from, 1)
-                      next.splice(i, 0, moved)
-                      setShapes(next)
-                      setSelected([i])
-                    }}>
-                    <input type="checkbox" checked={!s.hidden} aria-label={`Show ${s.label}`} onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => {
-                        const which = selectedRef.current.includes(i) ? selectedRef.current : [i]
-                        const next = shapesRef.current.map((q, k) => (which.includes(k) ? { ...q, hidden: !e.target.checked || undefined } : q))
-                        // Undone like any change; hidden shapes are never saved, so there's nothing to save
-                        undo.current.push(shapesRef.current)
-                        if (undo.current.length > config.canvas.num_backups) undo.current.shift()
-                        redo.current = []
-                        shapesRef.current = next
-                        setShapesState(next)
-                        invalidate()
-                      }} />
-                    <i style={{ background: colorOf(s.label) }} />
-                    <span className="name">{s.label}{s.group_id !== null ? ` (${s.group_id})` : ''}
-                      {Object.entries(s.flags).some(([k, v]) => v && k !== 'ai' && k !== 'difficult') && (
-                        <span className="muted"> [{Object.entries(s.flags).filter(([k, v]) => v && k !== 'ai' && k !== 'difficult').map(([k]) => k).join(', ')}]</span>
-                      )}
-                    </span>
-                    {s.locked && <Lock size={12} className="muted" aria-label="Locked" />}
-                    {s.flags.difficult === true && <span className="tag difficult">difficult</span>}
-                    {isAi(s) && <span className="tag">AI{scoreOf(s) !== undefined ? ` ${percent(scoreOf(s)!)}` : ''}</span>}
-                    <span className="muted">{describe(s)}</span>
-                  </div>
-                ))}
+                {rows.map((row) => {
+                  if (row.kind === 'pose') return poseRow(row.pose, row.open)
+                  if (row.kind === 'missing') return missingRow(row.pose, row.keypoint)
+                  return shapeRow(row.index, row.pose, row.keypoint)
+                })}
                 {!shapes.length && <p className="muted pad">Nothing yet. Click on the image to start a polygon.</p>}
               </div>
               {selected.length > 0 && !readOnly && (
@@ -3269,10 +3952,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       )}
 
       {dialog && (
-        <LabelDialog request={dialog} config={config} labels={classes.map((c) => c.name)}
+        <LabelDialog request={dialog} config={config} labels={classes.map((c) => c.name)} keypoints={notClasses}
           onDone={(choice) => {
             const { resolve } = dialog
-            if (choice && config.validate_label === 'exact' && !dialog.locked?.text && !(config.labels ?? []).includes(choice.text)) {
+            // A keypoint's name isn't a label of the list: it's checked against the keypoints file
+            if (choice && config.validate_label === 'exact' && !dialog.locked?.text && !(config.labels ?? []).includes(choice.text) && !notClasses.has(choice.text)) {
               onError(`Invalid label “${choice.text}”: only labels from the list are allowed.`)
               choice = null
             }
