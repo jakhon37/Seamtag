@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'vitest'
 import {
-  boxesClipped, CHECKS, type CheckCode, type CheckOptions, checkDataset, crossing, fixIssue, renameLabel, shapeArea, withoutDuplicates, withoutRepeatedPoints
+  boxesClipped, CHECKS, type CheckCode, type CheckOptions, checkDataset, crossing, fixIssue, renameLabel, shapeArea, withoutDuplicates, withoutRepeatedKeypoint,
+  withoutRepeatedPoints
 } from '../../src/shared/checks'
-import type { DatasetImage, Issue, MaskBits } from '../../src/shared/dataset'
+import type { DatasetImage, Issue, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
+import { builtInKeypoints } from '../../src/shared/skeleton'
 
 // The checks run on what readDataset gives: images 400 x 300 with LabelMe files, built here by hand
 const W = 400, H = 300
@@ -26,6 +28,30 @@ function bits(x: number, y: number, rows: string[]): MaskBits {
   return { x, y, width, height, data: Uint8Array.from(rows.join('').split('').map(Number)) }
 }
 const maskShape = (label: string, m: MaskBits) => newShape(label, 'mask', [[m.x, m.y], [m.x + m.width - 1, m.y + m.height - 1]], { mask: 'png' })
+
+// Poses with COCO's person, as a folder with no keypoints file has them
+const COCO = builtInKeypoints()
+type At = Record<string, number[]>
+const kp = (label: string, x: number, y: number, group: number | null, extra: Partial<Shape> = {}) => newShape(label, 'point', [[x, y]], { group_id: group, ...extra })
+/** A person facing the camera in the box (100, 50) to (200, 290): their left on the image's right */
+const FRONT: At = {
+  nose: [150, 70], left_eye: [157, 65], right_eye: [143, 65], left_ear: [165, 68], right_ear: [135, 68], left_shoulder: [175, 100], right_shoulder: [125, 100],
+  left_elbow: [185, 140], right_elbow: [115, 140], left_wrist: [188, 175], right_wrist: [112, 175], left_hip: [165, 180], right_hip: [135, 180],
+  left_knee: [163, 230], right_knee: [137, 230], left_ankle: [162, 280], right_ankle: [138, 280]
+}
+/** The same person seen from behind: their left on the image's left */
+const BACK: At = Object.fromEntries(Object.entries(FRONT).map(([n, [x, y]]) => [n, [300 - x, y]]))
+/** Facing the camera, lying on their side across the box (30, 120) to (270, 220) */
+const LYING: At = Object.fromEntries(Object.entries(FRONT).map(([n, [x, y]]) => [n, [150 - (y - 170), 170 + (x - 150)]]))
+const swap = (at: At, a: string, b: string): At => ({ ...at, [a]: at[b], [b]: at[a] })
+/** A posed person: its box and its keypoints in COCO's order, sharing `group`; `hidden` names those marked difficult */
+function person(group: number, at: At, { frame = [100, 50, 200, 290] as number[] | null, hidden = [] as string[] } = {}): Shape[] {
+  return [
+    ...(frame ? [box('person', frame[0], frame[1], frame[2], frame[3], { group_id: group })] : []),
+    ...Object.entries(at).map(([name, [x, y]]) => kp(name, x, y, group, hidden.includes(name) ? { flags: { difficult: true } } : {}))
+  ]
+}
+const posed = (shapes: Shape[], keypoints: KeypointSchema = COCO) => check([image('a.png', shapes)], { keypoints })
 
 describe('errors', () => {
   test("a label file that can't be read is an error, and nothing else is said of its image", () => {
@@ -253,6 +279,123 @@ describe('labels', () => {
     const issues = check([image('a.png', [box('car', 1, 1, 9, 9), box('car', 20, 1, 29, 9, ai), box('car', 40, 1, 49, 9, ai)]), image('b.png', [box('car', 1, 1, 9, 9)])])
     expect(of(issues, 'ai-pending')).toEqual([
       { severity: 'warning', code: 'ai-pending', image: 'a.png', shape: 1, message: 'a.png has 2 AI proposals not yet accepted' }
+    ])
+  })
+})
+
+describe('poses', () => {
+  test('a person labelled whole has no problems, facing the camera, seen from behind or lying down', () => {
+    expect(posed(person(1, FRONT))).toEqual([])
+    expect(posed(person(1, BACK))).toEqual([])
+    expect(posed(person(1, LYING, { frame: [30, 120, 270, 220] }))).toEqual([])
+  })
+
+  test('keypoints with no group are one warning an image, naming their shapes; points of other names, or in a group, are not', () => {
+    const issues = posed([kp('nose', 10, 10, null), kp('dot', 20, 20, null), kp('left_eye', 30, 30, null), ...person(1, { nose: [150, 70] })])
+    expect(of(issues, 'keypoint-no-group')).toEqual([{
+      severity: 'warning', code: 'keypoint-no-group', image: 'a.png', shape: 0,
+      message: "2 keypoints have no group (shapes 1 and 3), so they're in no pose, and pose exports leave them out"
+    }])
+    expect(of(posed([kp('nose', 10, 10, null)]), 'keypoint-no-group').map((i) => i.message)).toEqual([
+      "Shape 1 (nose) is a keypoint with no group, so it's in no pose, and pose exports leave it out"
+    ])
+  })
+
+  test('a group of keypoints with no box is told as pose exports take it: boxed round its points, with no area, or with no class of its own', () => {
+    // A box of a label the keypoints don't name is no pose's box
+    const issues = posed([
+      box('pedestrian', 100, 50, 200, 290, { group_id: 1 }), kp('nose', 150, 70, 1), kp('left_eye', 157, 65, 1),
+      kp('nose', 50, 50, 2), kp('left_eye', 50, 60, 2), kp('nose', 300, 50, 3)
+    ])
+    expect(of(issues, 'keypoint-no-box').map((i) => [i.shape, i.message])).toEqual([
+      [1, 'Group 1 has keypoints of person but no box, so pose exports use the box around its points: add a box labelled person'],
+      [3, 'Group 2 has keypoints of person but no box, and the box around its points, which lie in a line, has no area: add a box labelled person'],
+      [5, 'Group 3 has keypoints of person but no box, and the box around its one point has no area: add a box labelled person']
+    ])
+    // Keypoints that two classes have, or that no one class has all of
+    const schema: KeypointSchema = { classes: { person: ['nose', 'tail'], dog: ['nose', 'tail', 'paw'], cat: ['whisker'] } }
+    expect(of(posed([kp('nose', 10, 10, 4), kp('whisker', 20, 20, 5), kp('paw', 30, 30, 5)], schema), 'keypoint-no-box').map((i) => i.message)).toEqual([
+      'Group 4 has keypoints but no box, and they fit person and dog, so pose exports leave it out: add a box labelled with its class',
+      'Group 5 has keypoints but no box, and no class has all of them, so pose exports leave it out: add a box labelled with its class'
+    ])
+  })
+
+  test('a point a pose has no place for, and a keypoint it has already, are warnings, as pose exports stop on them; the fix deletes the second', () => {
+    const shapes = [...person(1, { nose: [150, 70], left_eye: [157, 65] }), kp('tail', 150, 200, 1), kp('nose', 151, 71, 1)]
+    const img = image('a.png', shapes)
+    const issues = check([img], { keypoints: COCO })
+    expect(issues).toEqual([
+      { severity: 'warning', code: 'keypoint-unknown', image: 'a.png', shape: 3, message: "Shape 4 (tail) in group 1 isn't one of person's keypoints, so pose exports stop on it" },
+      { severity: 'warning', code: 'keypoint-repeated', image: 'a.png', shape: 4, message: "Shape 5 (nose) repeats group 1's nose, so pose exports stop on it" }
+    ])
+    // The first stays where it was, as the pose had it
+    const fixed = fixIssue(img, issues[1])!
+    expect(fixed).toEqual(shapes.slice(0, 4))
+    expect(of(check([image('a.png', fixed)], { keypoints: COCO }), 'keypoint-repeated')).toEqual([])
+    expect(fixIssue(img, issues[0])).toBeNull()
+    // Never the first, nor a point another group has, nor all of them at once
+    expect(withoutRepeatedKeypoint(shapes, 1)).toBeNull()
+    expect(withoutRepeatedKeypoint([kp('nose', 1, 1, 1), kp('nose', 2, 2, 2)], 1)).toBeNull()
+    expect(withoutRepeatedKeypoint(shapes)).toBeNull()
+  })
+
+  test("a keypoint well past its pose's box is a warning, by the edge it passes most; within a twentieth of the box, or inside a box of parts, it is not", () => {
+    // A twentieth of the box's longer side, 240 px, is 12 px
+    const issues = posed(person(1, { ...FRONT, nose: [150, 35], left_wrist: [215, 175], right_wrist: [90, 175] }))
+    expect(of(issues, 'keypoint-outside-box').map((i) => [i.shape, i.message])).toEqual([
+      [1, "Shape 2 (nose) lies 15 px past the top edge of its pose's box (group 1)"],
+      [10, "Shape 11 (left_wrist) lies 15 px past the right edge of its pose's box (group 1)"]
+    ])
+    // A person in two parts, as labelme draws one hidden in part: their box is around both, as the exports take it
+    const parts = [box('person', 100, 50, 200, 160, { group_id: 2 }), box('person', 110, 160, 190, 290, { group_id: 2 }), ...person(2, FRONT, { frame: null })]
+    expect(of(posed(parts), 'keypoint-outside-box')).toEqual([])
+  })
+
+  test('one flip pair against all the rest is noted as maybe swapped, whichever way the person faces or lies', () => {
+    const said = (at: At, frame?: number[] | null) => of(posed(person(1, at, frame === undefined ? {} : { frame })), 'keypoint-swapped').map((i) => [i.shape, i.message])
+    const shoulders = [[6, "Shapes 7 and 8 (left_shoulder and right_shoulder) may be swapped: group 1's other 7 pairs seen have left and right the other way round"]]
+    expect(said(swap(FRONT, 'left_shoulder', 'right_shoulder'))).toEqual(shoulders)
+    expect(said(swap(BACK, 'left_shoulder', 'right_shoulder'))).toEqual(shoulders)
+    expect(said(swap(LYING, 'left_shoulder', 'right_shoulder'), [30, 120, 270, 220])).toEqual(shoulders)
+    // With no box, the box around its points sets how far apart a pair must be
+    expect(said(swap(FRONT, 'left_shoulder', 'right_shoulder'), null)).toHaveLength(1)
+    expect(posed(person(1, swap(FRONT, 'left_shoulder', 'right_shoulder'))).find((i) => i.code === 'keypoint-swapped')!.severity).toBe('info')
+    // Three pairs are enough
+    const three = Object.fromEntries(['left_eye', 'right_eye', 'left_shoulder', 'right_shoulder', 'left_hip', 'right_hip'].map((n) => [n, FRONT[n]]))
+    expect(said(swap(three, 'left_hip', 'right_hip'))).toEqual([[5, "Shapes 6 and 7 (left_hip and right_hip) may be swapped: group 1's other 2 pairs seen have left and right the other way round"]])
+  })
+
+  test("pairs that can't tell are not counted: seen side on, hidden, too few, or two against the rest, as arms crossed are", () => {
+    const said = (at: At, hidden: string[] = []) => of(posed(person(1, at, { hidden })), 'keypoint-swapped')
+    // Side on, each pair's points closer than a twentieth of the box's width
+    const side: At = Object.fromEntries(Object.entries(FRONT).map(([n, [x, y]]) => [n, [150 + (x - 150) / 20, y]]))
+    expect(said(swap(side, 'left_shoulder', 'right_shoulder'))).toEqual([])
+    // A hidden keypoint's place is a guess
+    expect(said(swap(FRONT, 'left_shoulder', 'right_shoulder'), ['right_shoulder'])).toEqual([])
+    // Two pairs say nothing of which is the odd one out
+    const two = Object.fromEntries(['left_eye', 'right_eye', 'left_shoulder', 'right_shoulder'].map((n) => [n, FRONT[n]]))
+    expect(said(swap(two, 'left_shoulder', 'right_shoulder'))).toEqual([])
+    expect(said(swap(swap(FRONT, 'left_wrist', 'right_wrist'), 'left_elbow', 'right_elbow'))).toEqual([])
+  })
+
+  test("a YOLO image of unknown size has its poses' keypoints checked by name, not by where they lie; with no keypoints given, poses aren't checked", () => {
+    const shapes = [...person(1, swap({ ...FRONT, nose: [150, 0] }, 'left_hip', 'right_hip')), kp('nose', 1, 1, 1)]
+    const yolo = check([image('a.png', shapes, { format: 'yolo', width: 0, height: 0, labelSize: null })], { keypoints: COCO })
+    expect(yolo.map((i) => i.code)).toEqual(['keypoint-repeated'])
+    expect(check([image('a.png', shapes)])).toEqual([])
+  })
+
+  test('labels naming keypoints are no unknown labels, and a keypoint wins over its other spellings, however many use them', () => {
+    const images = [
+      image('a.png', [...person(1, { nose: [150, 70], left_eye: [157, 65] }), box('dog', 1, 1, 9, 9)]),
+      image('b.png', [kp('Nose', 10, 10, 2), kp('Nose', 20, 10, 3), kp('Nose', 30, 10, 4)])
+    ]
+    const issues = check(images, { labels: ['person'], keypoints: COCO })
+    expect(of(issues, 'unknown-label').map((i) => i.message)).toEqual(['Label “dog” isn\'t in the label list (shape 4)'])
+    expect(of(issues, 'label-variants').map((i) => [i.image, i.shape, i.message])).toEqual([['b.png', 0, 'Label “Nose” looks like the keypoint “nose” written another way']])
+    // Without the keypoints, the most used spelling wins
+    expect(of(check(images, { labels: ['person'] }), 'label-variants').map((i) => [i.image, i.message])).toEqual([
+      ['a.png', 'Label “nose” looks like “Nose” written another way (3 shapes use “Nose”)']
     ])
   })
 })

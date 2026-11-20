@@ -12,8 +12,9 @@ import { Stale } from '../../src/renderer/src/stale'
 import { encodeMask } from '../../src/main/masks'
 import { closeProject, openProject, setTrash } from '../../src/main/project'
 import { CHECKS, type CheckOptions, checkDataset } from '../../src/shared/checks'
-import type { DatasetImage, Issue, MaskBits } from '../../src/shared/dataset'
+import type { DatasetImage, Issue, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
+import { builtInKeypoints } from '../../src/shared/skeleton'
 import { datasetStats } from '../../src/shared/stats'
 
 // The main process's side of Dataset > Check labels, Statistics and renames, on folders of
@@ -91,6 +92,7 @@ describe('two passes find what one checkDataset finds', () => {
   const rect = (label: string, x0: number, y0: number, x1: number, y1: number, extra: Partial<Shape> = {}) =>
     newShape(label, 'rectangle', [[x0, y0], [x1, y1]], extra)
   const poly = (label: string, points: number[][]) => newShape(label, 'polygon', points)
+  const kp = (label: string, x: number, y: number, group: number | null) => newShape(label, 'point', [[x, y]], { group_id: group })
   const bits: MaskBits = { x: 10, y: 10, width: 2, height: 2, data: Uint8Array.from([1, 1, 1, 1]) }
   const mask = newShape('road', 'mask', [[10, 10], [11, 11]], { mask: 'png' })
   // Every check fires somewhere here
@@ -112,11 +114,18 @@ describe('two passes find what one checkDataset finds', () => {
     image('never.png', [], { file: null, format: null, labelSize: null }),
     image('empty.png'),
     image('verified.png', [rect('car', 1, 1, 9, 9)], { verified: true }),
-    image('masked.png', [{ ...mask }], { masks: [bits] })
+    image('masked.png', [{ ...mask }], { masks: [bits] }),
+    // A person with its hips the wrong way round and its nose far above its box, a point it has no place for and a
+    // second nose; a keypoint of no group; and a group of one keypoint, with no box
+    image('poses.png', [
+      rect('person', 100, 50, 200, 290, { group_id: 1 }), kp('nose', 150, 20, 1), kp('left_eye', 157, 65, 1), kp('right_eye', 143, 65, 1),
+      kp('left_shoulder', 175, 100, 1), kp('right_shoulder', 125, 100, 1), kp('left_hip', 135, 180, 1), kp('right_hip', 165, 180, 1),
+      kp('tail', 150, 200, 1), kp('nose', 151, 71, 1), kp('nose', 5, 5, null), kp('nose', 300, 50, 9)
+    ])
   ]
   const options = (): CheckOptions => ({
-    labels: ['car', 'bus'], clashes: [{ file: '/data/a.json', images: ['a.jpg', 'a.png'] }], duplicates: [['copy1.png', 'copy2.png']],
-    orphans: [{ file: 'stray.json', names: null }]
+    labels: ['car', 'bus'], keypoints: builtInKeypoints(), clashes: [{ file: '/data/a.json', images: ['a.jpg', 'a.png'] }],
+    duplicates: [['copy1.png', 'copy2.png']], orphans: [{ file: 'stray.json', names: null }]
   })
 
   test('on a folder where every check fires', async () => {
@@ -175,6 +184,26 @@ describe('two passes find what one checkDataset finds', () => {
     const listed = await issuesOf(relabelled, { ...options(), labels: ['car'] }, after)
     expect(listed.across).not.toBe(after.across)
     expect(canon(listed.issues)).toEqual(canon(checkDataset(relabelled, { ...options(), labels: ['car'] })))
+  })
+
+  test("other keypoints check every image's poses again, and what hangs on them across the folder; the same keypoints keep what was found", async () => {
+    const images = folderOfAll()
+    const first = await issuesOf(images, options())
+    const again = await issuesOf(images, options(), first)
+    expect(again.own.get('poses.png')).toBe(first.own.get('poses.png'))
+    expect(again.across).toBe(first.across)
+    // A keypoints file whose person has a tail, and no flip pairs: the tail is no unknown label or point, and nothing looks swapped
+    const tailed: KeypointSchema = { classes: { person: ['nose', 'left_eye', 'right_eye', 'left_shoulder', 'right_shoulder', 'left_hip', 'right_hip', 'tail'] } }
+    const next = await issuesOf(images, { ...options(), keypoints: tailed }, first)
+    expect(canon(next.issues)).toEqual(canon(checkDataset(images, { ...options(), keypoints: tailed })))
+    expect(next.own.get('poses.png')).not.toBe(first.own.get('poses.png'))
+    expect(next.own.get('shapes.png')).not.toBe(first.own.get('shapes.png'))
+    expect(next.across).not.toBe(first.across)
+    const at = (found: typeof first) => codes(found.issues.filter((i) => i.image === 'poses.png')).sort()
+    expect(at(first)).toEqual(expect.arrayContaining(['keypoint-swapped', 'keypoint-unknown', 'unknown-label']))
+    expect(at(next)).not.toContain('keypoint-swapped')
+    expect(at(next)).not.toContain('keypoint-unknown')
+    expect(next.issues.find((i) => i.code === 'unknown-label' && i.image === 'poses.png')!.message).toBe('Label “person” isn\'t in the label list (shape 1)')
   })
 
   test('progress is told slice by slice, and a stop ends it', async () => {
@@ -374,6 +403,60 @@ describe('checking again', () => {
     expect(closed).toBe(true)
     expect(result).toEqual({ stopped: true })
     expect(problemPage(root, ALL)).toBeNull()
+  })
+})
+
+describe("the folder's keypoints", () => {
+  /** A folder of two images: a person with a nose and a tail, the nose given twice; and a nose of no group */
+  async function posedFolder() {
+    const root = folder()
+    for (const name of ['a', 'b']) await png(path.join(root, `${name}.png`))
+    write(root, {
+      'a.json': labelme('a.png', [box('person', 10, 5, 30, 28, { group_id: 1 }), shape('nose', 'point', [[20, 10]], { group_id: 1 }),
+        shape('tail', 'point', [[20, 26]], { group_id: 1 }), shape('nose', 'point', [[21, 11]], { group_id: 1 })]),
+      'b.json': labelme('b.png', [shape('nose', 'point', [[5, 5]])])
+    })
+    await openProject(root, null)
+    return root
+  }
+  const groups = (root: string) => problemPage(root, ALL)!.groups.map((g) => [g.code, g.count])
+
+  test("are read once a check, COCO's person until the folder has a file, and a new file checks every image's poses again", async () => {
+    const root = await posedFolder()
+    const reads = vi.spyOn(fsp, 'readFile')
+    const keypointReads = () => reads.mock.calls.filter(([file]) => String(file).endsWith('keypoints.yaml')).length
+    try {
+      await checkFolder(root, { prefer: 'labelme', labels: null }, () => {})
+      expect(keypointReads()).toBe(1)
+      expect(groups(root)).toEqual([['keypoint-no-group', 1], ['keypoint-unknown', 1], ['keypoint-repeated', 1]])
+      // The folder's own file, where a person has a tail: a check after saves, with none saved, reads no label file but checks every pose with it
+      mkdirSync(path.join(root, '.myseg'), { recursive: true })
+      writeFileSync(path.join(root, '.myseg', 'keypoints.yaml'), 'classes:\n  person: [nose, tail]\n')
+      await checkFolder(root, { prefer: 'labelme', labels: null, saved: [] }, () => {})
+      expect(keypointReads()).toBe(2)
+      expect(groups(root)).toEqual([['keypoint-no-group', 1], ['keypoint-repeated', 1]])
+    } finally {
+      vi.restoreAllMocks()
+    }
+  })
+
+  test('a keypoint given twice is fixed in the shapes the window has, by deleting the second, while it is still the second', async () => {
+    const root = await posedFolder()
+    await checkFolder(root, { prefer: 'labelme', labels: null }, () => {})
+    const row = problemPage(root, ALL)!.groups.find((g) => g.code === 'keypoint-repeated')!.rows[0]
+    expect(row).toMatchObject({ image: 'a.png', shape: 3, label: 'nose', fix: true })
+    expect(problemPage(root, ALL)!.groups.find((g) => g.code === 'keypoint-unknown')!.rows[0].fix).toBeUndefined()
+    const shapes = asShapes(JSON.parse(read(root, 'a.json')).shapes)
+    expect(await fixShapes(root, { code: 'keypoint-repeated', image: 'a.png', shape: 3 }, shapes)).toEqual(shapes.slice(0, 3))
+    // Given a group of its own in the window since the check, it's no second nose
+    expect(await fixShapes(root, { code: 'keypoint-repeated', image: 'a.png', shape: 3 }, [...shapes.slice(0, 3), { ...shapes[3], group_id: 2 }])).toBeNull()
+  })
+
+  test("with only listed labels allowed, a rename may still give a keypoint's name", async () => {
+    const root = await posedFolder()
+    write(root, { 'b.json': labelme('b.png', [shape('Nose', 'point', [[5, 5]])]) })
+    await expect(renameRun(root, 'Nose', 'snout', 'labelme', ['person'], () => {})).rejects.toThrow("“snout” isn't in the label list")
+    expect((await renameRun(root, 'Nose', 'nose', 'labelme', ['person'], () => {})).changed).toEqual(['b.png'])
   })
 })
 
