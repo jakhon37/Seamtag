@@ -128,6 +128,18 @@ describe('AI shapes', () => {
   })
 })
 
+describe("an AI pose on a box of the image's own", () => {
+  test('is one proposal, scored by its keypoints\' mean; the box is the image\'s, counted as before', () => {
+    const keypoints = { classes: { person: ['nose', 'left_eye', 'right_eye'] } }
+    const ai = (label: string, x: number, score: number) => newShape(label, 'point', [[x, 5]], { group_id: 1, flags: { ai: true }, other: { score } })
+    const shapes = [newShape('person', 'polygon', [[0, 0], [9, 0], [9, 9]], { group_id: 1 }), ai('nose', 4, 0.6), ai('left_eye', 3, 0.8)]
+    expect(summarize(shapes, true, keypoints)).toEqual({ count: 1, ai: 1, score: 0.7, classes: { person: 1 }, labelled: true })
+    // An AI box stands for its keypoints: one proposal, with the box's score
+    const box = newShape('person', 'rectangle', [[0, 0], [9, 9]], { group_id: 1, flags: { ai: true }, other: { score: 0.5 } })
+    expect(summarize([box, ...shapes.slice(1)], true, keypoints)).toMatchObject({ count: 0, ai: 1, score: 0.5 })
+  })
+})
+
 describe('labelme 7', () => {
   test('oriented rectangles and locked shapes read, and write back as labelme 7 writes them', () => {
     const text = JSON.stringify({

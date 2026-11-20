@@ -24,18 +24,29 @@ export function summarize(shapes: Shape[], labelled = true, keypoints?: Keypoint
   const classes: Record<string, number> = {}
   let ai = 0
   let score: number | null = null
-  const keypointAt = keypoints ? posePoints(posesIn(shapes, keypoints)) : null
+  const proposal = (v: number | undefined) => {
+    ai++
+    if (v !== undefined) score = score === null ? v : Math.min(score, v)
+  }
+  const poses = keypoints ? posesIn(shapes, keypoints) : []
+  const keypointAt = posePoints(poses)
   let count = 0
   for (const [i, s] of shapes.entries()) {
-    if (keypointAt?.has(i)) continue
-    if (isAi(s)) {
-      ai++
-      const v = scoreOf(s)
-      if (v !== undefined) score = score === null ? v : Math.min(score, v)
-    } else {
+    if (keypointAt.has(i)) continue
+    if (isAi(s)) proposal(scoreOf(s))
+    else {
       count++
       classes[s.label] = (classes[s.label] ?? 0) + 1
     }
+  }
+  // Keypoints the AI proposed for a box of the image's own are one proposal, as an AI pose's box would be,
+  // scored by their mean as its box is; an AI box counted above stands for its keypoints
+  for (const p of poses) {
+    if (p.box !== null && isAi(shapes[p.box])) continue
+    const proposed = p.points.filter((k): k is number => k !== null && isAi(shapes[k]))
+    if (!proposed.length) continue
+    const scores = proposed.map((k) => scoreOf(shapes[k])).filter((v): v is number => v !== undefined)
+    proposal(scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : undefined)
   }
   return { count, ai, score, classes, labelled }
 }
