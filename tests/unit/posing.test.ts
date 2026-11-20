@@ -2,8 +2,8 @@ import { describe, expect, test } from 'vitest'
 import { newShape, type Shape } from '../../src/shared/labelfile'
 import { builtInKeypoints, COCO_PERSON, type PosePoint, posesIn } from '../../src/shared/skeleton'
 import {
-  aiPosePoints, askedNow, classForModel, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseSession, regroup, reviewItems, shapeRows, spoken,
-  stepOf, swapSides, withHidden, withPoints, withSession
+  aiPosePoints, askedNow, classForModel, keptAsBoxes, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseSession, regroup, reviewItems,
+  shapeRows, spoken, stepOf, swapSides, withHidden, withPoints, withSession
 } from '../../src/renderer/src/posing'
 
 const coco = builtInKeypoints()
@@ -189,6 +189,16 @@ test('review takes an AI pose as one, least certain first, and other AI shapes o
   expect(stepOf(items, [4])).toBe(items[0])
   expect(stepOf(items, [0, 4])).toBeNull()
   expect(stepOf(items, [])).toBeNull()
+})
+
+test("LabelImg's formats keep boxes: shapes become the box around them, and points, which have none, are left out", () => {
+  const shapes = [box(1), point('nose', 50, 40, 1), newShape('car', 'polygon', [[5, 1], [9, 4], [2, 8]]), point('tree', 3, 3, null), newShape('cut', 'line', [[0, 0], [4, 6]])]
+  const { shapes: kept, boxed, left } = keptAsBoxes(shapes)
+  expect(kept.map((s) => [s.label, s.shape_type])).toEqual([['person', 'rectangle'], ['car', 'rectangle'], ['cut', 'rectangle']])
+  expect(kept[0]).toBe(shapes[0])
+  expect(kept[1].points).toEqual([[2, 1], [9, 8]])
+  expect({ boxed, left }).toEqual({ boxed: 2, left: 2 })
+  expect(keptAsBoxes([])).toEqual({ shapes: [], boxed: 0, left: 0 })
 })
 
 test("the last pose's layout, scaled into the next box", () => {

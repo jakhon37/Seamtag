@@ -322,6 +322,35 @@ test("Pose every person: on the image's boxes without keypoints, else on YOLO-Wo
   await finish(app, errors)
 })
 
+test("Pascal VOC and YOLO keep a pose's box: its points are left out, said, and their names aren't classes", async () => {
+  const dir = await project('kp-boxes', { b: doc('b', [...person(1), shape('car', 'polygon', [[250, 100], [350, 100], [350, 200]], null)]) })
+  const { app, page, errors } = await launch(dir)
+  // Label files sent to the trash go to a folder of the test's own
+  await app.evaluate(({ shell }, into) => {
+    const fs = process.mainModule!.require('fs')
+    const path = process.mainModule!.require('path')
+    fs.mkdirSync(into, { recursive: true })
+    shell.trashItem = (async (file: string) => fs.renameSync(file, path.join(into, path.basename(file)))) as any
+  }, path.join(dir, '..', 'kp-boxes-trash'))
+  await open(page, 'b.png')
+  await page.getByLabel('Save format').selectOption('voc')
+  await expect(page.locator('.loading.notice')).toContainText('Pascal VOC keeps boxes only: 1 shape became a box and 4 points were left out.')
+  await expect.poll(() => existsSync(path.join(dir, 'b.xml'))).toBe(true)
+  await saved(page)
+  expect([...readFileSync(path.join(dir, 'b.xml'), 'utf8').matchAll(/<name>(.*?)<\/name>/g)].map((m) => m[1])).toEqual(['person', 'car'])
+  await expect(page.locator('.shape .name')).toHaveText(['person (1)', 'car'])
+  // The pose tools are off there, and say why
+  const pose = page.getByRole('toolbar').getByRole('button', { name: 'Pose', exact: true })
+  await expect(pose).toBeDisabled()
+  await expect(pose).toHaveAttribute('title', 'Pose (K): Pascal VOC keeps boxes only. Save as LabelMe JSON to use it.')
+  // YOLO's class names are the classes, with no keypoint's among them
+  await page.getByLabel('Save format').selectOption('yolo')
+  await expect.poll(() => existsSync(path.join(dir, 'b.txt'))).toBe(true)
+  await saved(page)
+  expect(readFileSync(path.join(dir, 'classes.txt'), 'utf8').split('\n').filter(Boolean).sort()).toEqual(['car', 'person'])
+  await finish(app, errors)
+})
+
 test("Dataset > Keypoints: the folder's own keypoints, made from its poses, chosen from a file, or COCO's person", async () => {
   const cat = [
     shape('cat', 'rectangle', [[100, 50], [300, 250]], 1), shape('head', 'point', [[150, 80]], 1),

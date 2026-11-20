@@ -1,9 +1,10 @@
 // Poses in the editor, kept apart from the window so they can be tested: what the Pose tool adds,
-// what AI pose proposes, what the pose keys change, and how the Shapes list and review take a
-// pose as one. A pose is a box and the points sharing its group_id, each named for a keypoint of
-// the box's class (src/shared/skeleton.ts); a hidden point is marked difficult.
+// what AI pose proposes, what the pose keys change, how the Shapes list and review take a pose as
+// one, and what LabelImg's formats keep of one. A pose is a box and the points sharing its
+// group_id, each named for a keypoint of the box's class (src/shared/skeleton.ts); a hidden point
+// is marked difficult.
 import type { KeypointSchema } from '../../shared/dataset'
-import { boxOf } from '../../shared/formats'
+import { asBox, boxOf } from '../../shared/formats'
 import { accepted, isAi, newShape, scoreOf, type Shape } from '../../shared/labelfile'
 import { nextGroupId, type PoseGroup, type PosePoint, poseShapes, posesIn } from '../../shared/skeleton'
 
@@ -42,6 +43,16 @@ export function regroup(copies: Shape[], existing: Shape[], schema: KeypointSche
   let next = nextGroupId([...existing, ...copies.filter((s) => s.group_id === null || !groups.has(s.group_id))])
   const fresh = new Map([...groups].map((g) => [g, next++]))
   return copies.map((s) => (s.group_id !== null && fresh.has(s.group_id) ? { ...s, group_id: fresh.get(s.group_id)! } : s))
+}
+
+/**
+ * What LabelImg's formats keep of shapes: they hold boxes, so each shape becomes the box around
+ * it, and a point, which has no box, is left out; a pose keeps its box. With how many became
+ * boxes and how many points were left out, for the window to say.
+ */
+export function keptAsBoxes(list: Shape[]): { shapes: Shape[]; boxed: number; left: number } {
+  const shapes = list.filter((s) => s.shape_type !== 'point').map(asBox)
+  return { shapes, boxed: list.filter((s) => s.shape_type !== 'point' && s.shape_type !== 'rectangle').length, left: list.length - shapes.length }
 }
 
 /**

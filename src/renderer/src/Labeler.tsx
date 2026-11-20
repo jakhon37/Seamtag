@@ -7,7 +7,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import { AI_OUTPUTS, type AiOutput, type Config, formatKeys, matches, type ShortcutName, shortcutList } from '../../shared/config'
 import type { KeypointSchema } from '../../shared/dataset'
 import {
-  asBox, boxOf, FORMAT_NAMES, holdsBoxesOnly, keepsDifficult, keepsVerified, LABEL_FORMATS, type LabelFormat, NEXT_FORMAT
+  boxOf, FORMAT_NAMES, holdsBoxesOnly, keepsDifficult, keepsVerified, LABEL_FORMATS, type LabelFormat, NEXT_FORMAT
 } from '../../shared/formats'
 import { accepted, isAi, newShape, scoreOf, type Shape, type ShapeType } from '../../shared/labelfile'
 import { EMPTY_SUMMARY, summarize } from '../../shared/labels'
@@ -21,8 +21,8 @@ import { ContextMenu } from './Menu'
 import Modal from './Modal'
 import Models from './Models'
 import {
-  aiPosePoints, askedNow, classForModel, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseLayout, type PoseSession, regroup, type ReviewItem,
-  reviewItems, shapeRows, spoken, stepOf, swapSides, withHidden, withPoints, withSession
+  aiPosePoints, askedNow, classForModel, keptAsBoxes, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseLayout, type PoseSession, regroup,
+  type ReviewItem, reviewItems, shapeRows, spoken, stepOf, swapSides, withHidden, withPoints, withSession
 } from './posing'
 import Problems, { counted, RenameDialog } from './Problems'
 import {
@@ -1081,8 +1081,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(next, true, opts.current.keypoints) } : i)))
     queueSave()
   }
-  /** Shapes as the save format keeps them: boxes in LabelImg's formats */
-  const forFormat = (list: Shape[]) => (holdsBoxesOnly(formatRef.current) ? list.map(asBox) : list)
+  /** Shapes as the save format keeps them: boxes in LabelImg's formats, which leave points out */
+  const forFormat = (list: Shape[]) => (holdsBoxesOnly(formatRef.current) ? keptAsBoxes(list).shapes : list)
+  /** What a LabelImg format did to shapes, said: '' when it kept them as they were */
+  const boxedNote = (list: Shape[]) => {
+    if (!holdsBoxesOnly(formatRef.current)) return ''
+    const { boxed, left } = keptAsBoxes(list)
+    const parts = [boxed ? counted(boxed, 'shape became a box', 'shapes became boxes') : '', left ? `${counted(left, 'point was', 'points were')} left out` : '']
+    return boxed || left ? `${FORMAT_NAMES[formatRef.current]} keeps boxes only: ${parts.filter(Boolean).join(' and ')}.` : ''
+  }
   const setShapes = (next: Shape[], record = true) => {
     if (readOnlyRef.current) return
     if (record) {
@@ -2568,8 +2575,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const paste = () => {
     if (!clipboard.current.length || readOnlyRef.current || !metaRef.current) return
     // Pasted onto a smaller image, shapes are kept inside it; a pose pasted is a pose of its own
-    const copies = regroup(clipboard.current, shapesRef.current, opts.current.keypoints)
-    const fitIn = forFormat(copies.map((s) => ({ ...s, points: s.points.map(clampPoint) })))
+    const copies = regroup(clipboard.current, shapesRef.current, opts.current.keypoints).map((s) => ({ ...s, points: s.points.map(clampPoint) }))
+    const fitIn = forFormat(copies)
+    const note = boxedNote(copies)
+    if (note) setNotice(note)
+    if (!fitIn.length) return
     const next = [...shapesRef.current, ...fitIn]
     setShapes(next)
     setSelected(fitIn.map((_, k) => next.length - fitIn.length + k))
@@ -3109,18 +3119,21 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     // The file in the old format goes once the new one is written
     if (fileFormat.current && fileFormat.current !== format) switchedFrom.current = fileFormat.current
     else if (fileFormat.current === format) switchedFrom.current = null
-    const next = forFormat(list)
-    const boxed = next.filter((s, i) => s !== list[i]).length
-    if (boxed) {
-      setShapes(next)
-      setNotice(`${FORMAT_NAMES[format]} keeps boxes only: ${boxed} ${boxed === 1 ? 'shape became a box' : 'shapes became boxes'}.`)
+    const note = boxedNote(list)
+    if (note) {
+      setShapes(forFormat(list))
+      setSelected([])
+      setNotice(note)
     } else if (images[index]?.labelled || list.length) queueSave()
   }
   /** Shapes from elsewhere take the place of this image's, clipped to it, as one step to undo */
   const replaceShapes = (from: Shape[]) => {
-    const next = forFormat(from.map((s) => ({ ...s, points: s.points.map(clampPoint), hidden: undefined })))
+    const fitIn = from.map((s) => ({ ...s, points: s.points.map(clampPoint), hidden: undefined }))
+    const next = forFormat(fitIn)
     setShapes(next)
     setSelected(next.map((_, k) => k))
+    const note = boxedNote(fitIn)
+    if (note) setNotice(note)
   }
   // LabelImg's Copy previous Bounding Boxes: the image before this one in the list lends its shapes
   const copyPrevious = async () => {
@@ -3555,11 +3568,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const steps = useMemo(() => reviewItems(shapes, poses), [shapes, poses])
   const current = stepOf(steps, selected)
   const flagKeys = Object.keys(imageFlags)
-  const tool = (m: Mode, icon: React.ReactNode, title: string, cmd: string) => (
-    <button className={mode === m ? 'on' : ''} onClick={() => setMode(m)} disabled={(!!readOnly && m !== 'edit') || (boxesOnly && !BOX_MODES.has(m))}
-      title={`${title}${commands[cmd]?.shortcut && formatKeys(config.shortcuts[commands[cmd].shortcut!], mac) ? ` (${formatKeys(config.shortcuts[commands[cmd].shortcut!], mac)})` : ''}`}
-      aria-label={title}>{icon}</button>
-  )
+  const tool = (m: Mode, icon: React.ReactNode, title: string, cmd: string) => {
+    const keys = commands[cmd]?.shortcut ? formatKeys(config.shortcuts[commands[cmd].shortcut!], mac) : ''
+    // Greyed out in LabelImg's formats: the tip says why
+    const why = boxesOnly && !BOX_MODES.has(m) ? `: ${FORMAT_NAMES[settings.format]} keeps boxes only. Save as LabelMe JSON to use it.` : ''
+    return (
+      <button className={mode === m ? 'on' : ''} onClick={() => setMode(m)} disabled={(!!readOnly && m !== 'edit') || (boxesOnly && !BOX_MODES.has(m))}
+        title={`${title}${keys ? ` (${keys})` : ''}${why}`} aria-label={title}>{icon}</button>
+    )
+  }
   const modeHint: Record<Mode, string> = {
     edit: 'Click to select, Ctrl+click for more · drag to move · Alt+click an edge adds a point, a point removes it',
     polygon: 'Click to add points · click the first point, Enter or double-click to close',
