@@ -25,6 +25,10 @@ import {
   trashLabels
 } from './project'
 import { runModels } from './runs'
+import { folderKeypoints, saveFolderKeypoints } from './keypoints'
+import { poseInBoxes } from './rtmpose'
+import type { KeypointSchema } from '../shared/dataset'
+import { type PoseRequest, withKnownLines } from '../shared/skeleton'
 
 const NAME = 'Seamtag'
 app.setName(NAME)
@@ -258,6 +262,7 @@ function registerIpc() {
   ipcMain.handle('ai:cancel', (_e, name: string) => cancelDownload(name))
   ipcMain.handle('ai:remove', (_e, name: string) => removeModel(name))
   ipcMain.handle('ai:assist', (_e, req: AssistRequest) => assist(req))
+  ipcMain.handle('ai:pose', (_e, req: PoseRequest) => poseInBoxes(req))
   ipcMain.handle('shapes:merge-masks', (_e, shapes: { points: number[][]; mask: string }[]) => mergeMasks(shapes))
   // A model that finds boxes only, asked for masks, is the user's choice to change, not a failure
   ipcMain.handle('ai:text', (_e, req: TextRequest) => fromTexts(req).catch((e) => {
@@ -361,6 +366,31 @@ function registerIpc() {
     const summary = await saveKeypoints(r.filePath, schema)
     keypointFiles.add(summary.file)
     return summary
+  })
+  // The folder's keypoints file (.myseg/keypoints.yaml), which the editor draws poses with and
+  // Export starts from; COCO's person until there is one. Only open folders, and its file is one
+  // an export may read.
+  const openRoot = (root: string) => {
+    if (!rootsOpen().includes(root)) throw new Error("That folder isn't open in Seamtag")
+    return root
+  }
+  const trustKeypoints = <T extends { file: string | null }>(k: T) => {
+    if (k.file) keypointFiles.add(k.file)
+    return k
+  }
+  ipcMain.handle('keypoints:get', async (_e, root: string) => trustKeypoints(await folderKeypoints(openRoot(root))))
+  ipcMain.handle('keypoints:set', async (_e, root: string, schema: KeypointSchema) => trustKeypoints(await saveFolderKeypoints(openRoot(root), schema)))
+  ipcMain.handle('keypoints:choose', async (_e, root: string) => {
+    openRoot(root)
+    const r = await dialog.showOpenDialog(win!, { title: 'Choose a keypoints file for this folder', properties: ['openFile'], filters: keypointsFilter })
+    if (r.canceled || !r.filePaths[0]) return null
+    const { schema } = await readKeypoints(r.filePaths[0])
+    return trustKeypoints(await saveFolderKeypoints(root, schema))
+  })
+  ipcMain.handle('keypoints:make', async (_e, root: string, prefer: LabelFormat) => {
+    const schema = await keypointsFromFolder(openRoot(root), prefer)
+    if (!schema) throw new Error('The folder has no posed objects to make a keypoints file from: give a box and its points one group_id')
+    return trustKeypoints(await saveFolderKeypoints(root, withKnownLines(schema)))
   })
   ipcMain.handle('export:run', (_e, root: string, options: ExportOptions, out: string) => job((async () => {
     const result = await runExport(root, exportOptions(options), out, exportJob())
