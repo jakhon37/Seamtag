@@ -5,6 +5,25 @@ All notable changes to Seamtag are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+Keypoints and poses: the Pose tool, skeletons on the canvas, AI pose with RTMPose, and checks and statistics for poses.
+
+### Added
+- The Pose tool (`K`): a box, then each keypoint as it's asked for; Shift+click for a hidden one, `X` to skip one, `Backspace` to go back, `Enter` to finish. A faint guide shows where the last pose's keypoints went.
+- Poses drawn as skeletons: lines between the keypoints, left, right and middle in their own colours, hidden points hollow, at the same size at any zoom. With a pose selected, the others dim and its keypoints show their numbers.
+- A pose selected by its box moves, nudges, copies, pastes, duplicates and deletes as one; a copy takes a new group ID. `Q` hides or shows a keypoint, `M` swaps left and right, `Shift+M` mirrors a pose in its box, `N` and `Shift+N` step through its keypoints.
+- The Shapes list folds each pose into one row with its count of keypoints, opened to its keypoints in order, missing ones included.
+- AI pose (`Shift+K`) and Pose every person: RTMPose-m or RTMPose-l finds a person's 17 keypoints in a box, or in every person box of the image (found with YOLO-World when there are none). Points scored below `ai.pose_score` are left out, as are points past the photo's edge, and a pose is accepted or rejected as one. The models are downloaded from OpenMMLab when you agree, with Hugging Face's copy if OpenMMLab can't be reached.
+- The folder's keypoints file, `.myseg/keypoints.yaml`, set under Dataset → Keypoints… from a file or made from the folder's poses; COCO's 17-point person until there is one.
+- Check labels finds keypoints outside their box, repeated (with a Fix) or not their class's, keypoints with no group or no box, and a likely left-right swap.
+- Statistics counts each keypoint seen, hidden and not labelled, in the window and the CSV.
+
+### Changed
+- Keypoint names aren't classes: the Labels list, its keys and counts, the image list's counts and `validate_label: exact` leave them out.
+- Export dataset's pose formats start from the folder's keypoints file, or COCO's person, so no file need be chosen.
+- AI pose keeps its own model in memory beside SAM2's, so SAM2 doesn't encode the image again after a pose.
+
 ## [3.3.0] - 2026-11-19
 
 Datasets: a check of the whole folder's labels, statistics, and COCO and Ultralytics YOLO export and import. Seamline and Seamtag on one folder: the models Seamline exports are offered for pre-labelling, and Seamtag never writes over labels or classes another app changed. Seamtag's licence and notices, in About and in the installers.
