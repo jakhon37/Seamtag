@@ -726,7 +726,8 @@ test("a pose export starts from the folder's own keypoints file; a file chosen i
   await expect(file).toContainText("This folder's keypoints file")
   const error = dialog.locator('.export-errors .export-group')
   await expect(error.locator('.export-group-head')).toContainText("The keypoints file can't be read")
-  await expect(error.locator('.export-rows li')).toHaveText(/^\.myseg\/keypoints\.yaml: The keypoints file isn't valid YAML/)
+  // The path as the system writes it: .myseg\keypoints.yaml on Windows
+  await expect(error.locator('.export-rows li')).toHaveText(/^\.myseg[\\/]keypoints\.yaml: The keypoints file isn't valid YAML/)
   await expect(error.getByRole('button', { name: 'Choose another…' })).toBeVisible()
   await page.screenshot({ path: `${SHOTS}/export-folder-keypoints-unreadable-dark.png` })
   await dialog.getByRole('button', { name: 'Cancel' }).click()
