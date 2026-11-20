@@ -161,6 +161,9 @@ export default function App() {
   }), [])
   // A rename took a label out of every label file: it's no longer one found in them
   const forgetLabel = useCallback((label: string) => setDiscovered((list) => list.filter((l) => l !== label)), [])
+  // The folder's keypoints changed, and with them which points are a pose's, whose names aren't
+  // classes: main counts every image again, and the labels found are what it finds now
+  const forgetFound = useCallback(() => setDiscovered([]), [])
   // Seamtag started again, as Seamline's Label in Seamtag starts it: what it was given opens here
   useEffect(() => window.api.onOpen(({ target, output, here }) => {
     if (data && here?.root === data.root && (!output || output === data.outputDir)) {
@@ -399,7 +402,7 @@ export default function App() {
       ) : (
         <div className="page">
           <Labeler key={folder} ref={labeler} data={data} config={config} settings={settings} setSettings={setSettings} onChangeOutput={changeOutput} onNextToImages={nextToImages}
-            setProject={setProject} setImages={setImages} discovered={discovered} forgetLabel={forgetLabel} mac={mac} onError={showError} onShown={shown}
+            setProject={setProject} setImages={setImages} discovered={discovered} forgetLabel={forgetLabel} forgetFound={forgetFound} mac={mac} onError={showError} onShown={shown}
             onOpenMenu={(x, y) => setContext({ x, y })} onChange={() => setTick((t) => t + 1)} />
         </div>
       )}

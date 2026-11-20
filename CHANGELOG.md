@@ -20,7 +20,7 @@ Keypoints and poses: the Pose tool, skeletons on the canvas, AI pose with RTMPos
 - Statistics counts each keypoint seen, hidden and not labelled, in the window and the CSV.
 
 ### Changed
-- Keypoint names aren't classes: the Labels list, its keys and counts, the image list's counts and `validate_label: exact` leave them out.
+- A pose's keypoints aren't shapes of a class: the Labels list, its keys and counts and the image list's counts leave them out, and `validate_label: exact` takes the keypoints file's names. A box or a point named like a keypoint outside a pose is of a class as before.
 - Export dataset's pose formats start from the folder's keypoints file, or COCO's person, so no file need be chosen.
 - AI pose keeps its own model in memory beside SAM2's, so SAM2 doesn't encode the image again after a pose.
 

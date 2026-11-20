@@ -12,7 +12,7 @@ import {
 import { accepted, isAi, newShape, scoreOf, type Shape, type ShapeType } from '../../shared/labelfile'
 import { EMPTY_SUMMARY, summarize } from '../../shared/labels'
 import {
-  builtInKeypoints, type FolderKeypoints, isHidden, keypointOnlyNames, nextGroupId, type PoseGroup, poseShapes, posesIn, sidesOf
+  builtInKeypoints, type FolderKeypoints, isHidden, keypointOnlyNames, nextGroupId, type PoseGroup, posePoints, poseShapes, posesIn, sidesOf
 } from '../../shared/skeleton'
 import { HALO, labelColor, labelList, recolored, SIDE_COLORS, withAlpha, withClass } from './colors'
 import { eraseShapes, paintShapes, strokeRegion } from './geometry'
@@ -115,6 +115,8 @@ type Props = {
   discovered: string[]
   /** A label no label file has any more, after a rename: it goes from those found in the files */
   forgetLabel: (label: string) => void
+  /** The labels found in the files are found again, as main counts every image again once the folder's keypoints change */
+  forgetFound: () => void
   mac: boolean
   /** `image`: the image on screen the message is about, by its folder and name, so it goes once another image is */
   onError: (m: string, image?: string) => void
@@ -204,7 +206,10 @@ function maskCanvas(mask: string, color: string, onReady: () => void) {
 }
 
 const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
-  const { data, config, settings, setSettings, setProject, setImages, discovered, forgetLabel, mac, onError, onShown, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
+  const {
+    data, config, settings, setSettings, setProject, setImages, discovered, forgetLabel, forgetFound, mac, onError, onShown, onOpenMenu, onChange, onChangeOutput,
+    onNextToImages
+  } = props
   const { project, images, root } = data
   const [index, setIndex] = useState(() => Math.max(0, data.select ? images.findIndex((i) => i.name === data.select) : 0))
   const [query, setQuery] = useState(config.file_search ?? '')
@@ -358,14 +363,17 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   // Set each render: ends the pose being placed, keeping what's placed
   const endPoseRef = useRef<() => void>(() => {})
 
-  // Keypoint names name a pose's points, not classes: they stay out of the label list, its keys and counts
-  const notClasses = useMemo(() => keypointOnlyNames(keypoints.schema), [keypoints.schema])
+  // The keypoints file's names that are no class's, which validate_label: exact lets through as labels
+  const keypointLabels = useMemo(() => keypointOnlyNames(keypoints.schema), [keypoints.schema])
   const poses = useMemo(() => posesIn(shapes, keypoints.schema), [shapes, keypoints.schema])
+  // A pose's keypoints, by index, name keypoints, not classes: they stay out of the label list, its keys and
+  // counts. A box or polygon named like a keypoint, or a point in no pose, is of a class as any shape is.
+  const keypointAt = useMemo(() => posePoints(poses), [poses])
   // The label list as it was when a label was last added or recoloured here, which keeps its order
   const keptLabels = useRef<string[] | null>(null)
   // The label list: config labels, then a Seamline project's classes, then labels found in the files
-  const classes = useMemo(() => labelList(config, project.classes, [...discovered, ...shapes.map((s) => s.label)].filter((l) => !notClasses.has(l)), keptLabels.current),
-    [config, project.classes, discovered, shapes, notClasses])
+  const classes = useMemo(() => labelList(config, project.classes, [...discovered, ...shapes.filter((_, i) => !keypointAt.has(i)).map((s) => s.label)], keptLabels.current),
+    [config, project.classes, discovered, shapes, keypointAt])
   // A label gone from the list, as a class another app deleted, is picked again if it comes back; meanwhile new shapes ask for theirs
   const activeAt = classes.findIndex((c) => c.name === active)
   const activeClass = active === undefined ? 0 : activeAt < 0 ? null : activeAt
@@ -1353,10 +1361,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   // The folder's keypoints file, read as the folder opens and again as the window comes back, as
   // another app may change it; what's wrong with it is said when that changes
   const keypointsRef = useRef(keypoints)
+  // Read once: main counted the folder with its file from the start, so the first read changes nothing it found
+  const keypointsRead = useRef(false)
   const takeKeypoints = (k: FolderKeypoints) => {
     const was = keypointsRef.current
     keypointsRef.current = k
     if (JSON.stringify(was) !== JSON.stringify(k)) setKeypoints(k)
+    // Other points are a pose's now, or no longer: main counts again, and the labels it found before may name keypoints
+    if (keypointsRead.current && JSON.stringify(was.schema) !== JSON.stringify(k.schema)) forgetFound()
+    keypointsRead.current = true
     if (k.problem && k.problem !== was.problem) onError(k.problem)
   }
   const readKeypoints = useRef(async () => {})
@@ -3034,7 +3047,6 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const addClass = () => {
     const name = newClass.trim()
     if (!name || classes.some((c) => c.name === name)) return
-    if (notClasses.has(name)) return onError(`“${name}” names a keypoint in the folder's keypoints file, so it isn't a class.`)
     if (config.validate_label === 'exact' && !config.labels?.includes(name)) return onError(`“${name}” isn't in the label list, and only listed labels are allowed.`)
     const color = labelColor(name, classes.length, config)
     // The folder's classes and this label: the list's other labels aren't classes, and stay in their places
@@ -3521,14 +3533,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const [x0, y0, x1, y1] = boxOf(s)
     return `${Math.round(x1 - x0)} × ${Math.round(y1 - y0)}`
   })()
-  // Keypoint names aren't classes: a pose shows with its class
-  const shapeLabels = [...new Set(shapes.map((s) => s.label))].filter((l) => !notClasses.has(l)).sort((a, b) => a.localeCompare(b))
-  const aiCount = shapes.filter(isAi).length
+  // A pose's keypoints aren't shapes of a class: a pose shows, and counts, with its class
   const counts = useMemo(() => {
     const out: Record<string, number> = {}
-    shapes.forEach((s) => (out[s.label] = (out[s.label] ?? 0) + 1))
+    shapes.forEach((s, i) => !keypointAt.has(i) && (out[s.label] = (out[s.label] ?? 0) + 1))
     return out
-  }, [shapes])
+  }, [shapes, keypointAt])
+  const shapeLabels = Object.keys(counts).sort((a, b) => a.localeCompare(b))
+  const aiCount = shapes.filter(isAi).length
   const totals = useMemo(() => {
     const out: Record<string, number> = {}
     images.forEach((i) => Object.entries(i.classes).forEach(([k, v]) => (out[k] = (out[k] ?? 0) + v)))
@@ -3949,11 +3961,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       )}
 
       {dialog && (
-        <LabelDialog request={dialog} config={config} labels={classes.map((c) => c.name)} keypoints={notClasses}
+        <LabelDialog request={dialog} config={config} labels={classes.map((c) => c.name)} keypoints={keypointLabels}
           onDone={(choice) => {
             const { resolve } = dialog
             // A keypoint's name isn't a label of the list: it's checked against the keypoints file
-            if (choice && config.validate_label === 'exact' && !dialog.locked?.text && !(config.labels ?? []).includes(choice.text) && !notClasses.has(choice.text)) {
+            if (choice && config.validate_label === 'exact' && !dialog.locked?.text && !(config.labels ?? []).includes(choice.text) && !keypointLabels.has(choice.text)) {
               onError(`Invalid label “${choice.text}”: only labels from the list are allowed.`)
               choice = null
             }
@@ -4026,7 +4038,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       )}
       {renaming && (
         <RenameDialog root={root} from={renaming.from} to={renaming.to} prefer={settings.format} labels={classes.map((c) => c.name)} totals={totals}
-          allowed={config.validate_label === 'exact' ? [...(config.labels ?? []), ...keypointOnlyNames(keypoints.schema)] : null} canLeave={() => canLeave({ stay: true })}
+          allowed={config.validate_label === 'exact' ? [...(config.labels ?? []), ...keypointLabels] : null} canLeave={() => canLeave({ stay: true })}
           onClose={(done) => (done ? renamed(renaming.from, done) : setRenaming(null))} />
       )}
       {ghostMenu && (
