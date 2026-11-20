@@ -1173,8 +1173,9 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
   }
   await open()
   const cells = (label: string) => stats.locator(`.stats-labels tbody tr[data-label="${label}"] td`)
-  await expect(stats.locator('.stats-labels thead th')).toHaveText(['Label', 'Objects', 'Images', 'Polygon', 'Point', ''])
-  await expect(cells('cat')).toHaveText(['cat', '1', '1', '2', '0', 'Rename…'])
+  // A pose's keypoints are the keypoints table's, so no label here has a point
+  await expect(stats.locator('.stats-labels thead th')).toHaveText(['Label', 'Objects', 'Images', 'Polygon', ''])
+  await expect(cells('cat')).toHaveText(['cat', '1', '1', '2', 'Rename…'])
   await expect(stats.getByText(/^Objects are grouped as the exports group them/)).toHaveText('Objects are grouped as the exports group them: shapes with one label and ' +
     'one group ID are one object, and points grouped with a box are its keypoints, not objects. Lines and other points count as objects here, ' +
     'though the COCO and YOLO exports leave them out. The columns by shape type count shapes.')
@@ -1183,13 +1184,13 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
   await expect(stats.locator('.stats-column[title="1 image with 1 object"]')).toHaveCount(1)
   await expect(stats.locator('.stats-sizes tbody tr')).toHaveText(['Small under 32 × 32 px205205', 'Medium 32 × 32 to 96 × 96 px11', 'Large 96 × 96 px and over22'])
   await expect(stats).not.toContainText('no area here')
-  // The labels with no objects come last, past the first 200 rows
+  // The rows past the first 200 come with Show the other 8
   await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(200)
-  await expect(stats.locator('.stats-table .problems-more')).toHaveText('Show the other 10')
+  await expect(stats.locator('.stats-table .problems-more')).toHaveText('Show the other 8')
   await stats.locator('.stats-table .problems-more').click()
-  await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(210)
-  await expect(cells('person')).toHaveText(['person', '1', '1', '1', '0', 'Rename…'])
-  await expect(cells('nose')).toHaveText(['nose', '0', '1', '0', '1', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(208)
+  await expect(cells('person')).toHaveText(['person', '1', '1', '1', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr[data-label="nose"]')).toHaveCount(0)
 
   // The labels table takes no more than a third of a short window, so the counts under it show too
   for (const theme of ['dark', 'light']) {
@@ -1259,10 +1260,11 @@ test("Statistics count each keypoint of the folder's poses seen, hidden or not l
   await stats.getByRole('button', { name: 'Save as CSV…' }).click()
   await expect(stats).toContainText('Saved as dataset-stats-keypoints.csv')
   expect(readFileSync(csv, 'utf8').split('\r\n\r\n')[1]).toBe('class,keypoint,seen,hidden,not_labelled\r\nperson,nose,2,0,0\r\nperson,left_eye,0,1,1\r\nperson,right_eye,1,0,1\r\n')
-  // And back to the labels
+  // And back to the labels, which leave the poses' keypoints to the keypoints table
   await stats.getByRole('radio', { name: 'Labels' }).click()
   await expect(stats.locator('.stats-keypoints')).toHaveCount(0)
-  await expect(stats.locator('.stats-labels tbody tr[data-label="nose"] td')).toHaveText(['nose', '0', '2', '0', '0', '2', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr[data-label="person"] td')).toHaveText(['person', '2', '2', '0', '2', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr[data-label="nose"]')).toHaveCount(0)
   await finish(app, errors)
 })
 
