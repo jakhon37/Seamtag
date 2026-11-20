@@ -6,6 +6,7 @@
 import type { KeypointSchema } from '../../shared/dataset'
 import { asBox, boxOf } from '../../shared/formats'
 import { accepted, isAi, newShape, scoreOf, type Shape } from '../../shared/labelfile'
+import { CLOSED_TYPES } from '../../shared/outline'
 import { nextGroupId, type PoseGroup, type PosePoint, poseShapes, posesIn } from '../../shared/skeleton'
 
 /** A keypoint's name as the window says it: left shoulder for left_shoulder */
@@ -46,6 +47,19 @@ export function regroup(copies: Shape[], existing: Shape[], schema: KeypointSche
 }
 
 /**
+ * Shapes after an edit, with each AI pose it touched accepted whole: review takes a pose as one,
+ * so a point corrected by hand mustn't stay behind alone when the rest is rejected. `touched` are
+ * the edited shapes, by index in `shapes`, and `poses` the poses those indexes had.
+ */
+export function acceptTouched(shapes: Shape[], poses: PoseGroup[], touched: Iterable<number>): Shape[] {
+  const of = poseIndex(poses)
+  const whole = new Set<number>()
+  for (const i of touched) for (const k of of.has(i) ? poseShapes(of.get(i)!) : []) whole.add(k)
+  if (![...whole].some((k) => shapes[k] && isAi(shapes[k]))) return shapes
+  return shapes.map((s, k) => (whole.has(k) && isAi(s) ? accepted(s) : s))
+}
+
+/**
  * What LabelImg's formats keep of shapes: they hold boxes, so each shape becomes the box around
  * it, and a point, which has no box, is left out; a pose keeps its box. With how many became
  * boxes and how many points were left out, for the window to say.
@@ -53,6 +67,35 @@ export function regroup(copies: Shape[], existing: Shape[], schema: KeypointSche
 export function keptAsBoxes(list: Shape[]): { shapes: Shape[]; boxed: number; left: number } {
   const shapes = list.filter((s) => s.shape_type !== 'point').map(asBox)
   return { shapes, boxed: list.filter((s) => s.shape_type !== 'point' && s.shape_type !== 'rectangle').length, left: list.length - shapes.length }
+}
+
+/** A person to pose: the box around their shapes, those shapes by index, and their group_id, null for one shape in no group */
+export type PoseTarget = { box: [number, number, number, number]; shapes: number[]; group: number | null }
+
+/**
+ * The people of a class still to pose in an image, in the image's order: each group's closed
+ * shapes of the class as one person, in the box around them, as the checks and the pose exports
+ * box a pose, and each such shape in no group on its own. Groups with keypoints already are left
+ * alone, and so are hidden shapes. With `which`, only the people those shapes are part of.
+ */
+export function unposed(shapes: Shape[], poses: PoseGroup[], cls: string, which?: number[]): PoseTarget[] {
+  const posed = new Set(poses.filter((p) => p.cls === cls).map((p) => p.group))
+  const people = new Map<string, number[]>()
+  shapes.forEach((s, i) => {
+    if (s.label !== cls || !CLOSED_TYPES.has(s.shape_type) || s.hidden || (s.group_id !== null && posed.has(s.group_id))) return
+    const key = s.group_id === null ? `shape ${i}` : `group ${s.group_id}`
+    const members = people.get(key)
+    if (members) members.push(i)
+    else people.set(key, [i])
+  })
+  const chosen = which && new Set(which)
+  return [...people.values()].filter((members) => !chosen || members.some((i) => chosen.has(i))).map((members) => {
+    const boxes = members.map((i) => boxOf(shapes[i]))
+    const box: PoseTarget['box'] = [
+      Math.min(...boxes.map((b) => b[0])), Math.min(...boxes.map((b) => b[1])), Math.max(...boxes.map((b) => b[2])), Math.max(...boxes.map((b) => b[3]))
+    ]
+    return { box, shapes: members, group: shapes[members[0]].group_id }
+  })
 }
 
 /**
@@ -117,6 +160,12 @@ export function classForModel(schema: KeypointSchema, names: string[]): string |
 }
 
 const rounded = (score: number) => Math.round(score * 1000) / 1000
+
+/**
+ * The fewest keypoints an AI pose keeps for it to be proposed: fewer say little of a pose, and on
+ * something that isn't a person, such as a bus, they're noise
+ */
+export const MIN_POSE_POINTS = 5
 
 export type PoseFit = {
   /** The image's size: a point the model placed past its edge isn't labelled, as COCO leaves a body part outside the photo */
@@ -215,7 +264,19 @@ export function shapeRows(count: number, poses: PoseGroup[], isOpen: (group: num
   return out
 }
 
-/** One step of review: an AI shape, or an AI pose's AI shapes together, with the least certain one's score */
+/**
+ * An AI pose's score: its box's, which is its keypoints' mean, or, on a box of the image's own,
+ * the mean of its AI keypoints'. Not its weakest point's: a pose is accepted or rejected whole,
+ * and one doubtful wrist says little of the rest.
+ */
+export function scoreOfPose(list: Shape[], pose: PoseGroup): number | undefined {
+  const box = pose.box === null ? undefined : list[pose.box]
+  if (box && isAi(box) && scoreOf(box) !== undefined) return scoreOf(box)
+  const scores = poseShapes(pose).filter((k) => k !== pose.box && isAi(list[k])).map((k) => scoreOf(list[k])).filter((v): v is number => v !== undefined)
+  return scores.length ? rounded(scores.reduce((a, b) => a + b, 0) / scores.length) : undefined
+}
+
+/** One step of review: an AI shape, or an AI pose's AI shapes together, with its score */
 export type ReviewItem = { shapes: number[]; score: number | undefined; pose: PoseGroup | null }
 
 /** What review steps through, least certain first; shapes without a score come last */
@@ -230,12 +291,25 @@ export function reviewItems(list: Shape[], poses: PoseGroup[]): ReviewItem[] {
     if (seen.has(p)) return
     seen.add(p)
     const shapes = poseShapes(p).filter((k) => isAi(list[k]) && !list[k].hidden).sort((a, b) => a - b)
-    const scores = shapes.map((k) => scoreOf(list[k])).filter((v): v is number => v !== undefined)
-    items.push({ shapes, score: scores.length ? Math.min(...scores) : undefined, pose: p, first: i })
+    items.push({ shapes, score: scoreOfPose(list, p), pose: p, first: i })
   })
   return items
     .sort((a, b) => (a.score ?? 1) - (b.score ?? 1) || a.first - b.first)
     .map(({ shapes, score, pose }) => ({ shapes, score, pose }))
+}
+
+/** What's left to review, as the review bar counts it: AI poses, each one however many shapes it has, and other AI shapes */
+export function aiCounts(list: Shape[], poses: PoseGroup[]): { poses: number; shapes: number } {
+  const of = poseIndex(poses)
+  const posed = new Set<PoseGroup>()
+  let shapes = 0
+  list.forEach((s, i) => {
+    if (!isAi(s)) return
+    const p = of.get(i)
+    if (p) posed.add(p)
+    else shapes++
+  })
+  return { poses: posed.size, shapes }
 }
 
 /** The step of review a selection is: an AI shape alone, or any of an AI pose's shapes and nothing else; null when it's none */

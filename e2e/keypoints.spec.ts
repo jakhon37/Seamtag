@@ -213,6 +213,7 @@ async function launchWithPose(dir: string) {
     g.downloaded = false
     g.asked = []
     g.poseRequests = []
+    g.textRequests = []
     dialog.showMessageBox = (async (_win: unknown, o: { message: string; detail: string }) => {
       g.asked.push(`${o.message} ${o.detail}`)
       return { response: 0, checkboxChecked: false }
@@ -226,18 +227,23 @@ async function launchWithPose(dir: string) {
     ])
     ipcMain.removeHandler('ai:download')
     ipcMain.handle('ai:download', () => { g.downloaded = true })
-    // Each box's keypoints spread over it: the nose missing, the left eye under the threshold, the right ankle past the image's edge
+    // Each box's keypoints spread over it: the nose missing, the left eye under the threshold, the right ankle past the image's edge.
+    // In a box narrower than 30 px, only the shoulders and the left elbow, too few for a pose.
     ipcMain.removeHandler('ai:pose')
     ipcMain.handle('ai:pose', (_e, req: { boxes: number[][] }) => {
       g.poseRequests.push(req)
+      const spread = (x0: number, y0: number, x1: number, y1: number, k: number) => ({ x: x0 + ((x1 - x0) * k) / 17, y: y0 + ((y1 - y0) * k) / 17, score: 0.5 + k / 100 })
       return {
         names,
-        poses: req.boxes.map(([x0, y0, x1, y1]) => (names as string[]).map((_, k) => (k === 0 ? null : k === 1 ? { x: x0 + 5, y: y0 + 5, score: 0.2 }
-          : k === 16 ? { x: 999, y: 999, score: 0.9 } : { x: x0 + ((x1 - x0) * k) / 17, y: y0 + ((y1 - y0) * k) / 17, score: 0.5 + k / 100 })))
+        poses: req.boxes.map(([x0, y0, x1, y1]) => (names as string[]).map((_, k) => (x1 - x0 < 30 ? (k >= 5 && k <= 7 ? spread(x0, y0, x1, y1, k) : null)
+          : k === 0 ? null : k === 1 ? { x: x0 + 5, y: y0 + 5, score: 0.2 } : k === 16 ? { x: 999, y: 999, score: 0.9 } : spread(x0, y0, x1, y1, k))))
       }
     })
     ipcMain.removeHandler('ai:text')
-    ipcMain.handle('ai:text', () => ({ shapes: [{ label: 'person', shape_type: 'rectangle', points: [[220, 40], [320, 260]], description: '{"score": 0.9, "text": "person"}' }], matched: [] }))
+    ipcMain.handle('ai:text', (_e, req: unknown) => {
+      g.textRequests.push(req)
+      return { shapes: [{ label: 'person', shape_type: 'rectangle', points: [[220, 40], [320, 260]], description: '{"score": 0.9, "text": "person"}' }], matched: [] }
+    })
   }, [dir, COCO, NOTE] as const)
   await page.getByRole('button', { name: 'Open folder' }).first().click()
   await expect(page.locator('.file').first()).toBeVisible()
@@ -271,12 +277,15 @@ test('AI pose: a box dragged, its keypoints from the model as AI shapes, reviewe
   // Past the image's edge isn't labelled, as COCO leaves a body part outside the photo
   expect(shapes.some((s: any) => s.label === 'right_ankle')).toBe(false)
   expect(at(shapes, 'right_eye').flags).toEqual({ ai: true })
-  // Review takes the pose as one: W selects it, W accepts all of it
-  await expect(page.getByTestId('review-bar')).toContainText('15 AI shapes')
+  // Review takes the pose as one, scored by its box, its keypoints' mean: W selects it, W accepts all of it
+  await expect(page.getByTestId('review-bar')).toContainText('1 AI pose')
+  await expect(page.getByTestId('review-bar')).not.toContainText('AI shape')
+  expect(shapes[0].score).toBe(0.585)
   await page.keyboard.press('Escape')
   await page.keyboard.press('w')
   await expect(page.locator('.pose-row.on')).toContainText('person (1) · 14/17')
-  await expect(page.getByTestId('review-bar')).toContainText('this one 52%')
+  await expect(page.locator('.pose-row.on .tag')).toHaveText('AI 59%')
+  await expect(page.getByTestId('review-bar')).toContainText('this one 59%')
   await page.keyboard.press('w')
   await saved(page)
   shapes = shapesIn(dir, 'd')
@@ -308,17 +317,104 @@ test("Pose every person: on the image's boxes without keypoints, else on YOLO-Wo
   await expect.poll(() => count(dir, 'e')).toBe(6)
   shapes = shapesIn(dir, 'e')
   expect(shapes.some((s: any) => s.flags.ai)).toBe(false)
-  // With no box of the class, YOLO-World finds the people first; they come with their poses, as AI shapes
+  // The image has its people: YOLO-World isn't asked for more
+  expect(await global<unknown[]>('textRequests')).toHaveLength(0)
+  // With no shape of the class, YOLO-World finds the people first, at a score of 0.25 or more; they come with their poses, as AI shapes
   await open(page, 'f.png')
   await page.keyboard.press('Shift+K')
   await page.getByRole('button', { name: 'Pose every person' }).click()
   await expect(page.locator('.loading.notice')).toContainText('Found 1 pose.')
   await expect.poll(() => count(dir, 'f')).toBe(15)
+  const asked = await global<{ texts: string[]; score: number }[]>('textRequests')
+  expect(asked).toHaveLength(1)
+  expect(asked[0]).toMatchObject({ texts: ['person'], score: 0.25 })
   requests = await global<{ boxes: number[][] }[]>('poseRequests')
   expect(requests.at(-1)!.boxes).toEqual([[220, 40, 320, 260]])
   shapes = shapesIn(dir, 'f')
   expect(shapes.map((s: any) => s.label)).toEqual(['person', ...COCO.slice(2, 16)])
   expect(shapes[0]).toMatchObject({ shape_type: 'rectangle', group_id: 1, flags: { ai: true }, description: '{"score": 0.9, "text": "person"}' })
+  await finish(app, errors)
+})
+
+test('Pose every person: a group of shapes is one person, each person is posed once, and too few keypoints make no pose', async () => {
+  const polygon = (label: string, x0: number, y0: number, x1: number, y1: number, group: number | null) =>
+    shape(label, 'polygon', [[x0, y0], [x1, y0], [x1, y1], [x0, y1]], group)
+  const dir = await project('kp-everyone-groups', {
+    k: doc('k', [
+      // A person drawn as two shapes, with their bag, in one group
+      polygon('person', 220, 40, 280, 200, 1), shape('person', 'rectangle', [[230, 30], [300, 220]], 1), polygon('bag', 285, 100, 300, 150, 1),
+      // A person posed already
+      ...person(2),
+      // A person in no group, and a speck too small for the model to find a pose in
+      shape('person', 'rectangle', [[20, 60], [90, 280]], null), shape('person', 'rectangle', [[340, 250], [360, 270]], null)
+    ])
+  })
+  const { app, page, errors, global } = await launchWithPose(dir)
+  await open(page, 'k.png')
+  const everyone = async () => {
+    await page.getByRole('menuitem', { name: 'AI' }).click()
+    await page.getByRole('menuitem', { name: 'Pose every person' }).click()
+  }
+  const requests = () => global<{ boxes: number[][] }[]>('poseRequests')
+  await everyone()
+  await expect(page.locator('.loading.notice')).toHaveText('Found 2 poses. 1 box had fewer than 5 keypoints scored 30% or more, so it was left out.')
+  // One box a person: around the group's two shapes of the class, the bag left out
+  expect((await requests()).map((r) => r.boxes)).toEqual([[[220, 30, 300, 220], [20, 60, 90, 280], [340, 250, 360, 270]]])
+  await expect.poll(() => count(dir, 'k')).toBe(10 + 14 + 14)
+  let shapes = shapesIn(dir, 'k')
+  // The group's keypoints join it; the person in no group takes the next free group_id; the speck is as it was
+  expect(shapes.slice(10, 24).every((s: any) => s.group_id === 1 && s.shape_type === 'point' && s.flags.ai)).toBe(true)
+  expect(shapes.slice(24).every((s: any) => s.group_id === 3 && s.flags.ai)).toBe(true)
+  expect(shapes[8]).toMatchObject({ group_id: 3, flags: {} })
+  expect(shapes[9]).toMatchObject({ group_id: null, flags: {} })
+  // YOLO-World isn't asked on an image with people of its own
+  expect(await global<unknown[]>('textRequests')).toHaveLength(0)
+  // Again: the people posed are left alone, and only the speck is tried
+  await everyone()
+  await expect(page.locator('.loading.notice')).toHaveText('The model found fewer than 5 keypoints scored 30% or more in that box, so it made no pose.')
+  expect((await requests()).at(-1)!.boxes).toEqual([[340, 250, 360, 270]])
+  expect(shapesIn(dir, 'k')).toHaveLength(38)
+  // Without it, everyone here has keypoints: nothing is asked
+  await page.keyboard.press('v')
+  await click(page, 350, 260)
+  await page.keyboard.press('Delete')
+  await expect.poll(() => count(dir, 'k')).toBe(37)
+  await everyone()
+  await expect(page.locator('.loading.notice')).toHaveText('Every person here has keypoints already.')
+  expect(await requests()).toHaveLength(2)
+  expect(await global<unknown[]>('textRequests')).toHaveLength(0)
+  // A box dragged with too few keypoints in it makes no pose either
+  await page.keyboard.press('Shift+K')
+  await drag(page, [150, 260], [170, 290])
+  await expect(page.locator('.loading.notice')).toHaveText('The model found fewer than 5 keypoints scored 30% or more in that box, so it made no pose.')
+  expect(await requests()).toHaveLength(3)
+  expect(shapesIn(dir, 'k')).toHaveLength(37)
+  await finish(app, errors)
+})
+
+test('an edit to one keypoint of an AI pose accepts all of it: a rejection then leaves nothing alone', async () => {
+  const dir = await project('kp-ai-edit', { j: null })
+  const { app, page, errors } = await launchWithPose(dir)
+  await open(page, 'j.png')
+  await page.keyboard.press('Shift+K')
+  await drag(page, [40, 30], [210, 270])
+  await expect.poll(() => count(dir, 'j')).toBe(15)
+  await expect(page.getByTestId('review-bar')).toContainText('1 AI pose')
+  // The left shoulder, the model's 6th keypoint, spread down the box
+  const shoulder = [40 + (170 * 5) / 17, 30 + (240 * 5) / 17]
+  await page.keyboard.press('v')
+  await drag(page, shoulder, [shoulder[0] + 12, shoulder[1] + 8])
+  await expect(page.getByTestId('review-bar')).toHaveCount(0)
+  await saved(page)
+  let shapes = shapesIn(dir, 'j')
+  expect(shapes).toHaveLength(15)
+  expect(shapes.some((s: any) => s.flags.ai || s.score !== undefined)).toBe(false)
+  expect(near(at(shapes, 'left_shoulder').points[0], [shoulder[0] + 12, shoulder[1] + 8])).toBe(true)
+  // S has no AI pose left to reject
+  await page.keyboard.press('s')
+  await page.waitForTimeout(300)
+  shapes = shapesIn(dir, 'j')
+  expect(shapes).toHaveLength(15)
   await finish(app, errors)
 })
 
@@ -348,6 +444,38 @@ test("Pascal VOC and YOLO keep a pose's box: its points are left out, said, and 
   await expect.poll(() => existsSync(path.join(dir, 'b.txt'))).toBe(true)
   await saved(page)
   expect(readFileSync(path.join(dir, 'classes.txt'), 'utf8').split('\n').filter(Boolean).sort()).toEqual(['car', 'person'])
+  await finish(app, errors)
+})
+
+test('a pose being placed keeps its group_id: paste ends it first, and redo waits', async () => {
+  const dir = await project('kp-groups', { h: doc('h', person(1)) })
+  const { app, page, errors } = await launch(dir)
+  await open(page, 'h.png')
+  await page.keyboard.press('v')
+  await click(page, 150, 230)
+  await page.keyboard.press('Control+c')
+  // A second pose, its nose placed
+  await page.keyboard.press('k')
+  await drag(page, [250, 40], [380, 280])
+  await click(page, 300, 60)
+  await expect(step(page)).toHaveText('2/17 left eye')
+  // Paste ends it, keeping group 2, and the copy takes 3
+  await page.keyboard.press('Control+v')
+  await expect(step(page)).toHaveCount(0)
+  await saved(page)
+  expect(shapesIn(dir, 'h').map((s: any) => s.group_id)).toEqual([1, 1, 1, 1, 1, 2, 2, 3, 3, 3, 3, 3])
+  // The paste undone, a third pose placed takes group 3: redoing the paste meanwhile would give two poses that group_id
+  await page.keyboard.press('Control+z')
+  await expect.poll(() => count(dir, 'h')).toBe(7)
+  await page.keyboard.press('k')
+  await drag(page, [20, 150], [95, 290])
+  await click(page, 50, 170)
+  await page.keyboard.press('Control+Shift+z')
+  await expect(step(page)).toHaveText('2/17 left eye')
+  await page.keyboard.press('Enter')
+  await expect(step(page)).toHaveCount(0)
+  await saved(page)
+  expect(shapesIn(dir, 'h').map((s: any) => s.group_id)).toEqual([1, 1, 1, 1, 1, 2, 2, 3, 3])
   await finish(app, errors)
 })
 
