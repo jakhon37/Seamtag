@@ -296,21 +296,24 @@ describe('poses', () => {
       severity: 'warning', code: 'keypoint-no-group', image: 'a.png', shape: 0,
       message: "2 keypoints have no group (shapes 1 and 3), so they're in no pose, and pose exports leave them out"
     }])
-    expect(of(posed([kp('nose', 10, 10, null)]), 'keypoint-no-group').map((i) => i.message)).toEqual([
+    // With the folder's own keypoints file, a keypoint in no group is one even in an image with no pose
+    expect(of(check([image('a.png', [kp('nose', 10, 10, null)])], { keypoints: COCO, ownKeypoints: true }), 'keypoint-no-group').map((i) => i.message)).toEqual([
       "Shape 1 (nose) is a keypoint with no group, so it's in no pose, and pose exports leave it out"
     ])
+    // With COCO's person standing in for a file, an image with no pose is left alone: its points may be face landmarks
+    expect(of(posed([kp('nose', 10, 10, null)]), 'keypoint-no-group')).toEqual([])
   })
 
   test('a group of keypoints with no box is told as pose exports take it: boxed round its points, with no area, or with no class of its own', () => {
-    // A box of a label the keypoints don't name is no pose's box
+    // A group with a box of a label the keypoints don't name is that class's (a dog's nose and eyes), not a pose, and isn't told
     const issues = posed([
       box('pedestrian', 100, 50, 200, 290, { group_id: 1 }), kp('nose', 150, 70, 1), kp('left_eye', 157, 65, 1),
-      kp('nose', 50, 50, 2), kp('left_eye', 50, 60, 2), kp('nose', 300, 50, 3)
+      kp('nose', 50, 50, 2), kp('left_eye', 50, 60, 2), kp('nose', 300, 50, 3), kp('left_eye', 310, 52, 4), kp('nose', 400, 70, 4)
     ])
     expect(of(issues, 'keypoint-no-box').map((i) => [i.shape, i.message])).toEqual([
-      [1, 'Group 1 has keypoints of person but no box, so pose exports use the box around its points: add a box labelled person'],
       [3, 'Group 2 has keypoints of person but no box, and the box around its points, which lie in a line, has no area: add a box labelled person'],
-      [5, 'Group 3 has keypoints of person but no box, and the box around its one point has no area: add a box labelled person']
+      [5, 'Group 3 has keypoints of person but no box, and the box around its one point has no area: add a box labelled person'],
+      [6, 'Group 4 has keypoints of person but no box, so pose exports use the box around its points: add a box labelled person']
     ])
     // Keypoints that two classes have, or that no one class has all of
     const schema: KeypointSchema = { classes: { person: ['nose', 'tail'], dog: ['nose', 'tail', 'paw'], cat: ['whisker'] } }
@@ -320,13 +323,13 @@ describe('poses', () => {
     ])
   })
 
-  test('a point a pose has no place for, and a keypoint it has already, are warnings, as pose exports stop on them; the fix deletes the second', () => {
+  test('a point a pose has no place for, and a keypoint it has already, are warnings, as pose exports stop on the first and leave the second out; the fix deletes the second', () => {
     const shapes = [...person(1, { nose: [150, 70], left_eye: [157, 65] }), kp('tail', 150, 200, 1), kp('nose', 151, 71, 1)]
     const img = image('a.png', shapes)
     const issues = check([img], { keypoints: COCO })
     expect(issues).toEqual([
       { severity: 'warning', code: 'keypoint-unknown', image: 'a.png', shape: 3, message: "Shape 4 (tail) in group 1 isn't one of person's keypoints, so pose exports stop on it" },
-      { severity: 'warning', code: 'keypoint-repeated', image: 'a.png', shape: 4, message: "Shape 5 (nose) repeats group 1's nose, so pose exports stop on it" }
+      { severity: 'warning', code: 'keypoint-repeated', image: 'a.png', shape: 4, message: "Shape 5 (nose) repeats group 1's nose, so pose exports leave it out" }
     ])
     // The first stays where it was, as the pose had it
     const fixed = fixIssue(img, issues[1])!
@@ -353,7 +356,8 @@ describe('poses', () => {
 
   test('one flip pair against all the rest is noted as maybe swapped, whichever way the person faces or lies', () => {
     const said = (at: At, frame?: number[] | null) => of(posed(person(1, at, frame === undefined ? {} : { frame })), 'keypoint-swapped').map((i) => [i.shape, i.message])
-    const shoulders = [[6, "Shapes 7 and 8 (left_shoulder and right_shoulder) may be swapped: group 1's other 7 pairs seen have left and right the other way round"]]
+    // The wrists and ankles, at the skeleton's ends, don't count: 5 other pairs
+    const shoulders = [[6, "Shapes 7 and 8 (left_shoulder and right_shoulder) may be swapped: group 1's other 5 pairs seen have left and right the other way round"]]
     expect(said(swap(FRONT, 'left_shoulder', 'right_shoulder'))).toEqual(shoulders)
     expect(said(swap(BACK, 'left_shoulder', 'right_shoulder'))).toEqual(shoulders)
     expect(said(swap(LYING, 'left_shoulder', 'right_shoulder'), [30, 120, 270, 220])).toEqual(shoulders)
@@ -365,7 +369,7 @@ describe('poses', () => {
     expect(said(swap(three, 'left_hip', 'right_hip'))).toEqual([[5, "Shapes 6 and 7 (left_hip and right_hip) may be swapped: group 1's other 2 pairs seen have left and right the other way round"]])
   })
 
-  test("pairs that can't tell are not counted: seen side on, hidden, too few, or two against the rest, as arms crossed are", () => {
+  test("pairs that can't tell are not counted: seen side on, hidden, too few, two against the rest, or at the skeleton's ends, as folded arms and crossed legs put them", () => {
     const said = (at: At, hidden: string[] = []) => of(posed(person(1, at, { hidden })), 'keypoint-swapped')
     // Side on, each pair's points closer than a twentieth of the box's width
     const side: At = Object.fromEntries(Object.entries(FRONT).map(([n, [x, y]]) => [n, [150 + (x - 150) / 20, y]]))
@@ -375,7 +379,10 @@ describe('poses', () => {
     // Two pairs say nothing of which is the odd one out
     const two = Object.fromEntries(['left_eye', 'right_eye', 'left_shoulder', 'right_shoulder'].map((n) => [n, FRONT[n]]))
     expect(said(swap(two, 'left_shoulder', 'right_shoulder'))).toEqual([])
-    expect(said(swap(swap(FRONT, 'left_wrist', 'right_wrist'), 'left_elbow', 'right_elbow'))).toEqual([])
+    expect(said(swap(swap(FRONT, 'left_elbow', 'right_elbow'), 'left_knee', 'right_knee'))).toEqual([])
+    // Folded arms put each wrist by the other elbow, and crossed legs the ankles on the other side
+    expect(said(swap(FRONT, 'left_wrist', 'right_wrist'))).toEqual([])
+    expect(said(swap(FRONT, 'left_ankle', 'right_ankle'))).toEqual([])
   })
 
   test("a YOLO image of unknown size has its poses' keypoints checked by name, not by where they lie; with no keypoints given, poses aren't checked", () => {

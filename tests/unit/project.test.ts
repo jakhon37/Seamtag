@@ -11,8 +11,10 @@ import { setFolding } from '../../src/main/names'
 import { labelList, recolored, withClass } from '../../src/renderer/src/colors'
 import {
   findLabels, type ImageItem, type LabelClass, labelPath, labelsChanged, LabelsChanged, loadLabels, mergeClasses, openHere, openProject, refreshProject,
-  reloadProjectFile, renameRetrying, saveLabels, saveProjectFile, type SaveRequest, setTrash, sharesStem, summarizeAll, trashImage, trashLabels, writeAtomic
+  reloadProjectFile, renameRetrying, saveLabels, saveProjectFile, type SaveRequest, setKeypointsReader, setTrash, sharesStem, summarizeAll, trashImage, trashLabels,
+  writeAtomic
 } from '../../src/main/project'
+import type { KeypointSchema } from '../../src/shared/dataset'
 
 // Saving, switching formats and deleting, on folders of their own. The trash is a folder too.
 const bin = mkdtempSync(path.join(tmpdir(), 'seamtag-trash-'))
@@ -433,20 +435,29 @@ describe('another app, such as Seamline, changing label files while the folder i
     expect(await told()).toEqual([])
   })
 
-  test("keypoint names aren't classes: left out of an image's classes and the label list, and counted again when they change", async () => {
+  test("a pose counts once, by its box, in the image list, and its keypoints are no classes; new keypoints count the images again", async () => {
     const dir = folder({})
     await openProject(dir, null)
     const pose = [{ ...box('person'), group_id: 1 }, newShape('nose', 'point', [[20, 15]], { group_id: 1 }), newShape('left_eye', 'point', [[22, 14]], { group_id: 1 })]
     await saveLabels(dir, 'a.png', request(pose))
-    const told = async (keypoints?: Set<string>) => {
+    let keypoints: KeypointSchema | null = null
+    setKeypointsReader(async () => keypoints)
+    const told = async (changedOnly = false) => {
       const sent: { items: ImageItem[]; labels: string[] }[] = []
-      await summarizeAll(dir, (b) => sent.push(b), 'labelme', false, undefined, keypoints)
-      return { classes: sent.flatMap((b) => b.items.map((i) => i.classes)), labels: sent.flatMap((b) => b.labels).sort() }
+      await summarizeAll(dir, (b) => sent.push(b), 'labelme', changedOnly)
+      return { items: sent.flatMap((b) => b.items.map((i) => [i.count, i.classes])), labels: sent.flatMap((b) => b.labels).sort() }
     }
-    expect(await told()).toEqual({ classes: [{ person: 1, nose: 1, left_eye: 1 }], labels: ['left_eye', 'nose', 'person'] })
-    expect(await told(new Set(['nose', 'left_eye']))).toEqual({ classes: [{ person: 1 }], labels: ['person'] })
-    // The summary kept for the image was made with other names, so it's made again
-    expect(await told(new Set(['nose']))).toEqual({ classes: [{ person: 1, left_eye: 1 }], labels: ['left_eye', 'person'] })
+    try {
+      expect(await told()).toEqual({ items: [[3, { person: 1, nose: 1, left_eye: 1 }]], labels: ['left_eye', 'nose', 'person'] })
+      keypoints = { classes: { person: ['nose', 'left_eye'] } }
+      // The summary kept was made with other keypoints, so a refresh tells the image again
+      expect(await told(true)).toEqual({ items: [[1, { person: 1 }]], labels: ['person'] })
+      expect(await told(true)).toEqual({ items: [], labels: [] })
+      // Saved, the image's own summary leaves the keypoints out too
+      expect((await saveLabels(dir, 'a.png', request(pose))).item).toMatchObject({ count: 1, classes: { person: 1 } })
+    } finally {
+      setKeypointsReader(async () => null)
+    }
   })
 
   test("a refresh looks only at label files the folders list, and at each folder's classes.txt once", async () => {

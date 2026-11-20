@@ -1070,7 +1070,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     invalidate()
     const name = loadedName.current
     if (!name || readOnlyRef.current) return
-    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(next, true, keypointOnlyNames(opts.current.keypoints)) } : i)))
+    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(next, true, opts.current.keypoints) } : i)))
     queueSave()
   }
   /** Shapes as the save format keeps them: boxes in LabelImg's formats */
@@ -1173,7 +1173,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         if (stale) return
         // Read again, as when a save was refused for another app's change: the lists count these labels, not the change dropped
         if (again && !broken) {
-          const item = { ...summarize(doc?.shapes ?? [], !!found?.format, keypointOnlyNames(opts.current.keypoints)), broken: undefined, verified: found?.verified || undefined }
+          const item = { ...summarize(doc?.shapes ?? [], !!found?.format, opts.current.keypoints), broken: undefined, verified: found?.verified || undefined }
           setImages((all) => all.map((i) => (i.name === name ? { ...i, ...item } : i)))
         }
         rememberHistory()
@@ -1345,7 +1345,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       invalidate()
     }
-    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(found, true, keypointOnlyNames(opts.current.keypoints)) } : i)))
+    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(found, true, opts.current.keypoints) } : i)))
   }), [invalidate, root, setImages, idle, reloadChanged])
   useEffect(() => {
     window.api.prelabelModels(root).then((list) => alive.current && setRunModels(list)).catch(() => alive.current && setRunModels([]))

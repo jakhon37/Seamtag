@@ -18,7 +18,7 @@ import type { LabelFormat } from '../shared/formats'
 import { isAi } from '../shared/labelfile'
 import { CLOSED_TYPES } from '../shared/outline'
 import { poseInstances, readPoseYaml, writePoseYaml } from '../shared/pose'
-import { builtInKeypoints } from '../shared/skeleton'
+import { builtInKeypoints, withKnownLines } from '../shared/skeleton'
 import { isYoloImage, labelPathFor, labelRows, poseYamlKeys, type YoloTask, writeDataYaml } from '../shared/ultralytics'
 import { labelFileClashes, readDataset } from './dataset'
 import { keypointsFile } from './keypoints'
@@ -552,6 +552,8 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
     const file = options.keypoints ?? keypointsFile(root)
     try {
       ;({ schema, summary: keypoints } = await readKeypoints(file))
+      // As the window draws them: COCO's person gets COCO's lines and flip pairs, which YOLO pose's flip_idx comes from
+      schema = withKnownLines(schema)
     } catch (e) {
       if (!options.keypoints && (e as NodeJS.ErrnoException).code === 'ENOENT') schema = builtInKeypoints()
       else add('error', 'export-keypoints-unreadable', null, `${options.keypoints ? path.basename(file) : path.relative(root, file)}: ${reason(e)}`)

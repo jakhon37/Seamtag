@@ -8,7 +8,7 @@ import type { DatasetImage, KeypointSchema } from './dataset'
 import { isAi, SHAPE_TYPES, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
 import { rleArea, rleFrMaskBits, rleFrPoly, rleMerge } from './rle'
-import { isHidden, posesIn } from './skeleton'
+import { isHidden, posePoints, posesIn } from './skeleton'
 
 export type SizeCounts = { small: number; medium: number; large: number }
 export type LabelStats = {
@@ -17,7 +17,7 @@ export type LabelStats = {
   objects: number
   /** Images with at least one accepted shape with the label */
   images: number
-  /** Accepted shapes with the label by shape type, a pose's keypoints too */
+  /** Accepted shapes with the label by shape type; a pose's keypoints are in the keypoints table instead */
   types: Partial<Record<ShapeType, number>>
 }
 
@@ -157,7 +157,11 @@ export function datasetStats(images: DatasetImage[], { trainSize = 640, labels =
     if (accepted.length) status.labelled++
     else if (!image.shapes.length) status.empty++
     const seen = new Set<string>()
-    for (const s of accepted) {
+    // A pose's keypoints are counted in the keypoints table, not as labels of their own
+    const poses = keypoints ? posesIn(accepted, keypoints) : []
+    const keypointAt = posePoints(poses)
+    for (const [i, s] of accepted.entries()) {
+      if (keypointAt.has(i)) continue
       const row = rowOf(s.label)
       row.types[s.shape_type] = (row.types[s.shape_type] ?? 0) + 1
       if (!seen.has(s.label)) row.images++
@@ -165,7 +169,7 @@ export function datasetStats(images: DatasetImage[], { trainSize = 640, labels =
       used.add(s.shape_type)
     }
     if (keypoints) {
-      for (const pose of posesIn(accepted, keypoints)) {
+      for (const pose of poses) {
         const row = posed.get(pose.cls)!
         row.poses++
         pose.points.forEach((k, i) => {

@@ -4,7 +4,7 @@
 import { promises as fs } from 'fs'
 import type { KeypointSchema } from '../shared/dataset'
 import { readPoseYaml, writePoseYaml } from '../shared/pose'
-import { builtInKeypoints, type FolderKeypoints } from '../shared/skeleton'
+import { builtInKeypoints, type FolderKeypoints, withKnownLines } from '../shared/skeleton'
 import { meta, writeAtomic } from './project'
 
 export const keypointsFile = (root: string) => meta(root, 'keypoints.yaml')
@@ -20,7 +20,8 @@ export async function folderKeypoints(root: string): Promise<FolderKeypoints> {
     return { schema: builtInKeypoints(), file: null, problem: missing ? null : `The keypoints file ${file} can't be read (${(e as Error).message}), so COCO's person is used` }
   }
   try {
-    return { schema: readPoseYaml(text).schema, file, problem: null }
+    // A file written by hand or by X-AnyLabeling may lack COCO's lines and flip pairs for COCO's person
+    return { schema: withKnownLines(readPoseYaml(text).schema), file, problem: null }
   } catch (e) {
     return { schema: builtInKeypoints(), file: null, problem: `${(e as Error).message.replace(/^The keypoints file /, `The keypoints file ${file} `)}, so COCO's person is used` }
   }

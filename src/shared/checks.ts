@@ -63,6 +63,12 @@ export type CheckOptions = {
    * needn't have them, and its poses are checked; without it, poses aren't.
    */
   keypoints?: KeypointSchema | null
+  /**
+   * The keypoints are the folder's own file's, not COCO's person standing in for one. With COCO's
+   * person, points named like its keypoints but in no group are a pose's only in an image with a
+   * pose: a folder of face landmarks named nose and eyes has none, and is left alone.
+   */
+  ownKeypoints?: boolean
   clashes?: Clash[]
   /** Groups of identical image files (findDuplicateImages) */
   duplicates?: string[][]
@@ -470,6 +476,11 @@ function poseBox(image: DatasetImage, pose: PoseGroup): Box | null {
 function swappedPair(shapes: Shape[], schema: KeypointSchema, pose: PoseGroup, box: Box | null) {
   const order = schema.classes[pose.cls]
   const sides = sidesOf(schema, pose.cls)
+  // Keypoints at the skeleton's ends, such as wrists and ankles, which folded arms and crossed legs put on the other side
+  const lines = schema.skeleton?.[pose.cls] ?? []
+  const degree = new Map<string, number>()
+  for (const [a, b] of lines) for (const n of [a, b]) degree.set(n, (degree.get(n) ?? 0) + 1)
+  const end = (name: string) => lines.length > 0 && (degree.get(name) ?? 0) <= 1
   const seen = (k: number | null) => (k === null || isHidden(shapes[k]) || pointsWrong(shapes[k]) ? null : shapes[k].points[0])
   const placed = pose.points.map(seen).filter((p) => p !== null)
   if (placed.length < 2 * SIDE_VOTES) return null
@@ -478,6 +489,7 @@ function swappedPair(shapes: Shape[], schema: KeypointSchema, pose: PoseGroup, b
   const gap = Math.max(OUTSIDE, SIDE_GAP * Math.min(size[2] - size[0], size[3] - size[1]))
   const ways: { left: number; right: number; x: number; y: number }[] = []
   for (const [a, b] of schema.flip?.[pose.cls] ?? []) {
+    if (end(a) || end(b)) continue
     const ka = order.indexOf(a), kb = order.indexOf(b)
     const [l, r] = sides[ka] === 'left' ? [pose.points[ka], pose.points[kb]] : [pose.points[kb], pose.points[ka]]
     const pl = seen(l ?? null), pr = seen(r ?? null)
@@ -499,9 +511,12 @@ function swappedPair(shapes: Shape[], schema: KeypointSchema, pose: PoseGroup, b
  * keypoints with no box, points a pose has no place for or has already, and, where the image's
  * points are measured, keypoints well outside their pose's box and a flip pair that looks swapped
  */
-function poseProblems(image: DatasetImage, schema: KeypointSchema, measured: boolean, add: (code: CheckCode, message: string, shape: number) => void) {
+function poseProblems(image: DatasetImage, schema: KeypointSchema, measured: boolean, own: boolean, add: (code: CheckCode, message: string, shape: number) => void) {
   const { shapes } = image
   const names = keypointNames(schema)
+  const poses = posesIn(shapes, schema)
+  // Groups with a closed shape of a class the keypoints don't cover (a dog's box with its nose and eyes) are that class's, not poses
+  const otherClass = new Set(shapes.filter((s) => s.group_id !== null && CLOSED_TYPES.has(s.shape_type) && !Object.hasOwn(schema.classes, s.label)).map((s) => s.group_id!))
   // The points named for keypoints: those of no group, and each group's
   const loose: number[] = []
   const named = new Map<number, number[]>()
@@ -512,16 +527,15 @@ function poseProblems(image: DatasetImage, schema: KeypointSchema, measured: boo
     else named.set(s.group_id, [k])
   })
   // A folder whose points were never grouped has dozens an image: they're one problem
-  if (loose.length) {
+  if (loose.length && (own || poses.length)) {
     add('keypoint-no-group', loose.length === 1
       ? `${what(shapes[loose[0]], loose[0])} is a keypoint with no group, so it's in no pose, and pose exports leave it out`
       : `${loose.length} keypoints have no group (shapes ${listed(loose.map((k) => String(k + 1)))}), so they're in no pose, and pose exports leave them out`, loose[0])
   }
-  const poses = posesIn(shapes, schema)
   const posed = new Set(poses.map((p) => p.group))
   // Groups posesIn gives no class: with no box, no class has all their keypoints, or several have
   for (const [group, points] of named) {
-    if (posed.has(group)) continue
+    if (posed.has(group) || otherClass.has(group)) continue
     const fits = Object.keys(schema.classes).filter((c) => points.every((k) => schema.classes[c].includes(shapes[k].label)))
     add('keypoint-no-box', `Group ${group} has keypoints but no box, and ${fits.length ? `they fit ${listed(fits)}` : 'no class has all of them'}, ` +
       'so pose exports leave it out: add a box labelled with its class', points[0])
@@ -530,7 +544,7 @@ function poseProblems(image: DatasetImage, schema: KeypointSchema, measured: boo
     const { group, cls } = pose
     for (const k of pose.extra) {
       const s = shapes[k]
-      if (schema.classes[cls].includes(s.label)) add('keypoint-repeated', `${what(s, k)} repeats group ${group}'s ${s.label}, so pose exports stop on it`, k)
+      if (schema.classes[cls].includes(s.label)) add('keypoint-repeated', `${what(s, k)} repeats group ${group}'s ${s.label}, so pose exports leave it out`, k)
       else add('keypoint-unknown', `${what(s, k)} in group ${group} isn't one of ${cls}'s keypoints, so pose exports stop on it`, k)
     }
     const box = pose.box === null ? null : poseBox(image, pose)
@@ -566,7 +580,7 @@ function poseProblems(image: DatasetImage, schema: KeypointSchema, measured: boo
  * Every problem in a folder's labels, the worst first, then in the folder's order. Each names
  * its image (null for the folder as a whole) and, where it's one shape's, the shape's index.
  */
-export function checkDataset(images: DatasetImage[], { labels, keypoints = null, clashes = [], duplicates = [], orphans = [], tally }: CheckOptions): Issue[] {
+export function checkDataset(images: DatasetImage[], { labels, keypoints = null, ownKeypoints = false, clashes = [], duplicates = [], orphans = [], tally }: CheckOptions): Issue[] {
   const issues: Issue[] = []
   const add = (code: CheckCode, image: string | null, message: string, shape?: number) =>
     issues.push({ severity: CHECKS[code].severity, code, image, ...(shape === undefined ? {} : { shape }), message })
@@ -668,7 +682,7 @@ export function checkDataset(images: DatasetImage[], { labels, keypoints = null,
         : keypointLabels.has(to) ? `Label “${label}” looks like the keypoint “${to}” written another way`
           : `Label “${label}” looks like “${to}” written another way (${counted(uses.get(to)!, 'shape uses', 'shapes use')} “${to}”)`, k)
     }
-    if (keypoints) poseProblems(image, keypoints, geometry, (code, message, shape) => add(code, name, message, shape))
+    if (keypoints) poseProblems(image, keypoints, geometry, ownKeypoints, (code, message, shape) => add(code, name, message, shape))
     if (!geometry) continue
     const copyOf = copiesOf(image.shapes, image.masks)
     copyOf.forEach((keep, k) => {

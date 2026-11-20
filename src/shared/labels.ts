@@ -1,4 +1,6 @@
+import type { KeypointSchema } from './dataset'
 import { isAi, scoreOf, type Shape } from './labelfile'
+import { posePoints, posesIn } from './skeleton'
 
 export type Summary = {
   /** Accepted shapes. AI shapes stay out of the counts until accepted, as in training. */
@@ -13,24 +15,29 @@ export type Summary = {
 }
 
 /**
- * What the image list shows. `keypoints` are the labels that name keypoints (skeleton.ts'
- * keypointNames): a pose's points are shapes, so they're counted, but their names aren't
- * classes, so they're left out of `classes`.
+ * What the image list shows. With the folder's `keypoints`, its poses' keypoints (skeleton.ts'
+ * posePoints) are left out of the count and of `classes`: a pose counts once, by its box, and
+ * its keypoints name keypoints, not classes. Any other shape labelled like a keypoint is of a
+ * class as usual.
  */
-export function summarize(shapes: Shape[], labelled = true, keypoints?: ReadonlySet<string>): Summary {
+export function summarize(shapes: Shape[], labelled = true, keypoints?: KeypointSchema | null): Summary {
   const classes: Record<string, number> = {}
   let ai = 0
   let score: number | null = null
-  for (const s of shapes) {
+  const keypointAt = keypoints ? posePoints(posesIn(shapes, keypoints)) : null
+  let count = 0
+  for (const [i, s] of shapes.entries()) {
+    if (keypointAt?.has(i)) continue
     if (isAi(s)) {
       ai++
       const v = scoreOf(s)
       if (v !== undefined) score = score === null ? v : Math.min(score, v)
-    } else if (!keypoints?.has(s.label)) {
+    } else {
+      count++
       classes[s.label] = (classes[s.label] ?? 0) + 1
     }
   }
-  return { count: shapes.length - ai, ai, score, classes, labelled }
+  return { count, ai, score, classes, labelled }
 }
 
 export const EMPTY_SUMMARY: Summary = { count: 0, ai: 0, score: null, classes: {}, labelled: false }

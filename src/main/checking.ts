@@ -157,8 +157,9 @@ type Checked = {
   at: number
   /** The save format it was read as */
   prefer: LabelFormat
-  /** The folder's keypoints, as the check read them */
+  /** The folder's keypoints, as the check read them, and whether they're its own file's */
   keypoints: KeypointSchema
+  ownKeypoints: boolean
   images: DatasetImage[]
   found: Found
   clashes: Clash[]
@@ -248,7 +249,7 @@ async function acrossOf(images: DatasetImage[], options: CheckOptions, signal?: 
   for (let at = 0; at < images.length; at += SLICE) {
     signal?.throwIfAborted()
     // The keypoints too: the labels naming them are no unknown labels, and their spelling wins
-    for (const issue of checkDataset(images.slice(at, at + SLICE).map(unmeasured), { labels: options.labels, keypoints: options.keypoints, clashes: options.clashes, tally })) {
+    for (const issue of checkDataset(images.slice(at, at + SLICE).map(unmeasured), { labels: options.labels, keypoints: options.keypoints, ownKeypoints: options.ownKeypoints, clashes: options.clashes, tally })) {
       if (issue.image !== null && ACROSS.has(issue.code)) across.push(issue)
     }
     await turn()
@@ -271,7 +272,7 @@ async function acrossOf(images: DatasetImage[], options: CheckOptions, signal?: 
 export async function issuesOf(images: DatasetImage[], options: CheckOptions, before?: Found,
   progress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<Found> {
   // The schema as read: the same file, or COCO's person, gives the same text
-  const keypoints = JSON.stringify(options.keypoints ?? null)
+  const keypoints = JSON.stringify([options.keypoints ?? null, !!options.ownKeypoints])
   const context = JSON.stringify([options.labels, options.clashes ?? [], options.duplicates ?? [], options.orphans ?? [], keypoints])
   const verifying = images.some((i) => i.verified)
   const was = before?.own
@@ -291,7 +292,7 @@ export async function issuesOf(images: DatasetImage[], options: CheckOptions, be
     const todo = slice.filter((i) => kept?.get(i.name)?.image !== i)
     const found = new Map(todo.map((i) => [i.name, [] as Issue[]]))
     if (todo.length) {
-      for (const issue of checkDataset(verifying ? [...todo, VERIFIED] : todo, { labels: null, keypoints: options.keypoints })) {
+      for (const issue of checkDataset(verifying ? [...todo, VERIFIED] : todo, { labels: null, keypoints: options.keypoints, ownKeypoints: options.ownKeypoints })) {
         if (issue.image !== null && !ACROSS.has(issue.code)) found.get(issue.image)?.push(issue)
       }
     }
@@ -347,7 +348,8 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
   try {
     const before = checks.get(root)
     // Its file, or COCO's person while it has none or it can't be read, as the window draws poses with
-    const { schema: keypoints } = await folderKeypoints(root)
+    const { schema: keypoints, file: keypointsFile } = await folderKeypoints(root)
+    const ownKeypoints = keypointsFile !== null
     // Read as another format, the other images could have other files: those are read again too
     const quick = !!saved && before?.prefer === prefer
     const images = await readDataset(root, {
@@ -368,12 +370,12 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
     // Which images share a label file hangs on nothing but where each one's labels are read from
     const clashes = same && images.every((i, k) => i.file === before!.images[k].file && i.format === before!.images[k].format)
       ? before!.clashes : labelFileClashes(images)
-    const found = await issuesOf(images, { labels, keypoints, clashes, duplicates, orphans }, before?.found,
+    const found = await issuesOf(images, { labels, keypoints, ownKeypoints, clashes, duplicates, orphans }, before?.found,
       (done, total) => report({ phase: 'check', done, total }), signal)
     // A folder closed as the check ended keeps none
     signal.throwIfAborted()
     const { issues } = found
-    const result: Checked = { at: Date.now(), prefer, keypoints, images, found, clashes, duplicates, orphans, issues, files: strayFiles(issues, orphans) }
+    const result: Checked = { at: Date.now(), prefer, keypoints, ownKeypoints, images, found, clashes, duplicates, orphans, issues, files: strayFiles(issues, orphans) }
     checks.set(root, result)
     return summaryOf(result)
   } catch (e) {
@@ -464,8 +466,9 @@ export async function fixShapes(root: string, issue: Pick<Issue, 'code' | 'image
     width, height, shapes, masks: await masksFor(shapes, read)
   }
   // Poses as the check that found the problem saw them
-  const keypoints = c ? c.keypoints : (await folderKeypoints(root)).schema
-  const now = checkDataset([image], { labels: null, keypoints }).find((i) => i.code === code && i.shape === issue.shape)
+  const folder = c ? null : await folderKeypoints(root)
+  const keypoints = c ? c.keypoints : folder!.schema, ownKeypoints = c ? c.ownKeypoints : folder!.file !== null
+  const now = checkDataset([image], { labels: null, keypoints, ownKeypoints }).find((i) => i.code === code && i.shape === issue.shape)
   return now ? fixIssue(image, now) : null
 }
 

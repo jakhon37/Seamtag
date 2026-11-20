@@ -16,7 +16,7 @@ import { imageSize } from './images'
 import { decodeMask } from './masks'
 import { nameKey } from './names'
 import {
-  findLabels, folderOf, type Found, type ImageItem, imagePath, isEmbedded, labelPath, type Labels, nameOrder, opening, outputFileOf, readLabels, readText,
+  findLabels, folderOf, type Found, type ImageItem, imagePath, isEmbedded, keypointsOf, labelPath, type Labels, nameOrder, opening, outputFileOf, readLabels, readText,
   serial, sharesStem, writeAtomic, writeTrashing
 } from './project'
 
@@ -1014,7 +1014,7 @@ export async function rewriteLabels(root: string, name: string, change: ShapeCha
     }
     if ('classes' in next && next.classes) await writeAtomic(next.classes.file, next.classes.text)
     await writeTrashing(found.file, next.text)
-    const item: ImageItem = { ...summarize(next.shapes, true), name, embedded: isEmbedded(root, name) || undefined, verified: next.verified || undefined }
+    const item: ImageItem = { ...summarize(next.shapes, true, await keypointsOf(root)), name, embedded: isEmbedded(root, name) || undefined, verified: next.verified || undefined }
     return { file: found.file, format: found.format, item }
   })
 }
@@ -1070,10 +1070,11 @@ export async function rewriteList(root: string, file: string, images: { name: st
       // The last moment a stop leaves the list as it was
       if (signal?.aborted) return null
       if (changes.size) await writeTrashing(file, writeCreateMLEntries(text, changes))
+      const keypoints = await keypointsOf(root)
       for (const [entry, { shapes, verified }] of changes) {
         const k = listed.get(entry)!
         const { name } = images[k]
-        results[k] = { file, format: 'createml', item: { ...summarize(shapes, true), name, embedded: isEmbedded(root, name) || undefined, verified: verified || undefined } }
+        results[k] = { file, format: 'createml', item: { ...summarize(shapes, true, keypoints), name, embedded: isEmbedded(root, name) || undefined, verified: verified || undefined } }
       }
     } catch (e) {
       for (const k of listed.values()) results[k] ??= failure(e)

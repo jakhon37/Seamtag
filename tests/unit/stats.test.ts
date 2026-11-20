@@ -166,7 +166,8 @@ test('the per-label table saves as CSV, quoting what needs it', () => {
 test("with poses, the keypoints table follows the labels table in the CSV, after a blank line", () => {
   const pose = [box('person', 0, 0, 50, 90, { group_id: 1 }), newShape('nose', 'point', [[5, 5]], { group_id: 1 })]
   const stats = datasetStats([image('a', pose)], { keypoints: { classes: { person: ['nose', 'tail'] } } })
-  expect(statsCsv(stats)).toBe('﻿label,objects,images,rectangle,point\r\nperson,1,1,1,0\r\nnose,0,1,0,1\r\n\r\n' +
+  // A pose's keypoints are in its table, not the labels'
+  expect(statsCsv(stats)).toBe('﻿label,objects,images,rectangle\r\nperson,1,1,1\r\n\r\n' +
     'class,keypoint,seen,hidden,not_labelled\r\nperson,nose,1,0,0\r\nperson,tail,0,0,1\r\n')
 })
 

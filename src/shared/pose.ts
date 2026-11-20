@@ -412,7 +412,7 @@ export function poseInstances(image: DatasetImage, schema: KeypointSchema): { in
         continue
       }
       if (keypoints[k]) {
-        say('error', 'pose-repeated-keypoint', `group ${g} has ${p.label} twice, so the second is left out`, i)
+        say('warning', 'pose-repeated-keypoint', `group ${g} has ${p.label} twice, so the second is left out`, i)
         continue
       }
       keypoints[k] = [p.points[0][0], p.points[0][1], pointVisibility(p)]

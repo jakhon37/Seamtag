@@ -27,15 +27,18 @@ export function builtInKeypoints(): KeypointSchema {
 }
 
 /**
- * A keypoints file made from a folder's points has no lines: a class whose keypoints are COCO's
- * person's, in any order, gets COCO's lines, and its flip pairs when it has none
+ * A keypoints file made from a folder's points, or X-AnyLabeling's, has no lines: a class whose
+ * keypoints are COCO's person's, in any order, gets COCO's lines, and its flip pairs when it has
+ * none. With `cocoOrder`, for a file made from the order the folder's points come in, such a
+ * class's keypoints go in COCO's order too, which the pose exports and COCO's models keep.
  */
-export function withKnownLines(schema: KeypointSchema): KeypointSchema {
+export function withKnownLines(schema: KeypointSchema, cocoOrder = false): KeypointSchema {
   const coco = builtInKeypoints()
-  const out: KeypointSchema = { ...schema, skeleton: { ...schema.skeleton }, flip: { ...schema.flip } }
+  const out: KeypointSchema = { ...schema, classes: { ...schema.classes }, skeleton: { ...schema.skeleton }, flip: { ...schema.flip } }
   for (const [cls, names] of Object.entries(schema.classes)) {
     const same = names.length === COCO_PERSON.length && COCO_PERSON.every((n) => names.includes(n))
     if (!same) continue
+    if (cocoOrder) out.classes[cls] = [...COCO_PERSON]
     if (!out.skeleton![cls]?.length) out.skeleton![cls] = coco.skeleton!.person
     if (!out.flip![cls]?.length) out.flip![cls] = coco.flip!.person
   }
@@ -106,9 +109,10 @@ export type PoseGroup = {
 /**
  * The posed objects in an image's shapes: each group_id with at least one point named for a
  * keypoint of the schema, and the class of its box (a closed shape labelled with a class of the
- * schema) or, without one, the one class whose keypoints all its named points are. Groups of
- * shapes without keypoints, such as a person and their bag in labelme's sense, aren't poses.
- * Export reads the same groups (poseInstances), and says what's wrong with the rest.
+ * schema) or, with no closed shape at all, the one class whose keypoints all its named points
+ * are. Groups of shapes without keypoints, such as a person and their bag in labelme's sense,
+ * aren't poses, and nor is a group of another class (a dog's box and its nose and eyes): the
+ * keypoints file doesn't cover it. Export reads the same groups (poseInstances).
  */
 export function posesIn(shapes: Shape[], schema: KeypointSchema): PoseGroup[] {
   const names = keypointNames(schema)
@@ -125,6 +129,7 @@ export function posesIn(shapes: Shape[], schema: KeypointSchema): PoseGroup[] {
     const named = points.filter((i) => names.has(shapes[i].label))
     if (!named.length) continue
     const regions = members.filter((i) => CLOSED_TYPES.has(shapes[i].shape_type) && Object.hasOwn(schema.classes, shapes[i].label))
+    if (!regions.length && members.some((i) => CLOSED_TYPES.has(shapes[i].shape_type))) continue
     const box = regions.find((i) => shapes[i].shape_type === 'rectangle') ?? regions[0] ?? null
     let cls: string | null = box !== null ? shapes[box].label : null
     if (cls === null) {
@@ -144,6 +149,13 @@ export function posesIn(shapes: Shape[], schema: KeypointSchema): PoseGroup[] {
   }
   return out.sort((a, b) => Math.min(...poseShapes(a)) - Math.min(...poseShapes(b)))
 }
+
+/**
+ * The points that are poses' keypoints, by index: only these name keypoints rather than a class.
+ * A box or polygon labelled like a keypoint, a point in no pose, or a pose's extra point is
+ * labelled with a class as any shape is.
+ */
+export const posePoints = (poses: PoseGroup[]) => new Set(poses.flatMap((p) => p.points.filter((i): i is number => i !== null)))
 
 /** Every shape of a pose, by index: its box, its keypoints and its extra points */
 export const poseShapes = (p: PoseGroup) => [...(p.box === null ? [] : [p.box]), ...p.points.filter((i): i is number => i !== null), ...p.extra]

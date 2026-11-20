@@ -6,7 +6,7 @@ import { folderKeypoints, keypointsFile, saveFolderKeypoints } from '../../src/m
 import type { KeypointSchema } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
 import { readPoseYaml, writePoseYaml } from '../../src/shared/pose'
-import { builtInKeypoints, COCO_PERSON, isHidden, keypointNames, keypointOnlyNames, nextGroupId, poseShapes, posesIn, sidesOf, withKnownLines } from '../../src/shared/skeleton'
+import { builtInKeypoints, COCO_PERSON, isHidden, keypointNames, keypointOnlyNames, nextGroupId, posePoints, poseShapes, posesIn, sidesOf, withKnownLines } from '../../src/shared/skeleton'
 
 const box = (label: string, group: number | null, type: Shape['shape_type'] = 'rectangle') =>
   newShape(label, type, type === 'rectangle' ? [[10, 10], [50, 60]] : [[10, 10], [50, 10], [50, 60]], { group_id: group })
@@ -163,4 +163,29 @@ describe("a folder's keypoints file", () => {
 
 test("keypointOnlyNames: keypoint names that no class has as its name", () => {
   expect(keypointOnlyNames({ classes: { person: ['nose', 'hand'], hand: ['thumb'] } })).toEqual(new Set(['nose', 'thumb']))
+})
+
+describe('fixes from review', () => {
+  test("a group with a closed shape of a class the keypoints don't cover isn't a pose: a dog's box and its nose", () => {
+    const shapes = [box('dog', 1), point('nose', 1), point('left_eye', 1), box('person', 2), point('nose', 2)]
+    expect(posesIn(shapes, builtInKeypoints()).map((p) => p.group)).toEqual([2])
+  })
+  test('posePoints: only the keypoints a pose has a place for', () => {
+    const shapes = [box('person', 1), point('nose', 1), point('nose', 1), point('nose', null), newShape('left_eye', 'rectangle', [[0, 0], [2, 2]])]
+    expect([...posePoints(posesIn(shapes, builtInKeypoints()))]).toEqual([1])
+  })
+  test("withKnownLines with cocoOrder puts a class of COCO's keypoints in COCO's order; without it, the order stays", () => {
+    const made: KeypointSchema = { classes: { person: [...COCO_PERSON.slice(1), 'nose'] } }
+    expect(withKnownLines(made, true).classes.person).toEqual(COCO_PERSON)
+    expect(withKnownLines(made).classes.person).toEqual(made.classes.person)
+    expect(made.classes.person[16]).toBe('nose')
+  })
+  test("a folder's file of COCO's person without lines, as X-AnyLabeling writes it, is read with COCO's lines and flip pairs", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'seamtag-keypoints-'))
+    mkdirSync(path.join(root, '.myseg'))
+    writeFileSync(keypointsFile(root), `classes:\n  person: [${COCO_PERSON.join(', ')}]\nhas_visible: true\n`)
+    const k = await folderKeypoints(root)
+    expect(k.schema.skeleton!.person).toHaveLength(19)
+    expect(k.schema.flip!.person).toHaveLength(8)
+  })
 })

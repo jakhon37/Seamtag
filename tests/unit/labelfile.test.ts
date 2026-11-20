@@ -117,10 +117,14 @@ describe('AI shapes', () => {
     expect(s).toEqual({ count: 1, ai: 2, score: 0.4, classes: { dog: 1 }, labelled: true })
   })
 
-  test("a pose's keypoints count as shapes, but the names given as keypoints aren't classes", () => {
-    const pose = [newShape('person', 'rectangle', [[0, 0], [9, 9]], { group_id: 1 }), newShape('nose', 'point', [[5, 2]], { group_id: 1 }), newShape('nose', 'point', [[1, 1]])]
-    expect(summarize(pose, true, new Set(['nose', 'left_eye']))).toEqual({ count: 3, ai: 0, score: null, classes: { person: 1 }, labelled: true })
-    expect(summarize(pose).classes).toEqual({ person: 1, nose: 2 })
+  test("a pose counts once, by its box: its keypoints are neither counted nor classes; a shape named like a keypoint outside a pose is", () => {
+    const keypoints = { classes: { person: ['nose', 'left_eye'] } }
+    const pose = [
+      newShape('person', 'rectangle', [[0, 0], [9, 9]], { group_id: 1 }), newShape('nose', 'point', [[5, 2]], { group_id: 1 }),
+      newShape('nose', 'point', [[1, 1]]), newShape('left_eye', 'rectangle', [[2, 2], [3, 3]])
+    ]
+    expect(summarize(pose, true, keypoints)).toEqual({ count: 3, ai: 0, score: null, classes: { person: 1, nose: 1, left_eye: 1 }, labelled: true })
+    expect(summarize(pose)).toEqual({ count: 4, ai: 0, score: null, classes: { person: 1, nose: 2, left_eye: 1 }, labelled: true })
   })
 })
 

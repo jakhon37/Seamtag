@@ -428,7 +428,8 @@ describe("the folder's keypoints", () => {
     try {
       await checkFolder(root, { prefer: 'labelme', labels: null }, () => {})
       expect(keypointReads()).toBe(1)
-      expect(groups(root)).toEqual([['keypoint-no-group', 1], ['keypoint-unknown', 1], ['keypoint-repeated', 1]])
+      // With COCO's person standing in for a file, keypoints in no group in an image with no pose are left alone
+      expect(groups(root)).toEqual([['keypoint-unknown', 1], ['keypoint-repeated', 1]])
       // The folder's own file, where a person has a tail: a check after saves, with none saved, reads no label file but checks every pose with it
       mkdirSync(path.join(root, '.myseg'), { recursive: true })
       writeFileSync(path.join(root, '.myseg', 'keypoints.yaml'), 'classes:\n  person: [nose, tail]\n')
