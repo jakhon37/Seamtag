@@ -445,6 +445,8 @@ The video at the top of the README and its screenshots show four photos from Wik
 
 The AI models aren't part of Seamtag. Each is downloaded when you ask for it, under its own licence, which AI → AI models shows: EfficientSAM and SAM2 are under the Apache License 2.0, YOLO-World under the GNU GPL v3.0.
 
+RTMPose-m and RTMPose-l, which find people's keypoints, are OpenMMLab's, downloaded from <https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/> (or rtmlib's copy at <https://huggingface.co/Tau-J/RTMPose> when that doesn't answer) as zips, of which Seamtag keeps the ONNX file. Their weights carry no licence of their own: they're published with MMPose, under the Apache License 2.0 (<https://github.com/open-mmlab/mmpose/blob/759b39c13fea6ba094afc1fa932f51dc1b11cbf9/LICENSE>). They were trained on a mix of public pose datasets (Body7), whose own terms vary.
+
 ## Installers and source
 
 The installers carry this file, and beside it THIRD-PARTY-NOTICES.txt, with the licences of the libraries bundled into the app. The source code of each release is at <https://github.com/jakhon37/Seamtag>, under the release's tag.
