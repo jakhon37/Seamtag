@@ -251,7 +251,8 @@ export function cancelDownload(name: string) {
 export async function removeModel(name: string) {
   const m = modelDef(name)
   if (downloading.has(name)) throw new Error(`${m.title} is still downloading`)
-  if (loaded?.name === name) await release()
+  if (loaded?.name === name) await releaseLoaded()
+  if (posing?.name === name) await releasePose()
   for (const b of blobsOf(m)) {
     await fs.rm(path.join(cacheDir(), b.hash.replace('sha256:', 'sha256-')), { force: true })
     if (process.platform !== 'win32') await fs.rm(path.join(cacheDir(), b.hash), { force: true })
@@ -264,28 +265,58 @@ let loaded: { name: string; parts: Map<string, Promise<InferenceSession>> } | nu
 type Embedding = { key: string; width: number; height: number; full: [number, number]; tensors: Record<string, Tensor> }
 const embeddings: Embedding[] = []
 
+// No memory arena or memory pattern: each tensor has a block of its own, freed after the run
+// (the largest, in Sam2 (balanced) and Sam2 (accuracy), is 512 MiB). With them, both closed
+// the app on their second image: the pattern asks for all of a run's tensors in one block, 820
+// and 896 MiB, and to hold it the arena, which grows in regions of up to 1 GiB, asked for 1 GiB.
+// Electron's allocator rounds an aligned request that size up to 2 GiB, more than it gives in
+// one block, and stops the app rather than fail the request.
+const SESSION_OPTIONS: InferenceSession.SessionOptions = {
+  executionProviders: ['cpu'], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false
+}
+
 async function part(m: ModelDef, key: string): Promise<InferenceSession> {
   if (!isDownloaded(m)) throw new Error(`${m.title} isn't downloaded yet`)
   if (loaded?.name !== m.name) {
-    await release()
+    await releaseLoaded()
     loaded = { name: m.name, parts: new Map() }
   }
   let session = loaded.parts.get(key)
   if (!session) {
-    // No memory arena or memory pattern: each tensor has a block of its own, freed after the run
-    // (the largest, in Sam2 (balanced) and Sam2 (accuracy), is 512 MiB). With them, both closed
-    // the app on their second image: the pattern asks for all of a run's tensors in one block, 820
-    // and 896 MiB, and to hold it the arena, which grows in regions of up to 1 GiB, asked for 1 GiB.
-    // Electron's allocator rounds an aligned request that size up to 2 GiB, more than it gives in
-    // one block, and stops the app rather than fail the request.
-    const opts: InferenceSession.SessionOptions = {
-      executionProviders: ['cpu'], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false
-    }
-    session = InferenceSession.create(blobPath(m.blobs[key]), opts)
+    session = InferenceSession.create(blobPath(m.blobs[key]), SESSION_OPTIONS)
     loaded.parts.set(key, session)
     session.catch(() => loaded?.parts.delete(key))
   }
   return session
+}
+
+// A pose model has a session of its own beside that one model, so a pose found between two clicks
+// of SAM2 leaves SAM2 loaded and the images it has encoded kept
+let posing: { name: string; session: Promise<InferenceSession> } | null = null
+
+/** A pose model, loaded when first needed: its session, its keypoints, and the longest side it reads a box's part of an image at */
+export async function poseModel(name: string) {
+  const m = modelDef(name)
+  if (!m.keypoints) throw new Error(`${m.title} doesn't find poses`)
+  if (!isDownloaded(m)) throw new Error(`${m.title} isn't downloaded yet`)
+  let current = posing
+  if (current?.name !== m.name) {
+    // Taken at once, so a second call meanwhile shares it; the model it replaces is let go after
+    const before = current?.session
+    const session = InferenceSession.create(blobPath(m.blobs.model), SESSION_OPTIONS)
+    current = posing = { name: m.name, session }
+    session.catch(() => {
+      if (posing?.session === session) posing = null
+    })
+    await (await before?.catch(() => null))?.release()
+  }
+  return { session: await current.session, keypoints: m.keypoints, maxSide: MAX_SIDE[m.kind] }
+}
+
+async function releasePose() {
+  const session = posing?.session
+  posing = null
+  await (await session?.catch(() => null))?.release()
 }
 
 let tokenizer: Tokenizer | null = null
@@ -475,9 +506,15 @@ export async function generateFromTexts(root: string, name: string, model: strin
   return { annotations: await yoloWorld(m, image, texts), width: image.width, height: image.height, full: [image.fullWidth, image.fullHeight] }
 }
 
-export async function release() {
+async function releaseLoaded() {
   embeddings.length = 0
   const parts = loaded?.parts
   loaded = null
   for (const s of parts?.values() ?? []) await (await s.catch(() => null))?.release()
+}
+
+/** Frees every model's memory */
+export async function release() {
+  await releaseLoaded()
+  await releasePose()
 }

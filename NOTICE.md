@@ -363,6 +363,18 @@ the use of this software, even if advised of the possibility of such damage.
    limitations under the License.
 ```
 
+### rtmlib and MMPose (Apache-2.0)
+
+`src/main/rtmpose.ts`: finding a person's keypoints in a box with RTMPose, translated into TypeScript from rtmlib (<https://github.com/Tau-J/rtmlib>, at commit 5ea82df) and MMPose (<https://github.com/open-mmlab/mmpose>, at commit 759b39c). From rtmlib's `rtmlib/tools/pose_estimation/rtmpose.py` and `pre_processings.py`: the box's centre and scale, the warp of its part of the image to the model's input, and the keypoints read from the model's SimCC outputs and mapped back to the image. From MMPose's `mmpose/codecs/utils/post_processing.py` and `mmpose/models/pose_estimators/topdown.py`: each keypoint's score, the lower of its two maxima, and the same mapping back. Both are under the Apache License 2.0, whose text is given above under OpenCV, with these notices: MMPose's LICENSE, and the notice in the appendix of rtmlib's.
+
+```text
+Copyright 2018-2020 Open-MMLab. All rights reserved.
+```
+
+```text
+Copyright 2018-2020 Open-MMLab.
+```
+
 ### Pillow (MIT-CMU)
 
 `src/main/resize.ts`: the bilinear resize of the images AI models are given, translated from Pillow's `src/libImaging/Resample.c` (<https://github.com/python-pillow/Pillow>).
