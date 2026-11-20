@@ -6,13 +6,18 @@ export type Summary = {
   ai: number
   /** The least certain AI shape's score */
   score: number | null
+  /** Accepted shapes of each class, which the Labels dock adds up across the folder */
   classes: Record<string, number>
   /** A label file exists, so the image has been looked at: zero shapes means truly empty */
   labelled: boolean
 }
 
-// What the image list shows
-export function summarize(shapes: Shape[], labelled = true): Summary {
+/**
+ * What the image list shows. `keypoints` are the labels that name keypoints (skeleton.ts'
+ * keypointNames): a pose's points are shapes, so they're counted, but their names aren't
+ * classes, so they're left out of `classes`.
+ */
+export function summarize(shapes: Shape[], labelled = true, keypoints?: ReadonlySet<string>): Summary {
   const classes: Record<string, number> = {}
   let ai = 0
   let score: number | null = null
@@ -21,7 +26,7 @@ export function summarize(shapes: Shape[], labelled = true): Summary {
       ai++
       const v = scoreOf(s)
       if (v !== undefined) score = score === null ? v : Math.min(score, v)
-    } else {
+    } else if (!keypoints?.has(s.label)) {
       classes[s.label] = (classes[s.label] ?? 0) + 1
     }
   }
