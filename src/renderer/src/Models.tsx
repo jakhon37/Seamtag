@@ -15,7 +15,7 @@ type Props = {
 }
 
 const size = (bytes: number) => (bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1)} GB` : `${Math.round(bytes / 1e6)} MB`)
-const takes = (m: ModelInfo) => [m.points && 'clicks', m.box && 'a box', m.text && 'words'].filter(Boolean).join(', ')
+const takes = (m: ModelInfo) => [m.points && 'clicks', m.box && 'a box', m.text && 'words', m.pose && "a person's box"].filter(Boolean).join(', ')
 
 export default function Models({ models, progress, onDownload, onCancel, onRemove, onLink, onClose }: Props) {
   return (
@@ -29,7 +29,7 @@ export default function Models({ models, progress, onDownload, onCancel, onRemov
             const busy = progress?.model === m.name || m.downloading
             return (
               <tr key={m.name} data-model={m.name}>
-                <td>{m.title}</td>
+                <td title={m.note}>{m.title}</td>
                 <td className="muted">{takes(m)}</td>
                 <td className="muted">{size(m.size)}</td>
                 <td><a href={m.license.url} onClick={(e) => { e.preventDefault(); onLink(m.license.url) }}>{m.license.name}</a></td>

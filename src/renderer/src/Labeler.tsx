@@ -1,7 +1,7 @@
 import {
   Check, CheckCheck, Circle, Eraser, Eye, EyeOff, Hexagon, Maximize, MousePointer2, Paintbrush, Plus, Redo2, SkipForward,
   Slash, Sparkles, Spline, Square, Trash2, Undo2, Wand2, X, Dot, ScanLine, Lock, BadgeCheck, RectangleHorizontal, Type, Focus,
-  PersonStanding, ChevronRight, ChevronDown
+  PersonStanding, Accessibility, ChevronRight, ChevronDown
 } from 'lucide-react'
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import { AI_OUTPUTS, type AiOutput, type Config, formatKeys, matches, type ShortcutName, shortcutList } from '../../shared/config'
@@ -21,7 +21,7 @@ import { ContextMenu } from './Menu'
 import Modal from './Modal'
 import Models from './Models'
 import {
-  askedNow, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseLayout, type PoseSession, regroup, type ReviewItem,
+  aiPosePoints, askedNow, classForModel, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseLayout, type PoseSession, regroup, type ReviewItem,
   reviewItems, shapeRows, spoken, stepOf, swapSides, withHidden, withPoints, withSession
 } from './posing'
 import Problems, { counted, RenameDialog } from './Problems'
@@ -37,13 +37,13 @@ import {
 } from './types'
 
 export type Mode =
-  | 'edit' | 'polygon' | 'rectangle' | 'oriented_rectangle' | 'circle' | 'line' | 'point' | 'linestrip' | 'pose' | 'ai_points' | 'ai_box' | 'brush' | 'eraser'
-export const CREATE_MODES: Mode[] = ['polygon', 'rectangle', 'oriented_rectangle', 'circle', 'line', 'point', 'linestrip', 'pose', 'ai_points', 'ai_box']
+  | 'edit' | 'polygon' | 'rectangle' | 'oriented_rectangle' | 'circle' | 'line' | 'point' | 'linestrip' | 'pose' | 'ai_points' | 'ai_box' | 'ai_pose' | 'brush' | 'eraser'
+export const CREATE_MODES: Mode[] = ['polygon', 'rectangle', 'oriented_rectangle', 'circle', 'line', 'point', 'linestrip', 'pose', 'ai_points', 'ai_box', 'ai_pose']
 // LabelImg's formats keep boxes only: AI shapes become the box around them. A pose's points have no place there.
 const BOX_MODES = new Set<Mode>(['edit', 'rectangle', 'ai_points', 'ai_box'])
 const AI_MODES = new Set<Mode>(['ai_points', 'ai_box'])
-// labelme 7's names for the AI tools, in its crosshair settings; the Pose tool starts with a box, so it follows the rectangle's
-const CROSSHAIR: Partial<Record<Mode, string>> = { ai_points: 'ai_points_to_shape', ai_box: 'ai_box_to_shape', pose: 'rectangle' }
+// labelme 7's names for the AI tools, in its crosshair settings; the pose tools start with a box, so they follow the box tools'
+const CROSSHAIR: Partial<Record<Mode, string>> = { ai_points: 'ai_points_to_shape', ai_box: 'ai_box_to_shape', pose: 'rectangle', ai_pose: 'ai_box_to_shape' }
 export const AI_OUTPUT_NAMES: Record<AiOutput, string> = { polygon: 'Polygon', mask: 'Mask', rectangle: 'Rectangle', circle: 'Circle', oriented_rectangle: 'Rotated box' }
 
 export type Settings = {
@@ -60,6 +60,8 @@ export type Settings = {
   aiOutput: AiOutput
   /** The model for the AI text prompt */
   aiTextModel: string
+  /** The model for AI pose */
+  poseModel: string
   /** The pre-labelling model last picked with Choose a model…, for folders with no runs and none chosen */
   prelabelModel: string
   /** The pre-labelling model chosen for each folder: from its runs in the menu, or with Choose a model… */
@@ -155,7 +157,7 @@ const RELOADED = 'These labels changed in another app (such as Seamline), so the
 const COLOR_TITLES = { line: 'Shape line colour', fill: 'Shape fill colour', draw: 'Box line colour' }
 const MODE_NAMES: Record<Mode, string> = {
   edit: 'Edit', polygon: 'Polygon', rectangle: 'Rectangle', oriented_rectangle: 'Rotated box', circle: 'Circle', line: 'Line', point: 'Point',
-  linestrip: 'Line strip', pose: 'Pose', ai_points: 'AI points', ai_box: 'AI box', brush: 'Brush', eraser: 'Eraser'
+  linestrip: 'Line strip', pose: 'Pose', ai_points: 'AI points', ai_box: 'AI box', ai_pose: 'AI pose', brush: 'Brush', eraser: 'Eraser'
 }
 // Other poses, while one is selected or being placed
 const DIM = 0.35
@@ -263,6 +265,8 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const [poseOpen, setPoseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map())
   // What the Pose tool asks for now, for the status bar; '' when no pose is being placed
   const [poseStep, setPoseStep] = useState('')
+  // AI pose's score threshold: the config's, changed in its toolbar for the session
+  const [poseScore, setPoseScore] = useState(config.ai.pose_score)
   const [, setTick] = useState(0)
 
   const canvasRef = useRef<HTMLCanvasElement>(null)
@@ -936,7 +940,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     // Drawn open until it's closed
     if (md === 'polygon' || md === 'linestrip') return newShape('', 'linestrip', [...dr.points, p])
     if (md === 'rectangle') return newShape('', 'rectangle', [first, squareNow() ? squareFrom(first, p) : p])
-    if (md === 'ai_box' || md === 'pose') return newShape('', 'rectangle', [first, p])
+    if (md === 'ai_box' || md === 'pose' || md === 'ai_pose') return newShape('', 'rectangle', [first, p])
     if (md === 'oriented_rectangle') {
       // Two corners make one side; then the pointer sets how wide it is
       if (dr.points.length === 1) return newShape('', 'line', [first, p])
@@ -1565,9 +1569,10 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     else if (md === 'linestrip' && dr.points.length >= 2) finishShape('linestrip', dr.points)
     invalidate()
   }
-  /** A box made with a two-corner tool: the shape, or what AI box or the Pose tool make of it */
+  /** A box made with a two-corner tool: the shape, or what AI box, AI pose or the Pose tool make of it */
   const boxDone = (md: Mode, a: Pt, b: Pt) => {
     if (md === 'ai_box') runBox(a, b)
+    else if (md === 'ai_pose') runPose(a, b)
     else if (md === 'pose') startPose(a, b)
     else finishShape(md as ShapeType, [a, b])
   }
@@ -1690,7 +1695,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (!info) return false
     if (info.downloaded) return true
     const ok = await window.api.ask(`Download ${info.title}?`,
-      `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once and kept in ~/.cache/osam, which labelme uses too.`,
+      `It's ${megabytes(info.size)} under the ${info.license.name}, downloaded once and kept in ~/.cache/osam, which labelme uses too.${info.note ? ` ${info.note}` : ''}`,
       ['Download', 'Cancel'])
     if (ok !== 0) return false
     try {
@@ -1813,6 +1818,126 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       if (seq === aiSeq.current) setBusyAi('')
     }
   }
+
+  // AI pose: a person's keypoints in a box, from a pose model such as RTMPose
+  const poseModels = (models ?? []).filter((m) => m.pose)
+  // The model picked, else the config's, else the first there is
+  const poseModel = (poseModels.find((m) => m.name === settings.poseModel) ?? poseModels.find((m) => m.name === config.ai.pose_model) ?? poseModels[0])?.name ?? ''
+  /** AI pose's model, and the class of the keypoints file its keypoints go to; null, said why, when there's none */
+  const poseTarget = () => {
+    const info = poseModels.find((m) => m.name === poseModel)
+    if (!info) {
+      setNotice('There is no AI pose model.')
+      return null
+    }
+    const cls = info.keypoints?.length ? classForModel(opts.current.keypoints, info.keypoints) : poseClass()
+    if (!cls) {
+      setNotice(`No class in the keypoints file has ${info.title}'s keypoints.`)
+      return null
+    }
+    return { model: info.name, cls }
+  }
+  /**
+   * AI pose on boxes: the image's own, which their points join, and new ones, which come with
+   * theirs as AI shapes; each pose under one group_id, all of them one step to undo
+   */
+  const poseInBoxes = async (target: { model: string; cls: string }, own: Shape[], found: Shape[], seq: number, name: string) => {
+    const all = [...own, ...found]
+    setBusyAi('Finding poses…')
+    try {
+      const answer = await window.api.aiPose({ root, name, model: target.model, boxes: all.map((s) => boxOf(s)) })
+      const m = metaRef.current
+      if (seq !== aiSeq.current || loadedName.current !== name || !m) return
+      const before = shapesRef.current
+      let next = before
+      const added: Shape[] = []
+      const chosen: number[] = []
+      let group = nextGroupId(before)
+      let made = 0
+      all.forEach((box, k) => {
+        const mine = k < own.length
+        // One of the image's boxes taken away meanwhile gets nothing
+        const at = mine ? next.indexOf(box) : -1
+        if (mine && at < 0) return
+        const g = mine && box.group_id !== null ? box.group_id : group
+        const { points, score } = aiPosePoints(opts.current.keypoints, target.cls, answer.names, answer.poses[k] ?? [], {
+          size: [m.width, m.height], threshold: poseScore, group: g, flagsOf: (label) => flagsFor(label, config.label_flags)
+        })
+        if (!points.length) return
+        made++
+        if (g === group) group++
+        if (mine) {
+          if (box.group_id !== g) {
+            if (next === before) next = [...before]
+            next[at] = { ...box, group_id: g }
+          }
+          chosen.push(at)
+        } else added.push({ ...box, group_id: g, flags: { ...box.flags, ai: true }, other: { ...box.other, score } })
+        added.push(...points)
+      })
+      const none = `no keypoint scored ${percent(poseScore)} or more`
+      if (!made) return setNotice(all.length === 1 ? `The model found ${none} in that box.` : `The model found ${none} in any of the ${all.length} boxes.`)
+      setShapes([...next, ...added])
+      setSelected([...chosen, ...added.map((_, k) => next.length + k)])
+      const missed = all.length - made
+      setNotice(`Found ${counted(made, 'pose')}.${missed ? ` In ${counted(missed, 'box', 'boxes')}, the model found ${none}.` : ''}`)
+    } catch (e) {
+      if (seq === aiSeq.current) onError(`AI pose failed: ${plainError(e)}`)
+    } finally {
+      if (seq === aiSeq.current) setBusyAi('')
+    }
+  }
+  /** AI pose in a box dragged: the box and its keypoints, as AI shapes */
+  const runPose = async (a: Pt, b: Pt) => {
+    const name = loadedName.current
+    const target = poseTarget()
+    if (!name || !target || !listedLabel(target.cls)) return
+    // Escape or another tool while the model downloads drops the box
+    const seq = ++aiSeq.current
+    if (!(await ensureModel(target.model)) || seq !== aiSeq.current) return
+    const box = newShape(target.cls, 'rectangle', [[Math.min(a[0], b[0]), Math.min(a[1], b[1])], [Math.max(a[0], b[0]), Math.max(a[1], b[1])]], {
+      flags: flagsFor(target.cls, config.label_flags)
+    })
+    await poseInBoxes(target, [], [box], seq, name)
+  }
+  /**
+   * AI pose on the image's boxes of the pose's class that have no keypoints yet: those given, by
+   * index, or else every one; with none at all, on the people YOLO-World finds first
+   */
+  const poseBoxes = async (which?: number[]) => {
+    const name = loadedName.current
+    const target = poseTarget()
+    if (!name || readOnlyRef.current || !target) return
+    const list = shapesRef.current
+    const posed = new Set(posesOf(list).map((p) => p.box))
+    const own = (which ?? list.map((_, i) => i)).filter((i) => list[i].label === target.cls && CLOSED.has(list[i].shape_type) && !list[i].hidden && !posed.has(i))
+    if (which && !own.length) return setNotice(`Click a ${target.cls} box that has no keypoints yet, or drag a box.`)
+    if (!own.length && !listedLabel(target.cls)) return
+    const seq = ++aiSeq.current
+    if (!(await ensureModel(target.model)) || seq !== aiSeq.current) return
+    let found: Shape[] = []
+    if (!own.length) {
+      const textModel = settingsRef.current.aiTextModel
+      if (!(await ensureModel(textModel)) || seq !== aiSeq.current) return
+      setBusyAi('Finding people…')
+      try {
+        const result = await window.api.aiText({
+          root, name, model: textModel, texts: ['person'], output: 'rectangle', detail: config.mask_polygonization.detail, drawn: drawnShapes(),
+          groups: groupsInUse(), outside: free, iou: aiIou, score: aiScore
+        })
+        if (seq !== aiSeq.current || loadedName.current !== name) return
+        if (result.notice) return setNotice(result.notice)
+        found = result.shapes.map((p) => newShape(target.cls, 'rectangle', p.points, { description: p.description ?? '', flags: flagsFor(target.cls, config.label_flags) }))
+      } catch (e) {
+        if (seq === aiSeq.current) onError(`Finding people failed: ${plainError(e)}`)
+        return
+      } finally {
+        if (seq === aiSeq.current) setBusyAi('')
+      }
+      if (!found.length) return setNotice('Nobody new found here.')
+    }
+    await poseInBoxes(target, own.map((i) => list[i]), found, seq, name)
+  }
   const busyAiRef = useRef('')
   busyAiRef.current = busyAi
 
@@ -1902,7 +2027,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       return
     }
-    if (!ro && (md === 'rectangle' || md === 'circle' || md === 'line' || md === 'ai_box' || md === 'pose')) {
+    if (!ro && (md === 'rectangle' || md === 'circle' || md === 'line' || md === 'ai_box' || md === 'pose' || md === 'ai_pose')) {
       const dr = draft.current
       if (dr) {
         const q = livePoint()!
@@ -2114,12 +2239,13 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         const second = mode === 'rectangle' && squareKeys(e) ? squareFrom(dr.points[0], q) : q
         draft.current = null
         if (Math.hypot(second[0] - dr.points[0][0], second[1] - dr.points[0][1]) > 0.5) boxDone(mode, dr.points[0], second)
-      } else if (dr && mode === 'pose') {
-        // A click on a box of a class with keypoints carries on its pose
+      } else if (dr && (mode === 'pose' || mode === 'ai_pose')) {
+        // A click on a box of a class with keypoints carries on its pose, or has AI pose it
         const at = poseBoxAt(dr.points[0])
         if (at >= 0) {
           draft.current = null
-          continuePose(at)
+          if (mode === 'pose') continuePose(at)
+          else poseBoxes([at])
         }
       }
       invalidate()
@@ -3137,6 +3263,9 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     create_linestrip: { label: 'Create line strip', run: () => setMode('linestrip'), shortcut: 'create_linestrip', checked: () => mode === 'linestrip', enabled: draws('linestrip') },
     create_ai_points: { label: 'AI points', run: () => setMode('ai_points'), shortcut: 'create_ai_points_to_shape', checked: () => mode === 'ai_points', enabled: () => has() && !!models },
     create_ai_box: { label: 'AI box', run: () => setMode('ai_box'), shortcut: 'create_ai_box_to_shape', checked: () => mode === 'ai_box', enabled: () => has() && !!models },
+    create_ai_pose: {
+      label: 'AI pose', run: () => setMode('ai_pose'), shortcut: 'create_ai_pose', checked: () => mode === 'ai_pose', enabled: () => draws('ai_pose')() && poseModels.length > 0
+    },
     create_brush: { label: 'Brush', run: () => setMode('brush'), shortcut: 'create_brush', checked: () => mode === 'brush', enabled: draws('brush') },
     create_eraser: { label: 'Eraser', run: () => setMode('eraser'), shortcut: 'create_eraser', checked: () => mode === 'eraser', enabled: draws('eraser') },
     draw_squares: { label: 'Draw squares', run: () => setSettings((s) => ({ ...s, drawSquares: !s.drawSquares })), shortcut: 'draw_squares', checked: () => settings.drawSquares },
@@ -3217,12 +3346,14 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     ai_models: { label: 'AI models…', run: () => setModelsOpen(true), enabled: () => !!models },
     prelabel_one: { label: 'Pre-label this image', run: prelabelOne, enabled: () => has() && !batch && !busyAi && !boxesOnly },
     prelabel_all: { label: `Pre-label ${toPrelabel.length} images`, run: prelabelAll, enabled: () => !batch && toPrelabel.length > 0 && !boxesOnly },
+    pose_everyone: { label: 'Pose every person', run: () => poseBoxes(), enabled: () => has() && poseModels.length > 0 && !busyAi && !boxesOnly },
     brush_smaller: { label: 'Smaller brush', run: () => setBrushSize((s) => Math.max(config.brush.min, s - 4)), shortcut: 'brush_smaller' },
     brush_larger: { label: 'Larger brush', run: () => setBrushSize((s) => Math.min(config.brush.max, s + 4)), shortcut: 'brush_larger' }
   }
   for (const m of models ?? []) {
     if (m.points || m.box) commands[`ai_model:${m.name}`] = { label: m.title, run: () => setSettings((s) => ({ ...s, aiModel: m.name })), checked: () => settings.aiModel === m.name }
     if (m.text) commands[`ai_text_model:${m.name}`] = { label: m.textTitle ?? m.title, run: () => setSettings((s) => ({ ...s, aiTextModel: m.name })), checked: () => settings.aiTextModel === m.name }
+    if (m.pose) commands[`pose_model:${m.name}`] = { label: m.title, run: () => setSettings((s) => ({ ...s, poseModel: m.name })), checked: () => poseModel === m.name }
   }
   for (const o of AI_OUTPUTS) {
     commands[`ai_output:${o}`] = { label: AI_OUTPUT_NAMES[o], run: () => setSettings((s) => ({ ...s, aiOutput: o })), checked: () => settings.aiOutput === o, enabled: () => !boxesOnly }
@@ -3432,6 +3563,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     pose: "Drag a box, or click a box to go on with its pose, then click each keypoint",
     ai_points: 'Click the object · Shift+click marks background · Enter, Space or Ctrl+click to finish',
     ai_box: 'Drag a box around the object',
+    ai_pose: "Drag a box around a person, or click a person's box",
     brush: 'Paint the selected class · [ and ] change the size',
     eraser: 'Erase from the selected shape, or anything it touches'
   }
@@ -3618,6 +3750,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
             <div className="seg">
               {tool('ai_points', <Wand2 size={16} />, 'AI points', 'create_ai_points')}
               {tool('ai_box', <ScanLine size={16} />, 'AI box', 'create_ai_box')}
+              {poseModels.length > 0 && tool('ai_pose', <Accessibility size={16} />, 'AI pose', 'create_ai_pose')}
             </div>
           )}
           {AI_MODES.has(mode) && models && (
@@ -3634,6 +3767,21 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
                   {AI_OUTPUTS.map((o) => <option key={o} value={o}>{AI_OUTPUT_NAMES[o]}</option>)}
                 </select>
               </label>
+            </>
+          )}
+          {mode === 'ai_pose' && poseModels.length > 0 && (
+            <>
+              <label className="slider">Model
+                <select value={poseModel} aria-label="AI pose model" onChange={(e) => { setSettings((s) => ({ ...s, poseModel: e.target.value })); e.target.blur() }}>
+                  {poseModels.map((m) => <option key={m.name} value={m.name}>{m.title}{m.downloaded ? '' : ' (download)'}</option>)}
+                </select>
+              </label>
+              <label className="slider" title="Keypoints scored below this are left out">Score
+                <input type="number" min={0} max={1} step={0.05} value={poseScore} aria-label="Keypoint score threshold"
+                  onChange={(e) => setPoseScore(Math.max(0, Math.min(1, +e.target.value)))} />
+              </label>
+              <button className="ghost" onClick={() => poseBoxes()} disabled={!!busyAi || !!readOnly}
+                title="On this image's boxes of the class that have no keypoints, or on the people YOLO-World finds">Pose every person</button>
             </>
           )}
           <button className="icon" onClick={() => commands.undo.run()} title="Undo (Ctrl+Z)" aria-label="Undo"><Undo2 size={16} /></button>

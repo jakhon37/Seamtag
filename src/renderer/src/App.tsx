@@ -16,7 +16,7 @@ const DOCS = 'https://github.com/jakhon37/Seamtag#readme'
 const KEPT = 'seamtag:settings'
 
 // Settings made in the window that outlast it. Saving and the like start from the config each time, as in labelme.
-type Kept = Pick<Settings, 'fill' | 'fit' | 'aiModel' | 'aiOutput' | 'prelabelModel' | 'prelabelModels' | 'docks' | 'dark' | 'displayLabels' | 'drawSquares' | 'advanced' | 'drawColor'>
+type Kept = Pick<Settings, 'fill' | 'fit' | 'aiModel' | 'aiOutput' | 'poseModel' | 'prelabelModel' | 'prelabelModels' | 'docks' | 'dark' | 'displayLabels' | 'drawSquares' | 'advanced' | 'drawColor'>
 function readKept(): Partial<Kept> {
   try {
     return JSON.parse(localStorage.getItem(KEPT) ?? '{}')
@@ -46,6 +46,7 @@ function initialSettings(config: Config): Settings {
     aiOutput: kept.aiOutput ?? 'polygon',
     // labelme's SAM 3 can't run here (see src/main/ai.ts): YOLO-World finds by words
     aiTextModel: 'yoloworld:latest',
+    poseModel: kept.poseModel ?? config.ai.pose_model,
     prelabelModel: kept.prelabelModel ?? '',
     prelabelModels: kept.prelabelModels && typeof kept.prelabelModels === 'object' ? kept.prelabelModels : {},
     docks: {
@@ -64,9 +65,9 @@ function initialSettings(config: Config): Settings {
 
 const MENUS: MenuSpec = [
   { label: 'File', items: ['open', 'open_dir', { label: 'Open recent', items: [], prefix: 'recent:' }, 'open_annotation', '-', 'open_next', 'open_prev', 'copy_previous_shapes', '-', 'save', 'save_as', { label: 'Save format', items: [], prefix: 'format:' }, 'auto_save', 'with_image_data', 'save_to', '-', 'import_dataset', 'export_dataset', '-', 'delete_file', 'delete_image', 'reveal', 'close', '-', 'preferences', 'reset_settings', 'quit'] },
-  { label: 'Edit', items: ['create_polygon', 'create_rectangle', 'create_oriented_rectangle', 'create_circle', 'create_line', 'create_point', 'create_pose', 'create_linestrip', 'create_ai_points', 'create_ai_box', 'create_brush', 'create_eraser', 'edit_shape', 'draw_squares', 'box_line_color', '-', 'edit_label', 'duplicate_shape', 'copy_shape', 'paste_shape', 'delete_shape', 'merge_shapes', '-', 'undo', 'redo', 'remove_selected_point', 'add_point_to_edge', 'add_multiple_points', 'toggle_lock', 'toggle_difficult', 'shape_line_color', 'shape_fill_color', { label: 'Keypoints', items: ['toggle_keypoint_hidden', 'swap_keypoint_sides', 'mirror_pose', 'next_keypoint', 'prev_keypoint'] }, '-', 'verify_image', 'toggle_keep_prev_mode', '-', { label: 'Select a neighbour', items: ['select_shape_up', 'select_shape_down', 'select_shape_left', 'select_shape_right'] }] },
+  { label: 'Edit', items: ['create_polygon', 'create_rectangle', 'create_oriented_rectangle', 'create_circle', 'create_line', 'create_point', 'create_pose', 'create_linestrip', 'create_ai_points', 'create_ai_box', 'create_ai_pose', 'create_brush', 'create_eraser', 'edit_shape', 'draw_squares', 'box_line_color', '-', 'edit_label', 'duplicate_shape', 'copy_shape', 'paste_shape', 'delete_shape', 'merge_shapes', '-', 'undo', 'redo', 'remove_selected_point', 'add_point_to_edge', 'add_multiple_points', 'toggle_lock', 'toggle_difficult', 'shape_line_color', 'shape_fill_color', { label: 'Keypoints', items: ['toggle_keypoint_hidden', 'swap_keypoint_sides', 'mirror_pose', 'next_keypoint', 'prev_keypoint'] }, '-', 'verify_image', 'toggle_keep_prev_mode', '-', { label: 'Select a neighbour', items: ['select_shape_up', 'select_shape_down', 'select_shape_left', 'select_shape_right'] }] },
   { label: 'View', items: ['dock_flags', 'dock_labels', 'dock_shapes', 'dock_files', 'dock_problems', 'toggle_label_panel', '-', 'fill_drawing', 'display_labels', 'toggle_all_shapes', 'hide_all_shapes', 'show_all_shapes', '-', 'single_class_mode', 'advanced_mode', '-', 'zoom_in', 'zoom_out', 'zoom_to_original', 'fit_window', 'fit_selection', 'fit_width', 'keep_prev_scale', '-', 'brightness_contrast', 'keep_prev_brightness_contrast', '-', 'dark_mode'] },
-  { label: 'AI', items: ['create_ai_points', 'create_ai_box', { label: 'Model for AI points and box', items: [], prefix: 'ai_model:' }, { label: 'AI makes', items: [], prefix: 'ai_output:' }, { label: 'Model for the text prompt', items: [], prefix: 'ai_text_model:' }, 'ai_models', '-', { label: 'Model for pre-labelling', items: [], prefix: 'prelabel_model:' }, 'prelabel_pick', 'prelabel_one', 'prelabel_all', '-', 'review_accept', 'review_reject', 'review_skip', 'review_accept_all', 'order_certainty'] },
+  { label: 'AI', items: ['create_ai_points', 'create_ai_box', { label: 'Model for AI points and box', items: [], prefix: 'ai_model:' }, { label: 'AI makes', items: [], prefix: 'ai_output:' }, { label: 'Model for the text prompt', items: [], prefix: 'ai_text_model:' }, 'ai_models', '-', 'create_ai_pose', 'pose_everyone', { label: 'Model for AI pose', items: [], prefix: 'pose_model:' }, '-', { label: 'Model for pre-labelling', items: [], prefix: 'prelabel_model:' }, 'prelabel_pick', 'prelabel_one', 'prelabel_all', '-', 'review_accept', 'review_reject', 'review_skip', 'review_accept_all', 'order_certainty'] },
   { label: 'Dataset', items: ['check_labels', 'dataset_stats', { label: 'Keypoints', items: ['keypoints_coco', 'keypoints_choose', 'keypoints_make'] }, '-', 'import_dataset', 'export_dataset'] },
   { label: 'Help', items: ['shortcuts', 'docs', 'about'] }
 ]
@@ -106,9 +107,9 @@ export default function App() {
 
   useEffect(() => {
     if (!settings) return
-    const { fill, fit, aiModel, aiOutput, prelabelModel, prelabelModels, docks, dark, displayLabels, drawSquares, advanced, drawColor } = settings
+    const { fill, fit, aiModel, aiOutput, poseModel, prelabelModel, prelabelModels, docks, dark, displayLabels, drawSquares, advanced, drawColor } = settings
     try {
-      localStorage.setItem(KEPT, JSON.stringify({ fill, fit, aiModel, aiOutput, prelabelModel, prelabelModels, docks, dark, displayLabels, drawSquares, advanced, drawColor }))
+      localStorage.setItem(KEPT, JSON.stringify({ fill, fit, aiModel, aiOutput, poseModel, prelabelModel, prelabelModels, docks, dark, displayLabels, drawSquares, advanced, drawColor }))
     } catch {
       // Not kept, then
     }
