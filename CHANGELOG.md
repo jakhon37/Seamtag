@@ -5,6 +5,14 @@ All notable changes to Seamtag are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Renaming a label across a Seamline project renames Seamline's class of that name in `.myseg/project.json` too, in its place and with its colour, as soon as a label file has the new name, even when the rename is stopped or some files can't be renamed. 3.3.0 renamed the class only once no label file had the old name. The rename writes the class list itself, merged with the file as it is then, so classes Seamline added, deleted or recoloured meanwhile, and the file's other keys, stay as Seamline left them. The rename window says before anything is written that the class is renamed too, and the message after the rename says it was. Folders without `.myseg/project.json` are renamed as before.
+
+### Fixed
+- Renaming a label to the name of another class in a Seamline project deleted the old class from `.myseg/project.json`, joining the two, which changes the outputs of the model Seamline trains. Both classes now stay as they are: the rename window says the old class will have no shapes, and the message after the rename says it's empty.
+
 ## [3.3.0] - 2026-11-19
 
 Datasets: a check of the whole folder's labels, statistics, and COCO and Ultralytics YOLO export and import. Seamline and Seamtag on one folder: the models Seamline exports are offered for pre-labelling, and Seamtag never writes over labels or classes another app changed. Seamtag's licence and notices, in About and in the installers.

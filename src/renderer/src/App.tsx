@@ -190,6 +190,12 @@ export default function App() {
       if (turn === projectTurn.current) setData((d) => (d && d.root === root ? { ...d, project: saved } : d))
     }).catch((e) => showError(`The label list couldn't be saved: ${plainError(e)}`))
   }, [data, showError])
+  // The class list as a rename across the folder left .myseg/project.json, having written it itself: shown, not saved
+  // again, and newer than any save's or read's answer still to come
+  const tookProject = useCallback((root: string, project: ProjectInfo) => {
+    ++projectTurn.current
+    setData((d) => (d && d.root === root ? { ...d, project, hasProjectFile: true } : d))
+  }, [])
   // Back from another app, such as Seamline: the class list as the file has it now
   useEffect(() => {
     if (!data?.root) return
@@ -398,7 +404,7 @@ export default function App() {
       ) : (
         <div className="page">
           <Labeler key={folder} ref={labeler} data={data} config={config} settings={settings} setSettings={setSettings} onChangeOutput={changeOutput} onNextToImages={nextToImages}
-            setProject={setProject} setImages={setImages} discovered={discovered} forgetLabel={forgetLabel} mac={mac} onError={showError} onShown={shown}
+            setProject={setProject} tookProject={tookProject} setImages={setImages} discovered={discovered} forgetLabel={forgetLabel} mac={mac} onError={showError} onShown={shown}
             onOpenMenu={(x, y) => setContext({ x, y })} onChange={() => setTick((t) => t + 1)} />
         </div>
       )}
