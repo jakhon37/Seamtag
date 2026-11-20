@@ -224,6 +224,12 @@ export function reviewItems(list: Shape[], poses: PoseGroup[]): ReviewItem[] {
     .map(({ shapes, score, pose }) => ({ shapes, score, pose }))
 }
 
+/** The step of review a selection is: an AI shape alone, or any of an AI pose's shapes and nothing else; null when it's none */
+export function stepOf(steps: ReviewItem[], sel: number[]): ReviewItem | null {
+  if (!sel.length) return null
+  return steps.find((step) => (step.pose ? sel.every((i) => poseShapes(step.pose!).includes(i)) : sel.length === 1 && sel[0] === step.shapes[0])) ?? null
+}
+
 /** A pose's points as shares of its box's width and height, for the faint guide the next pose is placed over */
 export type PoseLayout = { cls: string; at: (number[] | null)[] }
 

@@ -3,7 +3,7 @@ import { newShape, type Shape } from '../../src/shared/labelfile'
 import { builtInKeypoints, COCO_PERSON, type PosePoint, posesIn } from '../../src/shared/skeleton'
 import {
   aiPosePoints, askedNow, classForModel, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseSession, regroup, reviewItems, shapeRows, spoken,
-  swapSides, withHidden, withPoints, withSession
+  stepOf, swapSides, withHidden, withPoints, withSession
 } from '../../src/renderer/src/posing'
 
 const coco = builtInKeypoints()
@@ -180,6 +180,13 @@ test('review takes an AI pose as one, least certain first, and other AI shapes o
   const items = reviewItems(shapes, posesIn(shapes, coco))
   expect(items.map((i) => [i.shapes, i.score])).toEqual([[[4], 0.2], [[1, 2], 0.4], [[0], 0.5], [[5], undefined]])
   expect(items[1].pose?.group).toBe(1)
+  // Any of an AI pose's shapes stands for the pose, its accepted ones too; an AI shape stands for itself only alone
+  expect(stepOf(items, [3])).toBe(items[1])
+  expect(stepOf(items, [1, 2, 3])).toBe(items[1])
+  expect(stepOf(items, [3, 4])).toBeNull()
+  expect(stepOf(items, [4])).toBe(items[0])
+  expect(stepOf(items, [0, 4])).toBeNull()
+  expect(stepOf(items, [])).toBeNull()
 })
 
 test("the last pose's layout, scaled into the next box", () => {
