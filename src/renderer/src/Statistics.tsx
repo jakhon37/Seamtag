@@ -4,12 +4,13 @@ import { sizeText } from '../../shared/dataset'
 import type { ShapeType } from '../../shared/labelfile'
 import { useModal } from './Modal'
 import { counted, number, showMore, StopButton } from './Problems'
+import Radios from './Radios'
 import { type LabelFormat, plainError, type Progress, type StatsView } from './types'
 
 // Dataset > Statistics: the folder's labels counted in the main process (src/main/checking.ts
 // over stats.ts) as the window's save format reads them: images by status, objects per label
-// as the exports count them and shapes per label by type, objects per image, object sizes as
-// COCO ranges them, and image sizes.
+// as the exports count them and shapes per label by type, each keypoint of a posed class seen,
+// hidden or not labelled, objects per image, object sizes as COCO ranges them, and image sizes.
 
 const TYPE_NAMES: Record<ShapeType, string> = {
   polygon: 'Polygon', rectangle: 'Rectangle', oriented_rectangle: 'Rotated box', circle: 'Circle', line: 'Line', point: 'Point',
@@ -30,7 +31,13 @@ const ROWS = 200
 // Objects per image past this many are counted in ranges; COCO's evaluation counts at most 100 an image
 const RANGES: [number, number][] = [[0, 0], [1, 1], [2, 2], [3, 5], [6, 10], [11, 20], [21, 50], [51, 100], [101, Infinity]]
 
+type Sort<K extends string> = { key: K; down: boolean }
 type SortKey = 'label' | 'objects' | 'images' | ShapeType
+// The keypoints table's columns: the keypoints file's order, then the counts
+type KeypointKey = 'order' | 'seen' | 'hidden' | 'missing'
+// The table the labels table's place shows, once the folder has poses
+type Table = 'labels' | 'keypoints'
+const TABLES: { id: Table; name: string }[] = [{ id: 'labels', name: 'Labels' }, { id: 'keypoints', name: 'Keypoints' }]
 type Props = {
   root: string
   /** The window's save format: an image with label files in two formats is counted from this one */
@@ -58,7 +65,9 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
   const [progress, setProgress] = useState<Progress | null>(null)
   const [busy, setBusy] = useState(false)
   const [size, setSize] = useState('640')
-  const [sort, setSort] = useState<{ key: SortKey; down: boolean }>({ key: 'objects', down: true })
+  const [sort, setSort] = useState<Sort<SortKey>>({ key: 'objects', down: true })
+  const [table, setTable] = useState<Table>('labels')
+  const [keypointSort, setKeypointSort] = useState<Sort<KeypointKey>>({ key: 'order', down: false })
   const [shown, setShown] = useState(ROWS)
   const [savedTo, setSavedTo] = useState('')
   const trainSize = Math.round(Number(size))
@@ -111,6 +120,14 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
       return (sort.down ? -order : order) || a.label.localeCompare(b.label)
     })
   }, [stats, sort])
+  // Each class's keypoints, sorted within the class
+  const posed = useMemo(() => (stats?.keypoints ?? []).map((k) => {
+    const rows = k.keypoints.map((n, order) => ({ ...n, order }))
+    const { key, down } = keypointSort
+    rows.sort((a, b) => (down ? b[key] - a[key] : a[key] - b[key]) || a.order - b.order)
+    return { ...k, rows }
+  }), [stats, keypointSort])
+  const keypoints = table === 'keypoints' && posed.length > 0
   const most = Math.max(1, ...(stats?.labels.map((l) => l.objects) ?? []))
   // Objects and shapes differ once a label's shapes share a group, or are a pose's points: the table says why
   const grouped = !!stats?.labels.some((l) => Object.values(l.types).reduce((n, k) => n + (k ?? 0), 0) !== l.objects)
@@ -131,10 +148,11 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
       onError(`The statistics couldn't be saved: ${plainError(e)}`)
     }
   }
-  const heading = (key: SortKey, name: string, className = '') => (
-    <th className={className} aria-sort={sort.key === key ? (sort.down ? 'descending' : 'ascending') : 'none'}>
-      <button onClick={() => setSort((s) => ({ key, down: s.key === key ? !s.down : key !== 'label' }))}>
-        {name}{sort.key === key && (sort.down ? <ArrowDown size={12} /> : <ArrowUp size={12} />)}
+  // A column's heading sorts by it: counts most first, labels A to Z, keypoints as their file orders them; again, the other way
+  const heading = <K extends string>(sorted: Sort<K>, onSort: (s: Sort<K>) => void, key: K, name: string, className = '') => (
+    <th key={key} className={className} aria-sort={sorted.key === key ? (sorted.down ? 'descending' : 'ascending') : 'none'}>
+      <button onClick={() => onSort({ key, down: sorted.key === key ? !sorted.down : key !== 'label' && key !== 'order' })}>
+        {name}{sorted.key === key && (sorted.down ? <ArrowDown size={12} /> : <ArrowUp size={12} />)}
       </button>
     </th>
   )
@@ -159,16 +177,54 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
               ))}
             </div>
 
-            <h4>Labels <span className="muted">AI proposals count once accepted</span></h4>
-            {stats.labels.length ? (
+            <h4>
+              {posed.length ? <Radios label="Table" className="seg small" value={table} choices={TABLES} onChoose={setTable} /> : 'Labels'}
+              <span className="muted">AI proposals count once accepted</span>
+            </h4>
+            {keypoints ? (
+              <div className="stats-table">
+                <table className="stats-labels stats-keypoints">
+                  <thead>
+                    <tr>
+                      {heading(keypointSort, setKeypointSort, 'order', 'Keypoint', 'left')}
+                      {heading(keypointSort, setKeypointSort, 'seen', 'Seen', 'left wide')}
+                      {heading(keypointSort, setKeypointSort, 'hidden', 'Hidden')}
+                      {heading(keypointSort, setKeypointSort, 'missing', 'Not labelled')}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {posed.map((k) => (
+                      <Fragment key={k.cls}>
+                        <tr data-class={k.cls}>
+                          <td className="left"><span className="stats-swatch" style={{ background: colorOf(k.cls) }} /><b className="stats-name" title={k.cls}>{k.cls}</b></td>
+                          <td className="left wide muted">{counted(k.poses, 'pose')}</td>
+                          <td /><td />
+                        </tr>
+                        {k.rows.map((n) => (
+                          <tr key={n.name} data-keypoint={n.name}>
+                            <td className="left"><span className="stats-name" title={n.name}>{n.name}</span></td>
+                            <td className="left wide">
+                              <span className="stats-bar"><i style={{ width: `${(n.seen / k.poses) * 100}%`, background: colorOf(k.cls) }} /></span>
+                              <b>{number(n.seen)}</b>
+                            </td>
+                            <td className={n.hidden ? '' : 'muted'}>{number(n.hidden)}</td>
+                            <td className={n.missing ? '' : 'muted'}>{number(n.missing)}</td>
+                          </tr>
+                        ))}
+                      </Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : stats.labels.length ? (
               <div className="stats-table">
                 <table className="stats-labels">
                   <thead>
                     <tr>
-                      {heading('label', 'Label', 'left')}
-                      {heading('objects', 'Objects', 'left wide')}
-                      {heading('images', 'Images')}
-                      {stats.types.map((t) => <Fragment key={t}>{heading(t, TYPE_NAMES[t])}</Fragment>)}
+                      {heading(sort, setSort, 'label', 'Label', 'left')}
+                      {heading(sort, setSort, 'objects', 'Objects', 'left wide')}
+                      {heading(sort, setSort, 'images', 'Images')}
+                      {stats.types.map((t) => heading(sort, setSort, t, TYPE_NAMES[t]))}
                       <th />
                     </tr>
                   </thead>
@@ -192,7 +248,13 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
                 )}
               </div>
             ) : <p className="muted">No shapes yet.</p>}
-            {grouped && (
+            {keypoints && (
+              <p className="muted">
+                Each class's poses as the pose exports find them: a box and the points in its group, named for its keypoints. Hidden keypoints
+                are those marked difficult or occluded.
+              </p>
+            )}
+            {grouped && !keypoints && (
               <p className="muted">
                 Objects are grouped as the exports group them: shapes with one label and one group ID are one object, and points grouped
                 with a box are its keypoints, not objects. Lines and other points count as objects here, though the COCO and YOLO
@@ -260,7 +322,8 @@ export default function Statistics({ root, prefer, labels, colorOf, version, onR
         )}
         <div className="actions">
           {savedTo && <span className="muted stats-saved" title={savedTo}>Saved as {savedTo.split(/[\\/]/).pop()}</span>}
-          <button className="ghost" onClick={save} disabled={!stats || busy} title="The labels table as a CSV file">Save as CSV…</button>
+          <button className="ghost" onClick={save} disabled={!stats || busy}
+            title={posed.length ? 'The labels and keypoints tables as a CSV file' : 'The labels table as a CSV file'}>Save as CSV…</button>
           <button className="primary" onClick={close}>Close</button>
         </div>
       </div>

@@ -8,12 +8,14 @@ import path from 'path'
 import {
   CHECKS, type CheckCode, checkDataset, type CheckOptions, type Clash, fixIssue, FIXES, type OrphanFile, renameLabel, type RenamePlan, renaming, tallyLabels
 } from '../shared/checks'
-import type { DatasetImage, Issue, MaskBits, Severity } from '../shared/dataset'
+import type { DatasetImage, Issue, KeypointSchema, MaskBits, Severity } from '../shared/dataset'
 import { type LabelFormat, pyRound } from '../shared/formats'
 import { isAi, SHAPE_TYPES, type Shape, type ShapeType } from '../shared/labelfile'
-import { datasetStats, type DatasetStats, type LabelStats, statsCsv } from '../shared/stats'
+import { keypointNames } from '../shared/skeleton'
+import { datasetStats, type DatasetStats, type KeypointStats, type LabelStats, statsCsv } from '../shared/stats'
 import { findDuplicateImages, labelFileClashes, orphanLabels, readDataset, rewriteLabels, rewriteList } from './dataset'
 import { imageSize } from './images'
+import { folderKeypoints } from './keypoints'
 import { decodeMask } from './masks'
 import { nameKey } from './names'
 import { folderOf, writeAtomic } from './project'
@@ -146,14 +148,17 @@ function reporter(send: (p: Progress) => void) {
 type Own = { image: DatasetImage; issues: Issue[] }
 /**
  * What a check found: every problem, each image's own (by name, in the folder's order), those
- * across the folder, what the folder's were found with, whether any image was verified, which
- * each image's own hang on, and each image's place in the folder
+ * across the folder, what the folder's were found with, whether any image was verified and the
+ * keypoints its poses were checked against, which each image's own hang on, and each image's
+ * place in the folder
  */
-export type Found = { issues: Issue[]; own: Map<string, Own>; across: Issue[]; context: string; verifying: boolean; order: Map<string, number> }
+export type Found = { issues: Issue[]; own: Map<string, Own>; across: Issue[]; context: string; verifying: boolean; keypoints: string; order: Map<string, number> }
 type Checked = {
   at: number
   /** The save format it was read as */
   prefer: LabelFormat
+  /** The folder's keypoints, as the check read them */
+  keypoints: KeypointSchema
   images: DatasetImage[]
   found: Found
   clashes: Clash[]
@@ -242,7 +247,8 @@ async function acrossOf(images: DatasetImage[], options: CheckOptions, signal?: 
   const across: Issue[] = []
   for (let at = 0; at < images.length; at += SLICE) {
     signal?.throwIfAborted()
-    for (const issue of checkDataset(images.slice(at, at + SLICE).map(unmeasured), { labels: options.labels, clashes: options.clashes, tally })) {
+    // The keypoints too: the labels naming them are no unknown labels, and their spelling wins
+    for (const issue of checkDataset(images.slice(at, at + SLICE).map(unmeasured), { labels: options.labels, keypoints: options.keypoints, clashes: options.clashes, tally })) {
       if (issue.image !== null && ACROSS.has(issue.code)) across.push(issue)
     }
     await turn()
@@ -260,10 +266,13 @@ async function acrossOf(images: DatasetImage[], options: CheckOptions, signal?: 
  * (readDataset gives the same object while its files are unchanged) keeps the problems found
  * in it then, so a check after a save measures only what was saved; and when no image's
  * labels changed (a shape moved, say), nor what the check is told, neither did the folder's.
+ * Its poses are checked against the keypoints it's told: other keypoints check every image again.
  */
 export async function issuesOf(images: DatasetImage[], options: CheckOptions, before?: Found,
   progress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<Found> {
-  const context = JSON.stringify([options.labels, options.clashes ?? [], options.duplicates ?? [], options.orphans ?? []])
+  // The schema as read: the same file, or COCO's person, gives the same text
+  const keypoints = JSON.stringify(options.keypoints ?? null)
+  const context = JSON.stringify([options.labels, options.clashes ?? [], options.duplicates ?? [], options.orphans ?? [], keypoints])
   const verifying = images.some((i) => i.verified)
   const was = before?.own
   const same = !!was && before!.context === context && was.size === images.length && images.every((i) => {
@@ -275,14 +284,14 @@ export async function issuesOf(images: DatasetImage[], options: CheckOptions, be
   const issues = [...across]
   const own = new Map<string, Own>()
   // Once the first image is verified, or the last one isn't, every image says so again
-  const kept = before?.verifying === verifying ? was : undefined
+  const kept = before?.verifying === verifying && before.keypoints === keypoints ? was : undefined
   for (let at = 0; at < images.length; at += SLICE) {
     signal?.throwIfAborted()
     const slice = images.slice(at, at + SLICE)
     const todo = slice.filter((i) => kept?.get(i.name)?.image !== i)
     const found = new Map(todo.map((i) => [i.name, [] as Issue[]]))
     if (todo.length) {
-      for (const issue of checkDataset(verifying ? [...todo, VERIFIED] : todo, { labels: null })) {
+      for (const issue of checkDataset(verifying ? [...todo, VERIFIED] : todo, { labels: null, keypoints: options.keypoints })) {
         if (issue.image !== null && !ACROSS.has(issue.code)) found.get(issue.image)?.push(issue)
       }
     }
@@ -294,7 +303,7 @@ export async function issuesOf(images: DatasetImage[], options: CheckOptions, be
     progress?.(Math.min(at + SLICE, images.length), images.length)
     await turn()
   }
-  return { issues: sorted(issues, order), own, across, context, verifying, order }
+  return { issues: sorted(issues, order), own, across, context, verifying, keypoints, order }
 }
 
 /** The same image files as before, by name and byte size */
@@ -328,14 +337,17 @@ function summaryOf(c: Checked): CheckSummary {
 /**
  * Dataset > Check labels: the folder read as the window's save format reads it, then
  * images that share a label file, identical image files, label files without their image,
- * and checkDataset's checks with the label list. Kept as the folder's last check. After saves
- * only the images saved are read again, so a folder of 100,000 isn't read once a save.
+ * and checkDataset's checks with the label list and the folder's keypoints, read once a check.
+ * Kept as the folder's last check. After saves only the images saved are read again, so a
+ * folder of 100,000 isn't read once a save.
  */
 export async function checkFolder(root: string, { prefer, labels, saved }: CheckRequest, send: (p: Progress) => void): Promise<CheckSummary | Stopped> {
   const signal = begin(root, 'check')
   const report = reporter(send)
   try {
     const before = checks.get(root)
+    // Its file, or COCO's person while it has none or it can't be read, as the window draws poses with
+    const { schema: keypoints } = await folderKeypoints(root)
     // Read as another format, the other images could have other files: those are read again too
     const quick = !!saved && before?.prefer === prefer
     const images = await readDataset(root, {
@@ -356,12 +368,12 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
     // Which images share a label file hangs on nothing but where each one's labels are read from
     const clashes = same && images.every((i, k) => i.file === before!.images[k].file && i.format === before!.images[k].format)
       ? before!.clashes : labelFileClashes(images)
-    const found = await issuesOf(images, { labels, clashes, duplicates, orphans }, before?.found,
+    const found = await issuesOf(images, { labels, keypoints, clashes, duplicates, orphans }, before?.found,
       (done, total) => report({ phase: 'check', done, total }), signal)
     // A folder closed as the check ended keeps none
     signal.throwIfAborted()
     const { issues } = found
-    const result: Checked = { at: Date.now(), prefer, images, found, clashes, duplicates, orphans, issues, files: strayFiles(issues, orphans) }
+    const result: Checked = { at: Date.now(), prefer, keypoints, images, found, clashes, duplicates, orphans, issues, files: strayFiles(issues, orphans) }
     checks.set(root, result)
     return summaryOf(result)
   } catch (e) {
@@ -373,7 +385,7 @@ export async function checkFolder(root: string, { prefer, labels, saved }: Check
 }
 
 /** The spelling a label written another way looks like, as checkDataset words it */
-const LOOKS_LIKE = /looks like “(.*?)” (?:from the label list|written another way)/
+const LOOKS_LIKE = /looks like (?:the keypoint )?“(.*?)” (?:from the label list|written another way)/
 
 function rowOf(c: Checked, issue: Issue): ProblemRow {
   const image = issue.image === null ? undefined : imageOf(c, issue.image)
@@ -451,7 +463,9 @@ export async function fixShapes(root: string, issue: Pick<Issue, 'code' | 'image
     ...(read ?? { name: issue.image, file: null, format: null, flags: {}, verified: false }),
     width, height, shapes, masks: await masksFor(shapes, read)
   }
-  const now = checkDataset([image], { labels: null }).find((i) => i.code === code && i.shape === issue.shape)
+  // Poses as the check that found the problem saw them
+  const keypoints = c ? c.keypoints : (await folderKeypoints(root)).schema
+  const now = checkDataset([image], { labels: null, keypoints }).find((i) => i.code === code && i.shape === issue.shape)
   return now ? fixIssue(image, now) : null
 }
 
@@ -483,14 +497,17 @@ export async function renamePlan(root: string, from: string, prefer: LabelFormat
  * together, through rewriteList, so the list is written once, not once an image. The rename
  * is made to what each file holds as it's written, so nothing saved since the read is undone.
  * A stop ends it between files, or in a list's own checks, before the list is written.
- * `allowed` is the label list when the config allows only its labels (validate_label: exact).
+ * `allowed` is the label list when the config allows only its labels (validate_label: exact);
+ * the folder's keypoints' names are allowed as well, as the list holds classes, not keypoints.
  * The new name is trimmed, as the window's label dialog trims a label.
  */
 export async function renameRun(root: string, from: string, to: string, prefer: LabelFormat, allowed: string[] | null,
   send: (p: Progress) => void): Promise<RenameDone> {
   const name = to.trim()
   if (!name) throw new Error('A label needs a name, so nothing is renamed')
-  if (allowed && !allowed.includes(name)) throw new Error(`“${name}” isn't in the label list, and only listed labels are allowed.`)
+  if (allowed && !allowed.includes(name) && !keypointNames((await folderKeypoints(root)).schema).has(name)) {
+    throw new Error(`“${name}” isn't in the label list, and only listed labels are allowed.`)
+  }
   const signal = begin(root, 'rename')
   const report = reporter(send)
   const done: RenameDone = { stopped: false, shapes: 0, changed: [], skipped: { unreadable: 0, shared: 0 }, failed: [], left: 0 }
@@ -549,15 +566,19 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
 
 /**
  * datasetStats of a folder from those of its slices, each counted without the label list:
- * the same counts in the same order, the list's unused labels last with 0
+ * the same counts in the same order, the list's unused labels last with 0, and each class of
+ * the keypoints with poses in the keypoints' order
  */
-export function together(parts: DatasetStats[], trainSize: number, labels: string[] | null = null): DatasetStats {
+export function together(parts: DatasetStats[], trainSize: number, labels: string[] | null = null, keypoints: KeypointSchema | null = null): DatasetStats {
   const images = { total: 0, labelled: 0, empty: 0, never: 0, verified: 0, broken: 0, unreadable: 0, aiPending: 0 }
   const perLabel = new Map<string, LabelStats>()
   const perImage = new Map<number, number>()
   const sizes: DatasetStats['sizes'] = { trainSize, full: { small: 0, medium: 0, large: 0 }, train: { small: 0, medium: 0, large: 0 }, unsized: 0 }
   const imageSizes = new Map<string, { width: number; height: number; images: number }>()
   const used = new Set<ShapeType>()
+  // A slice lists only the classes it has poses of
+  const posed = new Map<string, KeypointStats>(Object.entries(keypoints?.classes ?? {}).map(([cls, names]) =>
+    [cls, { cls, poses: 0, keypoints: names.map((name) => ({ name, seen: 0, hidden: 0, missing: 0 })) }]))
   for (const p of parts) {
     for (const k of Object.keys(images) as (keyof typeof images)[]) images[k] += p.images[k]
     for (const l of p.labels) {
@@ -580,6 +601,16 @@ export function together(parts: DatasetStats[], trainSize: number, labels: strin
       else imageSizes.set(key, { ...s })
     }
     p.types.forEach((t) => used.add(t))
+    for (const k of p.keypoints) {
+      const row = posed.get(k.cls)
+      if (!row) continue
+      row.poses += k.poses
+      k.keypoints.forEach((n, i) => {
+        row.keypoints[i].seen += n.seen
+        row.keypoints[i].hidden += n.hidden
+        row.keypoints[i].missing += n.missing
+      })
+    }
   }
   const rows = [...perLabel.values()].sort((a, b) => b.objects - a.objects || a.label.localeCompare(b.label))
   for (const label of labels ?? []) if (!perLabel.has(label)) rows.push({ label, objects: 0, images: 0, types: {} })
@@ -589,31 +620,33 @@ export function together(parts: DatasetStats[], trainSize: number, labels: strin
     objectsPerImage: [...perImage].sort((a, b) => a[0] - b[0]).map(([objects, n]) => ({ objects, images: n })),
     sizes,
     imageSizes: [...imageSizes.values()].sort((a, b) => b.images - a.images || a.width - b.width || a.height - b.height),
-    types: SHAPE_TYPES.filter((t) => used.has(t))
+    types: SHAPE_TYPES.filter((t) => used.has(t)),
+    keypoints: [...posed.values()].filter((k) => k.poses > 0)
   }
 }
 
 /**
  * Dataset > Statistics: the folder read as the window's save format reads it (or what was
  * read last, when only the training size changed), counted in slices with a turn for the
- * window between them. Kept for Save as CSV.
+ * window between them, its poses' keypoints with the folder's keypoints. Kept for Save as CSV.
  */
 export async function folderStats(root: string, { prefer, labels, trainSize, again }: StatsRequest, send: (p: Progress) => void): Promise<StatsView | Stopped> {
   const signal = begin(root, 'stats')
   const report = reporter(send)
   const size = Number.isFinite(trainSize) && trainSize >= 1 ? Math.round(trainSize) : 640
   try {
+    const { schema: keypoints } = await folderKeypoints(root)
     const images = (!again && counted.get(root)?.images) ||
       await readDataset(root, { prefer, signal, onProgress: (done, total) => report({ phase: 'read', done, total }) })
     const parts: DatasetStats[] = []
     for (let at = 0; at < images.length; at += SLICE) {
       signal.throwIfAborted()
-      parts.push(datasetStats(images.slice(at, at + SLICE), { trainSize: size }))
+      parts.push(datasetStats(images.slice(at, at + SLICE), { trainSize: size, keypoints }))
       report({ phase: 'count', done: Math.min(at + SLICE, images.length), total: images.length })
       await turn()
     }
     signal.throwIfAborted()
-    const stats = together(parts, size, labels)
+    const stats = together(parts, size, labels, keypoints)
     counted.set(root, { images, stats })
     return { ...stats, imageSizes: stats.imageSizes.slice(0, 10), moreSizes: Math.max(0, stats.imageSizes.length - 10) }
   } catch (e) {
@@ -624,7 +657,7 @@ export async function folderStats(root: string, { prefer, labels, trainSize, aga
   }
 }
 
-/** The last statistics' per-label table as CSV; null when the folder hasn't been counted */
+/** The last statistics' per-label and per-keypoint tables as CSV; null when the folder hasn't been counted */
 export function statsText(root: string): string | null {
   const c = counted.get(root)
   return c ? statsCsv(c.stats) : null

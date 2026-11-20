@@ -1,12 +1,14 @@
 // Counts over a folder's labels for the Dataset window's Statistics tab: images by status,
 // objects per label, grouped as the exports group them, and shapes per label by type, objects per
-// image, object sizes as COCO ranges them at full size and at the training size, and image sizes.
+// image, object sizes as COCO ranges them at full size and at the training size, image sizes, and
+// each keypoint of a posed class seen, hidden or not labelled.
 // AI proposals aren't objects until they're accepted, as summarize() in labels.ts counts them.
 import { shapeArea } from './checks'
-import type { DatasetImage } from './dataset'
+import type { DatasetImage, KeypointSchema } from './dataset'
 import { isAi, SHAPE_TYPES, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
 import { rleArea, rleFrMaskBits, rleFrPoly, rleMerge } from './rle'
+import { isHidden, posesIn } from './skeleton'
 
 export type SizeCounts = { small: number; medium: number; large: number }
 export type LabelStats = {
@@ -18,6 +20,9 @@ export type LabelStats = {
   /** Accepted shapes with the label by shape type, a pose's keypoints too */
   types: Partial<Record<ShapeType, number>>
 }
+
+/** A class's poses, as posesIn finds them in accepted shapes, and each of its keypoints in them: seen, hidden, or not labelled */
+export type KeypointStats = { cls: string; poses: number; keypoints: { name: string; seen: number; hidden: number; missing: number }[] }
 
 export type DatasetStats = {
   images: {
@@ -51,6 +56,8 @@ export type DatasetStats = {
   imageSizes: { width: number; height: number; images: number }[]
   /** The shape types accepted shapes have, in labelme's order: the per-label table's columns */
   types: ShapeType[]
+  /** Each class of the keypoints that has poses, in the keypoints' order */
+  keypoints: KeypointStats[]
 }
 
 // COCO's ranges, as pycocotools 2.0.11's COCOeval sets them (cocoeval.py:509): small below 32²
@@ -110,15 +117,18 @@ function objectArea(image: DatasetImage, shapes: number[]): number | null {
  * A folder's statistics. Training scales an image so its longer side is `trainSize`, as
  * Ultralytics 8.4.211's BaseDataset.load_image does (data/base.py:355): a 10 px object in a
  * 6000 px image shrinks to about 1 px at 640. `labels` adds the label list's labels that no
- * shape uses, with 0.
+ * shape uses, with 0. `keypoints`, the folder's, finds the poses whose keypoints are counted.
  */
-export function datasetStats(images: DatasetImage[], { trainSize = 640, labels = null }: { trainSize?: number; labels?: string[] | null } = {}): DatasetStats {
+export function datasetStats(images: DatasetImage[], { trainSize = 640, labels = null, keypoints = null }:
+  { trainSize?: number; labels?: string[] | null; keypoints?: KeypointSchema | null } = {}): DatasetStats {
   const status = { total: images.length, labelled: 0, empty: 0, never: 0, verified: 0, broken: 0, unreadable: 0, aiPending: 0 }
   const perLabel = new Map<string, LabelStats>()
   const perImage = new Map<number, number>()
   const sizes: DatasetStats['sizes'] = { trainSize, full: { small: 0, medium: 0, large: 0 }, train: { small: 0, medium: 0, large: 0 }, unsized: 0 }
   const imageSizes = new Map<string, { width: number; height: number; images: number }>()
   const used = new Set<ShapeType>()
+  const posed = new Map<string, KeypointStats>(Object.entries(keypoints?.classes ?? {}).map(([cls, names]) =>
+    [cls, { cls, poses: 0, keypoints: names.map((name) => ({ name, seen: 0, hidden: 0, missing: 0 })) }]))
   const rowOf = (label: string) => {
     let row = perLabel.get(label)
     if (!row) perLabel.set(label, (row = { label, objects: 0, images: 0, types: {} }))
@@ -154,6 +164,18 @@ export function datasetStats(images: DatasetImage[], { trainSize = 640, labels =
       seen.add(s.label)
       used.add(s.shape_type)
     }
+    if (keypoints) {
+      for (const pose of posesIn(accepted, keypoints)) {
+        const row = posed.get(pose.cls)!
+        row.poses++
+        pose.points.forEach((k, i) => {
+          const counts = row.keypoints[i]
+          if (k === null) counts.missing++
+          else if (isHidden(accepted[k])) counts.hidden++
+          else counts.seen++
+        })
+      }
+    }
     const objects = objectsOf(image)
     perImage.set(objects.length, (perImage.get(objects.length) ?? 0) + 1)
     const scale = sized ? trainSize / Math.max(image.width, image.height) : 0
@@ -176,7 +198,8 @@ export function datasetStats(images: DatasetImage[], { trainSize = 640, labels =
     objectsPerImage: [...perImage].sort((a, b) => a[0] - b[0]).map(([objects, count]) => ({ objects, images: count })),
     sizes,
     imageSizes: [...imageSizes.values()].sort((a, b) => b.images - a.images || a.width - b.width || a.height - b.height),
-    types: SHAPE_TYPES.filter((t) => used.has(t))
+    types: SHAPE_TYPES.filter((t) => used.has(t)),
+    keypoints: [...posed.values()].filter((k) => k.poses > 0)
   }
 }
 
@@ -193,14 +216,20 @@ function cell(value: string | number) {
 }
 
 /**
- * The per-label table as CSV: label, objects and images, then shapes of each shape type used.
- * It starts with a byte order mark, without which Excel reads the file in the system's own code
- * page, so a label such as 고양이 or café comes out garbled.
+ * The per-label table as CSV: label, objects and images, then shapes of each shape type used;
+ * with poses, a blank line and the per-keypoint table: class, keypoint, and how many of the
+ * class's poses have it seen, hidden or not labelled. It starts with a byte order mark, without
+ * which Excel reads the file in the system's own code page, so a label such as 고양이 or café
+ * comes out garbled.
  */
 export function statsCsv(stats: DatasetStats): string {
   const rows = [
     ['label', 'objects', 'images', ...stats.types],
     ...stats.labels.map((l) => [l.label, l.objects, l.images, ...stats.types.map((t) => l.types[t] ?? 0)])
   ]
+  if (stats.keypoints.length) {
+    rows.push([], ['class', 'keypoint', 'seen', 'hidden', 'not_labelled'])
+    for (const k of stats.keypoints) for (const n of k.keypoints) rows.push([k.cls, n.name, n.seen, n.hidden, n.missing])
+  }
   return '\ufeff' + rows.map((row) => row.map(cell).join(',')).join('\r\n') + '\r\n'
 }
