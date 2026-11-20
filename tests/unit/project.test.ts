@@ -433,6 +433,22 @@ describe('another app, such as Seamline, changing label files while the folder i
     expect(await told()).toEqual([])
   })
 
+  test("keypoint names aren't classes: left out of an image's classes and the label list, and counted again when they change", async () => {
+    const dir = folder({})
+    await openProject(dir, null)
+    const pose = [{ ...box('person'), group_id: 1 }, newShape('nose', 'point', [[20, 15]], { group_id: 1 }), newShape('left_eye', 'point', [[22, 14]], { group_id: 1 })]
+    await saveLabels(dir, 'a.png', request(pose))
+    const told = async (keypoints?: Set<string>) => {
+      const sent: { items: ImageItem[]; labels: string[] }[] = []
+      await summarizeAll(dir, (b) => sent.push(b), 'labelme', false, undefined, keypoints)
+      return { classes: sent.flatMap((b) => b.items.map((i) => i.classes)), labels: sent.flatMap((b) => b.labels).sort() }
+    }
+    expect(await told()).toEqual({ classes: [{ person: 1, nose: 1, left_eye: 1 }], labels: ['left_eye', 'nose', 'person'] })
+    expect(await told(new Set(['nose', 'left_eye']))).toEqual({ classes: [{ person: 1 }], labels: ['person'] })
+    // The summary kept for the image was made with other names, so it's made again
+    expect(await told(new Set(['nose']))).toEqual({ classes: [{ person: 1, left_eye: 1 }], labels: ['left_eye', 'person'] })
+  })
+
   test("a refresh looks only at label files the folders list, and at each folder's classes.txt once", async () => {
     const images = Array.from({ length: 40 }, (_, i) => `${i % 2 ? 'sub/' : ''}img_${i}.png`)
     const dir = folder({ 'img_0.json': LABELME, 'sub/img_1.txt': '0 0.5 0.5 0.2 0.2\n', 'sub/classes.txt': 'dog\n' }, images)

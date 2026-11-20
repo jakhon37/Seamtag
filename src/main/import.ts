@@ -22,6 +22,11 @@ import {
   type Found, findLabels, folderOf, inTurn, labelPath, readLabels, renameRetrying, type Saved, saveLabels, type SaveRequest, sendToTrash, serial, summarizeAll
 } from './project'
 import { readYoloDataset, type YoloDataset } from './ultralytics'
+import { folderKeypoints } from './keypoints'
+import { keypointNames } from '../shared/skeleton'
+
+/** The names of the folder's keypoints, which the image and label lists don't count as classes */
+const folderKeypointNames = async (root: string) => keypointNames((await folderKeypoints(root)).schema)
 
 /** What to import: a COCO file, or a YOLO dataset's data.yaml or folder */
 export type ImportRequest = {
@@ -1132,7 +1137,7 @@ export async function writeImport(policy: ImportPolicy, progress: (p: ImportProg
     }
   }
   // The image list and the label list count the images whose label files changed again
-  if (names.length) await summarizeAll(s.root, summaries, s.prefer, false, names).catch(() => {})
+  if (names.length) await summarizeAll(s.root, summaries, s.prefer, false, names, await folderKeypointNames(s.root)).catch(() => {})
   return {
     stopped: signal.aborted, total, done, written, shapes, repeated, trashed,
     labels: [...labels].map(([label, n]) => ({ label, shapes: n, listed: s.listed.has(label) })).sort((a, b) => b.shapes - a.shapes || a.label.localeCompare(b.label)),

@@ -727,8 +727,11 @@ function listings() {
 // `only` names the images to count again, after their label files were written outside the window
 export async function summarizeAll(
   dir: string, send: (batch: { root: string; items: ImageItem[]; labels: string[] }) => void, prefer: LabelFormat = 'labelme', changedOnly = false,
-  only?: string[]
+  only?: string[], keypoints: ReadonlySet<string> = new Set()
 ) {
+  // Keypoint names (the folder's keypoints file's) aren't classes: left out of each image's classes and the label list.
+  // A summary made with other names is made again.
+  const keypointsKey = [...keypoints].sort().join('\n')
   const r = getRoot(dir)
   const names = only ? only.filter((n) => r.images.has(n)) : [...r.images.keys()]
   let batch: ImageItem[] = []
@@ -758,7 +761,7 @@ export async function summarizeAll(
     const stat = found && await fs.stat(found.file).catch(() => null)
     // YOLO's names come from classes.txt, so a change there counts too
     const classes = found?.format === 'yolo' ? await classesStamp(yoloClasses(found.file)) : ''
-    const key = found && stat ? `${found.format}:${stat.size}:${stat.mtimeMs}:${classes}` : 'none'
+    const key = found && stat ? `${found.format}:${stat.size}:${stat.mtimeMs}:${classes}\0${keypointsKey}` : 'none'
     // By image too: one CreateML file can hold every image's labels
     const id = `${found?.file ?? ''}\0${name}`
     let cached = summaryCache.get(id)
@@ -768,8 +771,8 @@ export async function summarizeAll(
       if (found && stat) {
         try {
           const read = await readLabels(dir, name, found, anySize)
-          item = { ...summarize(read?.doc.shapes ?? [], !!read), verified: read?.verified || undefined }
-          labels = (read?.doc.shapes ?? []).map((s) => s.label)
+          item = { ...summarize(read?.doc.shapes ?? [], !!read, keypoints), verified: read?.verified || undefined }
+          labels = (read?.doc.shapes ?? []).map((s) => s.label).filter((l) => !keypoints.has(l))
         } catch (e: any) {
           item = { ...EMPTY_SUMMARY, labelled: true, broken: e.message }
         }

@@ -28,9 +28,12 @@ import { runModels } from './runs'
 import { folderKeypoints, saveFolderKeypoints } from './keypoints'
 import { poseInBoxes } from './rtmpose'
 import type { KeypointSchema } from '../shared/dataset'
-import { type PoseRequest, withKnownLines } from '../shared/skeleton'
+import { keypointNames, type PoseRequest, withKnownLines } from '../shared/skeleton'
 
 const NAME = 'Seamtag'
+
+/** The names of the folder's keypoints, which the image and label lists don't count as classes */
+const folderKeypointNames = async (root: string) => keypointNames((await folderKeypoints(root)).schema)
 app.setName(NAME)
 // macOS and Windows put the profile where the system says, whatever HOME is, so tests name their own
 if (process.env.SEAMTAG_USER_DATA) app.setPath('userData', process.env.SEAMTAG_USER_DATA)
@@ -161,9 +164,9 @@ async function open(target: string, output: string | null, started?: boolean, ag
   addRecent(project.remembered, project.remembered !== target || (on && project.select === on) ? project.select : null)
   win?.setTitle(`${path.basename(project.root)} - ${NAME}`)
   // Counts and broken files arrive after the list, so a big folder opens at once
-  summarizeAll(project.root, (batch) => send('project:summaries', batch), loaded?.config.label_format).catch((e) =>
-    send('app:error', `Some label files couldn't be read: ${e.message}`)
-  )
+  folderKeypointNames(project.root)
+    .then((keypoints) => summarizeAll(project.root, (batch) => send('project:summaries', batch), loaded?.config.label_format, false, undefined, keypoints))
+    .catch((e) => send('app:error', `Some label files couldn't be read: ${e.message}`))
   return project
 }
 
@@ -210,8 +213,8 @@ function registerIpc() {
   ipcMain.handle('project:reload', (_e, root: string) => reloadProjectFile(root))
   // Another app, such as Seamline, may have changed the folder while the window was in the background
   ipcMain.handle('project:refresh', (_e, root: string) => refreshProject(root))
-  ipcMain.handle('project:summarize', (_e, root: string) =>
-    summarizeAll(root, (batch) => send('project:summaries', batch), loaded?.config.label_format, true))
+  ipcMain.handle('project:summarize', async (_e, root: string) =>
+    summarizeAll(root, (batch) => send('project:summaries', batch), loaded?.config.label_format, true, undefined, await folderKeypointNames(root)))
   ipcMain.handle('image:open', (_e, root: string, name: string) => openImage(root, name))
   // YOLO's boxes are shares of the image, so reading them needs its size: the window's, or the file's
   const sizeOf = (root: string, name: string, size?: [number, number]) => async () => size ?? imageSize(root, name)
@@ -302,7 +305,7 @@ function registerIpc() {
     // The image list counts the changed images again, read as they were renamed, and takes in the new label; the rename stands either way.
     // A folder closed meanwhile has no image list to count them in.
     if (done.changed.length && rootsOpen().includes(root)) {
-      await summarizeAll(root, (b) => send('project:summaries', b), prefer, false, done.changed).catch((e) =>
+      await summarizeAll(root, (b) => send('project:summaries', b), prefer, false, done.changed, await folderKeypointNames(root)).catch((e) =>
         send('app:error', `Some renamed label files couldn't be counted again: ${e.message}`))
     }
     return done
@@ -378,19 +381,24 @@ function registerIpc() {
     if (k.file) keypointFiles.add(k.file)
     return k
   }
+  // A new keypoints file changes which labels are classes, so the image and label lists are counted again
+  const recount = <T extends { schema: KeypointSchema; file: string | null }>(root: string, k: T) => {
+    summarizeAll(root, (batch) => send('project:summaries', batch), loaded?.config.label_format, false, undefined, keypointNames(k.schema)).catch(() => {})
+    return trustKeypoints(k)
+  }
   ipcMain.handle('keypoints:get', async (_e, root: string) => trustKeypoints(await folderKeypoints(openRoot(root))))
-  ipcMain.handle('keypoints:set', async (_e, root: string, schema: KeypointSchema) => trustKeypoints(await saveFolderKeypoints(openRoot(root), schema)))
+  ipcMain.handle('keypoints:set', async (_e, root: string, schema: KeypointSchema) => recount(root, await saveFolderKeypoints(openRoot(root), schema)))
   ipcMain.handle('keypoints:choose', async (_e, root: string) => {
     openRoot(root)
     const r = await dialog.showOpenDialog(win!, { title: 'Choose a keypoints file for this folder', properties: ['openFile'], filters: keypointsFilter })
     if (r.canceled || !r.filePaths[0]) return null
     const { schema } = await readKeypoints(r.filePaths[0])
-    return trustKeypoints(await saveFolderKeypoints(root, schema))
+    return recount(root, await saveFolderKeypoints(root, schema))
   })
   ipcMain.handle('keypoints:make', async (_e, root: string, prefer: LabelFormat) => {
     const schema = await keypointsFromFolder(openRoot(root), prefer)
     if (!schema) throw new Error('The folder has no posed objects to make a keypoints file from: give a box and its points one group_id')
-    return trustKeypoints(await saveFolderKeypoints(root, withKnownLines(schema)))
+    return recount(root, await saveFolderKeypoints(root, withKnownLines(schema)))
   })
   ipcMain.handle('export:run', (_e, root: string, options: ExportOptions, out: string) => job((async () => {
     const result = await runExport(root, exportOptions(options), out, exportJob())
