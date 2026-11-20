@@ -452,6 +452,20 @@ describe("the folder's keypoints", () => {
     expect(await fixShapes(root, { code: 'keypoint-repeated', image: 'a.png', shape: 3 }, [...shapes.slice(0, 3), { ...shapes[3], group_id: 2 }])).toBeNull()
   })
 
+  test("statistics count each keypoint over the folder's poses with its keypoints file, and the CSV holds them", async () => {
+    const root = await posedFolder()
+    write(root, { 'b.json': labelme('b.png', [box('person', 1, 1, 20, 20, { group_id: 4 }), shape('tail', 'point', [[5, 5]], { group_id: 4, flags: { difficult: true } })]) })
+    mkdirSync(path.join(root, '.myseg'), { recursive: true })
+    writeFileSync(path.join(root, '.myseg', 'keypoints.yaml'), 'classes:\n  person: [nose, tail, paw]\n  dog: [paw]\n')
+    const view = await folderStats(root, { prefer: 'labelme', labels: null, trainSize: 640, again: true }, () => {})
+    if ('stopped' in view) throw new Error('stopped')
+    // The second nose is a problem, not a nose seen twice
+    expect(view.keypoints).toEqual([{
+      cls: 'person', poses: 2, keypoints: [{ name: 'nose', seen: 1, hidden: 0, missing: 1 }, { name: 'tail', seen: 1, hidden: 1, missing: 0 }, { name: 'paw', seen: 0, hidden: 0, missing: 2 }]
+    }])
+    expect(statsText(root)!.split('\r\n\r\n')[1]).toBe('class,keypoint,seen,hidden,not_labelled\r\nperson,nose,1,0,1\r\nperson,tail,1,1,0\r\nperson,paw,0,0,2\r\n')
+  })
+
   test("with only listed labels allowed, a rename may still give a keypoint's name", async () => {
     const root = await posedFolder()
     write(root, { 'b.json': labelme('b.png', [shape('Nose', 'point', [[5, 5]])]) })
@@ -683,14 +697,20 @@ describe('statistics', () => {
       masks: (shapes ?? []).map(() => null), flags: {}, verified: false, ...extra
     })
     const rect = (label: string, x1: number, extra: Partial<Shape> = {}) => newShape(label, 'rectangle', [[0, 0], [x1, x1]], extra)
+    const point = (label: string, group: number, extra: Partial<Shape> = {}) => newShape(label, 'point', [[9, 9]], { group_id: group, ...extra })
     const images = Array.from({ length: 23 }, (_, k) => image(`${k}`, k % 7 === 0 ? null : k % 5 === 0 ? [] : [
-      rect(['car', 'bus', 'person'][k % 3], 5 + k * 4), newShape('nose', 'point', [[1, 1]]), rect('car', 90, k % 4 ? {} : { flags: { ai: true } })
+      rect(['car', 'bus', 'person'][k % 3], 5 + k * 4), newShape('nose', 'point', [[1, 1]]), rect('car', 90, k % 4 ? {} : { flags: { ai: true } }),
+      // Every other image a pose, some of its keypoints hidden; a dog's in some
+      ...(k % 2 ? [rect('person', 50, { group_id: 1 }), point('nose', 1), point('left_eye', 1, k % 3 ? {} : { flags: { difficult: true } })] : []),
+      ...(k % 4 === 3 ? [rect('dog', 60, { group_id: 2 }), point('paw', 2)] : [])
     ], { width: 400 + (k % 3) * 100, verified: k % 6 === 0, ...(k === 9 ? { broken: 'bad' } : {}), ...(k === 11 ? { unreadable: 'gone', width: 0, height: 0 } : {}) }))
     const labels = ['car', 'van']
-    const whole = datasetStats(images, { trainSize: 512, labels })
+    const keypoints: KeypointSchema = { classes: { ...builtInKeypoints().classes, cat: ['whisker'], dog: ['paw', 'tail'] } }
+    const whole = datasetStats(images, { trainSize: 512, labels, keypoints })
+    expect(whole.keypoints.map((k) => [k.cls, k.poses])).toEqual([['person', 6], ['dog', 3]])
     for (const size of [1, 4, 10, 23]) {
-      const parts = Array.from({ length: Math.ceil(images.length / size) }, (_, k) => datasetStats(images.slice(k * size, (k + 1) * size), { trainSize: 512 }))
-      expect(together(parts, 512, labels)).toEqual(whole)
+      const parts = Array.from({ length: Math.ceil(images.length / size) }, (_, k) => datasetStats(images.slice(k * size, (k + 1) * size), { trainSize: 512, keypoints }))
+      expect(together(parts, 512, labels, keypoints)).toEqual(whole)
     }
   })
 })

@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest'
-import type { DatasetImage, MaskBits } from '../../src/shared/dataset'
+import type { DatasetImage, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
 import { datasetStats, statsCsv } from '../../src/shared/stats'
 
@@ -130,6 +130,29 @@ test('a polygon with a hole is measured without the hole, whichever way round th
   expect(datasetStats(images).sizes.full).toEqual({ small: 2, medium: 0, large: 0 })
 })
 
+test('each keypoint of a posed class is counted over its poses, seen, hidden or not labelled; proposals count once accepted', () => {
+  const keypoints: KeypointSchema = { classes: { person: ['nose', 'left_eye', 'right_eye'], hand: ['wrist', 'thumb'] } }
+  const point = (label: string, group: number | null, extra: Partial<Shape> = {}) => newShape(label, 'point', [[5, 5]], { group_id: group, ...extra })
+  const images = [
+    image('a', [
+      // Every keypoint labelled, two of them hidden, as X-AnyLabeling marks it and as labelme's occluded does
+      box('person', 0, 0, 50, 90, { group_id: 1 }), point('nose', 1), point('left_eye', 1, { flags: { difficult: true } }), point('right_eye', 1, { flags: { occluded: true } }),
+      // A nose alone, and a person proposed by AI
+      box('person', 60, 0, 110, 90, { group_id: 2 }), point('nose', 2),
+      box('person', 120, 0, 170, 90, { group_id: 3, ...ai }), point('nose', 3, ai), point('left_eye', 3, ai)
+    ]),
+    // Keypoints with no box are a pose all the same, as the exports take them; one of no group is in none
+    image('b', [point('nose', 4), point('left_eye', 4), point('nose', null)]),
+    image('c', null)
+  ]
+  expect(datasetStats(images, { keypoints }).keypoints).toEqual([{
+    cls: 'person', poses: 3,
+    keypoints: [{ name: 'nose', seen: 3, hidden: 0, missing: 0 }, { name: 'left_eye', seen: 1, hidden: 1, missing: 1 }, { name: 'right_eye', seen: 0, hidden: 1, missing: 2 }]
+  }])
+  // With no keypoints, there are no poses to count
+  expect(datasetStats(images).keypoints).toEqual([])
+})
+
 test('image sizes are listed with how many images have each, the most common first', () => {
   expect(datasetStats(FOLDER).imageSizes).toEqual([{ width: 400, height: 300, images: 6 }, { width: 6000, height: 4000, images: 1 }])
 })
@@ -138,6 +161,13 @@ test('the per-label table saves as CSV, quoting what needs it', () => {
   expect(statsCsv(datasetStats(FOLDER))).toBe('\ufefflabel,objects,images,polygon,rectangle,point\r\ncar,4,3,0,4,0\r\nnose,1,1,0,0,1\r\nperson,1,1,1,0,0\r\n')
   const odd = datasetStats([image('a', [box('a, "b"', 0, 0, 5, 5), box('a, "b"', 9, 0, 15, 5), box(' c', 0, 0, 5, 5)])])
   expect(statsCsv(odd)).toBe('\ufefflabel,objects,images,rectangle\r\n"a, ""b""",2,1,2\r\n" c",1,1,1\r\n')
+})
+
+test("with poses, the keypoints table follows the labels table in the CSV, after a blank line", () => {
+  const pose = [box('person', 0, 0, 50, 90, { group_id: 1 }), newShape('nose', 'point', [[5, 5]], { group_id: 1 })]
+  const stats = datasetStats([image('a', pose)], { keypoints: { classes: { person: ['nose', 'tail'] } } })
+  expect(statsCsv(stats)).toBe('﻿label,objects,images,rectangle,point\r\nperson,1,1,1,0\r\nnose,0,1,0,1\r\n\r\n' +
+    'class,keypoint,seen,hidden,not_labelled\r\nperson,nose,1,0,0\r\nperson,tail,0,0,1\r\n')
 })
 
 test('the CSV starts with a byte order mark, so Excel reads labels beyond ASCII as UTF-8', () => {
