@@ -363,6 +363,18 @@ the use of this software, even if advised of the possibility of such damage.
    limitations under the License.
 ```
 
+### rtmlib and MMPose (Apache-2.0)
+
+`src/main/rtmpose.ts`: finding a person's keypoints in a box with RTMPose, translated into TypeScript from rtmlib (<https://github.com/Tau-J/rtmlib>, at commit 5ea82df) and MMPose (<https://github.com/open-mmlab/mmpose>, at commit 759b39c). From rtmlib's `rtmlib/tools/pose_estimation/rtmpose.py` and `pre_processings.py`: the box's centre and scale, the warp of its part of the image to the model's input, and the keypoints read from the model's SimCC outputs and mapped back to the image. From MMPose's `mmpose/codecs/utils/post_processing.py` and `mmpose/models/pose_estimators/topdown.py`: each keypoint's score, the lower of its two maxima, and the same mapping back. Both are under the Apache License 2.0, whose text is given above under OpenCV, with these notices: MMPose's LICENSE, and the notice in the appendix of rtmlib's.
+
+```text
+Copyright 2018-2020 Open-MMLab. All rights reserved.
+```
+
+```text
+Copyright 2018-2020 Open-MMLab.
+```
+
 ### Pillow (MIT-CMU)
 
 `src/main/resize.ts`: the bilinear resize of the images AI models are given, translated from Pillow's `src/libImaging/Resample.c` (<https://github.com/python-pillow/Pillow>).
@@ -444,6 +456,8 @@ The video at the top of the README and its screenshots show four photos from Wik
 ## AI models
 
 The AI models aren't part of Seamtag. Each is downloaded when you ask for it, under its own licence, which AI → AI models shows: EfficientSAM and SAM2 are under the Apache License 2.0, YOLO-World under the GNU GPL v3.0.
+
+RTMPose-m and RTMPose-l, which find people's keypoints, are OpenMMLab's, downloaded from <https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/> (or rtmlib's copy at <https://huggingface.co/Tau-J/RTMPose> when that doesn't answer) as zips, of which Seamtag keeps the ONNX file. Their weights carry no licence of their own: they're published with MMPose, under the Apache License 2.0 (<https://github.com/open-mmlab/mmpose/blob/759b39c13fea6ba094afc1fa932f51dc1b11cbf9/LICENSE>). They were trained on a mix of public pose datasets (Body7), whose own terms vary.
 
 ## Installers and source
 
