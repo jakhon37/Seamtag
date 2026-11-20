@@ -7,7 +7,7 @@ import type { KeypointSchema } from '../../shared/dataset'
 import { asBox, boxOf } from '../../shared/formats'
 import { accepted, isAi, newShape, scoreOf, type Shape } from '../../shared/labelfile'
 import { CLOSED_TYPES } from '../../shared/outline'
-import { nextGroupId, type PoseGroup, type PosePoint, poseShapes, posesIn } from '../../shared/skeleton'
+import { nextGroupId, type PoseGroup, type PosePoint, poseShapes, posesIn, type Side } from '../../shared/skeleton'
 
 /** A keypoint's name as the window says it: left shoulder for left_shoulder */
 export const spoken = (name: string) => name.replace(/_/g, ' ')
@@ -333,3 +333,19 @@ export function layoutOf(shapes: Shape[], pose: PoseGroup): PoseLayout | null {
 /** A layout scaled into a box, x0, y0, x1, y1 */
 export const placeLayout = (layout: PoseLayout, [x0, y0, x1, y1]: number[]) =>
   layout.at.map((p) => (p ? [x0 + p[0] * (x1 - x0), y0 + p[1] * (y1 - y0)] : null))
+
+/**
+ * The guide for a pose being placed: the last pose's layout in its box, or that mirrored left to
+ * right inside the box, keeping its names, whichever lies closer to the points placed so far, as
+ * for someone facing the other way. Until two points of a side, left or right, are placed, it's
+ * as it is. `placed` are the pose's points by keypoint, null where there's none yet.
+ */
+export function guideIn(layout: PoseLayout, box: number[], placed: (number[] | null)[], sides: Side[]): (number[] | null)[] {
+  const plain = placeLayout(layout, box)
+  if (placed.filter((p, k) => p && plain[k] && sides[k] !== 'centre').length < 2) return plain
+  const axis = Math.min(box[0], box[2]) + Math.max(box[0], box[2])
+  const mirrored = plain.map((p) => (p ? [axis - p[0], p[1]] : null))
+  const apart = (guide: (number[] | null)[]) =>
+    placed.reduce((sum, p, k) => (p && guide[k] ? sum + Math.hypot(p[0] - guide[k]![0], p[1] - guide[k]![1]) : sum), 0)
+  return apart(mirrored) < apart(plain) ? mirrored : plain
+}

@@ -354,6 +354,8 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .stats-table { overflow-x: auto; max-height: min(300px, 30vh); overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; flex: none; }
 /* On a shorter window a long table gives way first, down to three rows, so the window itself needn't scroll as well */
 .stats-table:has(tbody > tr:nth-child(4)) { flex: 0 1 auto; min-height: 117px; }
+/* The keypoints table doesn't give way: three rows of a class's keypoints say little, so the window scrolls instead */
+.stats-table:has(.stats-keypoints):has(tbody > tr:nth-child(4)) { flex: none; max-height: min(300px, 40vh); }
 .stats-table .problems-more { margin: 6px 8px; }
 .stats-labels, .stats-sizes { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
 .stats-labels th, .stats-sizes th { background: var(--panel); color: var(--muted); font-weight: 500; text-align: right; padding: 0; white-space: nowrap; }
@@ -531,5 +533,13 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .pose-row i, .pose-missing i { width: 10px; height: 10px; border-radius: 3px; flex: none; display: inline-block; }
 .pose-missing i { border-radius: 50%; border: 1.5px dashed; box-sizing: border-box; }
 .pose-row.off .name { color: var(--muted); text-decoration: line-through; }
+/* The class and group give way to a narrow column, never the count of keypoints after them. The row's
+   gaps are a little tighter than a shape's, as it holds more: with an AI tag, "person (19) · 13/17" is
+   whole in the dock's usual width; the chevron's own margin keeps it apart from the box */
+.pose-row { gap: 6px; }
+.pose-row .fold { margin-right: -6px; }
+.pose-row .name { flex: 0 1 auto; }
+.pose-row .pose-count { flex: none; margin-left: -4px; white-space: nowrap; }
+.pose-row .tag { flex: none; margin-left: auto; }
 .shape.in-pose { padding-left: 26px; }
 .pose-missing { padding-left: 47px; color: var(--muted); }

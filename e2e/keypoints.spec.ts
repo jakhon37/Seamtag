@@ -447,7 +447,35 @@ test("Pascal VOC and YOLO keep a pose's box: its points are left out, said, and 
   await finish(app, errors)
 })
 
-test('a pose being placed keeps its group_id: paste ends it first, and redo waits', async () => {
+test("a selected pose's keypoints win a drag over its outline's points; Q on a whole pose takes the keypoint under the pointer only", async () => {
+  // A person drawn as a polygon, one of its corners 3 px from the left shoulder
+  const outline = shape('person', 'polygon', [[100, 50], [200, 50], [200, 250], [100, 250], [100, 150], [128, 112]], 1)
+  const dir = await project('kp-grab', { g: doc('g', [outline, ...person(1).slice(1)]) })
+  const { app, page, errors } = await launch(dir)
+  await open(page, 'g.png')
+  await page.keyboard.press('v')
+  await click(page, 180, 230)
+  await expect(page.locator('.pose-row.on')).toContainText('person (1) · 4/17')
+  await drag(page, [130, 110], [145, 125])
+  await saved(page)
+  let shapes = shapesIn(dir, 'g')
+  expect(near(at(shapes, 'left_shoulder').points[0], [145, 125])).toBe(true)
+  expect(shapes[0].points).toEqual(outline.points)
+  await expect(page.locator('.pose-row.on')).toContainText('person (1) · 4/17')
+  // Q with the whole pose selected and no keypoint under the pointer: nothing changes, and it says why
+  await page.mouse.move(...(await onImage(page, 180, 200)))
+  await page.keyboard.press('q')
+  await expect(page.locator('.loading.notice')).toHaveText('Point at a keypoint to hide or show it.')
+  await page.waitForTimeout(300)
+  expect(shapesIn(dir, 'g').some((s: any) => s.flags.difficult)).toBe(false)
+  // On a keypoint, only that one is hidden
+  await page.mouse.move(...(await onImage(page, 150, 70)))
+  await page.keyboard.press('q')
+  await expect.poll(() => shapesIn(dir, 'g').filter((s: any) => s.flags.difficult).map((s: any) => s.label)).toEqual(['nose'])
+  await finish(app, errors)
+})
+
+test('a pose being placed keeps its group_id: paste ends it first, redo waits, and Escape on a new box with nothing placed drops it', async () => {
   const dir = await project('kp-groups', { h: doc('h', person(1)) })
   const { app, page, errors } = await launch(dir)
   await open(page, 'h.png')
@@ -476,6 +504,15 @@ test('a pose being placed keeps its group_id: paste ends it first, and redo wait
   await expect(step(page)).toHaveCount(0)
   await saved(page)
   expect(shapesIn(dir, 'h').map((s: any) => s.group_id)).toEqual([1, 1, 1, 1, 1, 2, 2, 3, 3])
+  // Escape on a new box with no keypoint placed drops the box, as Backspace does
+  await page.keyboard.press('k')
+  await drag(page, [210, 200], [245, 290])
+  await expect(step(page)).toHaveText('1/17 nose')
+  await page.keyboard.press('Escape')
+  await expect(step(page)).toHaveCount(0)
+  await page.waitForTimeout(500)
+  await saved(page)
+  expect(shapesIn(dir, 'h')).toHaveLength(9)
   await finish(app, errors)
 })
 
@@ -518,7 +555,8 @@ test("Dataset > Keypoints: the folder's own keypoints, made from its poses, chos
     dialog.showOpenDialog = (async () => ({ canceled: false, filePaths: [file] })) as any
   }, chosen)
   await menu('Choose a keypoints file…')
-  await expect(page.locator('.loading.notice')).toContainText('Keypoints: dog, 2 points.')
+  // The cat's pose is a box and plain points now, as it says
+  await expect(page.locator('.loading.notice')).toHaveText('Keypoints: dog, 2 points. The keypoints file has no cat now: this image\'s 1 pose shows as plain points.')
   await expect(labels).toHaveText(['cat', 'head', 'left_paw', 'right_paw'])
   expect(readFileSync(path.join(dir, '.myseg/keypoints.yaml'), 'utf8')).toContain('  dog:\n    - nose\n    - tail\n')
   // And back to COCO's person

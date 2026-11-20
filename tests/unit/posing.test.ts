@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'vitest'
 import { isAi, newShape, type Shape } from '../../src/shared/labelfile'
-import { builtInKeypoints, COCO_PERSON, type PosePoint, posesIn } from '../../src/shared/skeleton'
+import { builtInKeypoints, COCO_PERSON, type PosePoint, posesIn, sidesOf } from '../../src/shared/skeleton'
 import {
-  acceptTouched, aiCounts, aiPosePoints, askedNow, classForModel, keptAsBoxes, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseSession,
+  acceptTouched, aiCounts, aiPosePoints, askedNow, classForModel, guideIn, keptAsBoxes, layoutOf, mirrorPose, placeLayout, poseIndex, type PoseSession,
   regroup, reviewItems, scoreOfPose, shapeRows, spoken, stepOf, swapSides, unposed, withHidden, withPoints, withSession
 } from '../../src/renderer/src/posing'
 
@@ -270,6 +270,27 @@ describe('Pose every person: the people still to pose', () => {
   test('once every person has keypoints, nobody', () => {
     const posed = [...shapes.slice(0, 5), point('nose', 250, 50, 1)]
     expect(unposed(posed, posesIn(posed, coco), 'person')).toEqual([])
+  })
+})
+
+describe('the guide, mirrored for someone facing the other way', () => {
+  // The last pose: its left side on the image's right, as someone facing the camera has it
+  const last = [box(1), point('left_eye', 70, 40, 1), point('right_eye', 50, 40, 1), point('left_shoulder', 90, 80, 1), point('right_shoulder', 30, 80, 1)]
+  const layout = layoutOf(last, posesIn(last, coco)[0])!
+  const sides = sidesOf(coco, 'person')
+  const into = [0, 0, 100, 200]
+  const placed = (at: Record<string, number[]>) => COCO_PERSON.map((n) => at[n] ?? null)
+  test('as it is until two points of a side are placed', () => {
+    expect(guideIn(layout, into, placed({}), sides)).toEqual(placeLayout(layout, into))
+    // The nose has no side
+    expect(guideIn(layout, into, placed({ nose: [50, 20], left_eye: [30, 16] }), sides)).toEqual(placeLayout(layout, into))
+  })
+  test('mirrored inside the box, keeping its names, when that lies closer to the points placed', () => {
+    const away = guideIn(layout, into, placed({ left_eye: [40, 16], right_eye: [60, 16] }), sides)
+    expect(away[1]).toEqual([40, 20])
+    expect(away[5]).toEqual([20, 60])
+    const facing = guideIn(layout, into, placed({ left_eye: [60, 16], right_eye: [40, 16] }), sides)
+    expect(facing).toEqual(placeLayout(layout, into))
   })
 })
 
