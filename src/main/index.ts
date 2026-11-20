@@ -28,12 +28,12 @@ import { runModels } from './runs'
 import { folderKeypoints, saveFolderKeypoints } from './keypoints'
 import { poseInBoxes } from './rtmpose'
 import type { KeypointSchema } from '../shared/dataset'
-import { keypointNames, type PoseRequest, withKnownLines } from '../shared/skeleton'
+import { keypointOnlyNames, type PoseRequest, withKnownLines } from '../shared/skeleton'
 
 const NAME = 'Seamtag'
 
 /** The names of the folder's keypoints, which the image and label lists don't count as classes */
-const folderKeypointNames = async (root: string) => keypointNames((await folderKeypoints(root)).schema)
+const folderKeypointNames = async (root: string) => keypointOnlyNames((await folderKeypoints(root)).schema)
 app.setName(NAME)
 // macOS and Windows put the profile where the system says, whatever HOME is, so tests name their own
 if (process.env.SEAMTAG_USER_DATA) app.setPath('userData', process.env.SEAMTAG_USER_DATA)
@@ -383,7 +383,7 @@ function registerIpc() {
   }
   // A new keypoints file changes which labels are classes, so the image and label lists are counted again
   const recount = <T extends { schema: KeypointSchema; file: string | null }>(root: string, k: T) => {
-    summarizeAll(root, (batch) => send('project:summaries', batch), loaded?.config.label_format, false, undefined, keypointNames(k.schema)).catch(() => {})
+    summarizeAll(root, (batch) => send('project:summaries', batch), loaded?.config.label_format, false, undefined, keypointOnlyNames(k.schema)).catch(() => {})
     return trustKeypoints(k)
   }
   ipcMain.handle('keypoints:get', async (_e, root: string) => trustKeypoints(await folderKeypoints(openRoot(root))))

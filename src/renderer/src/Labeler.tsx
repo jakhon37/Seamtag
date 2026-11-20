@@ -12,7 +12,7 @@ import {
 import { accepted, isAi, newShape, scoreOf, type Shape, type ShapeType } from '../../shared/labelfile'
 import { EMPTY_SUMMARY, summarize } from '../../shared/labels'
 import {
-  builtInKeypoints, type FolderKeypoints, isHidden, keypointNames, nextGroupId, type PoseGroup, poseShapes, posesIn, sidesOf
+  builtInKeypoints, type FolderKeypoints, isHidden, keypointOnlyNames, nextGroupId, type PoseGroup, poseShapes, posesIn, sidesOf
 } from '../../shared/skeleton'
 import { HALO, labelColor, labelList, recolored, SIDE_COLORS, withAlpha, withClass } from './colors'
 import { eraseShapes, paintShapes, strokeRegion } from './geometry'
@@ -359,11 +359,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
   const endPoseRef = useRef<() => void>(() => {})
 
   // Keypoint names name a pose's points, not classes: they stay out of the label list, its keys and counts
-  const notClasses = useMemo(() => {
-    const names = keypointNames(keypoints.schema)
-    for (const cls of Object.keys(keypoints.schema.classes)) names.delete(cls)
-    return names
-  }, [keypoints.schema])
+  const notClasses = useMemo(() => keypointOnlyNames(keypoints.schema), [keypoints.schema])
   const poses = useMemo(() => posesIn(shapes, keypoints.schema), [shapes, keypoints.schema])
   // The label list as it was when a label was last added or recoloured here, which keeps its order
   const keptLabels = useRef<string[] | null>(null)
@@ -1074,7 +1070,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     invalidate()
     const name = loadedName.current
     if (!name || readOnlyRef.current) return
-    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(next, true) } : i)))
+    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(next, true, keypointOnlyNames(opts.current.keypoints)) } : i)))
     queueSave()
   }
   /** Shapes as the save format keeps them: boxes in LabelImg's formats */
@@ -1177,7 +1173,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
         if (stale) return
         // Read again, as when a save was refused for another app's change: the lists count these labels, not the change dropped
         if (again && !broken) {
-          const item = { ...summarize(doc?.shapes ?? [], !!found?.format), broken: undefined, verified: found?.verified || undefined }
+          const item = { ...summarize(doc?.shapes ?? [], !!found?.format, keypointOnlyNames(opts.current.keypoints)), broken: undefined, verified: found?.verified || undefined }
           setImages((all) => all.map((i) => (i.name === name ? { ...i, ...item } : i)))
         }
         rememberHistory()
@@ -1349,7 +1345,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       }
       invalidate()
     }
-    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(found, true) } : i)))
+    setImages((all) => all.map((i) => (i.name === name ? { ...i, ...summarize(found, true, keypointOnlyNames(opts.current.keypoints)) } : i)))
   }), [invalidate, root, setImages, idle, reloadChanged])
   useEffect(() => {
     window.api.prelabelModels(root).then((list) => alive.current && setRunModels(list)).catch(() => alive.current && setRunModels([]))
@@ -2979,10 +2975,11 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     const removed = before.length - next.length
     // The save that follows puts its problems out of date; until then they're shown as not saved
     setShapes(next)
-    setSelected(row.code === 'duplicate-shape' || !next[row.shape] ? [] : [row.shape])
+    setSelected(row.code === 'duplicate-shape' || row.code === 'keypoint-repeated' || !next[row.shape] ? [] : [row.shape])
     const undoKeys = formatKeys(config.shortcuts.undo, mac)
     const what = row.code === 'duplicate-shape' ? `Deleted ${counted(removed, 'exact copy', 'exact copies')} of a shape.`
       : row.code === 'repeated-points' ? `Took the repeated points out of shape ${row.shape + 1}; its outline is as it was.`
+        : row.code === 'keypoint-repeated' ? `Deleted shape ${row.shape + 1}, a second ${row.label ?? 'keypoint'} in its pose; the first stays.`
         : `Clipped shape ${row.shape + 1} to the image.`
     const then = settingsRef.current.autoSave ? '' : " It's checked again once saved."
     setNotice(`${what}${undoKeys ? ` ${undoKeys} undoes it.` : ''}${then}`)
@@ -4029,7 +4026,7 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       )}
       {renaming && (
         <RenameDialog root={root} from={renaming.from} to={renaming.to} prefer={settings.format} labels={classes.map((c) => c.name)} totals={totals}
-          allowed={config.validate_label === 'exact' ? config.labels ?? [] : null} canLeave={() => canLeave({ stay: true })}
+          allowed={config.validate_label === 'exact' ? [...(config.labels ?? []), ...keypointOnlyNames(keypoints.schema)] : null} canLeave={() => canLeave({ stay: true })}
           onClose={(done) => (done ? renamed(renaming.from, done) : setRenaming(null))} />
       )}
       {ghostMenu && (

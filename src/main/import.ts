@@ -23,10 +23,10 @@ import {
 } from './project'
 import { readYoloDataset, type YoloDataset } from './ultralytics'
 import { folderKeypoints } from './keypoints'
-import { keypointNames } from '../shared/skeleton'
+import { keypointOnlyNames } from '../shared/skeleton'
 
 /** The names of the folder's keypoints, which the image and label lists don't count as classes */
-const folderKeypointNames = async (root: string) => keypointNames((await folderKeypoints(root)).schema)
+const folderKeypointNames = async (root: string) => keypointOnlyNames((await folderKeypoints(root)).schema)
 
 /** What to import: a COCO file, or a YOLO dataset's data.yaml or folder */
 export type ImportRequest = {

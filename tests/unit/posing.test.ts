@@ -98,17 +98,19 @@ describe('AI pose', () => {
     expect(points[1].points).toEqual([[25, 40]])
     expect(score).toBe(0.9)
   })
-  test('points below the threshold or not placed are left out; past the edge, hidden on it', () => {
+  test('points below the threshold, not placed or past the edge are left out; half a pixel past it is on the edge', () => {
     const answer = [...found]
     answer[0] = null
     answer[1] = { x: 50, y: 50, score: 0.29 }
-    answer[2] = { x: 420, y: -5, score: 0.5 }
+    answer[2] = { x: 400.4, y: -0.5, score: 0.5 }
+    answer[3] = { x: 420, y: 100, score: 0.95 }
+    answer[4] = { x: 100, y: 300.6, score: 0.95 }
     const { points, score } = aiPosePoints(coco, 'person', names, answer, { size: [400, 300], threshold: 0.3, group: 1, flagsOf: (l) => (l === 'right_eye' ? { blurry: false } : {}) })
-    expect(points.map((s) => s.label)).toEqual(COCO_PERSON.slice(2))
+    expect(points.map((s) => s.label)).toEqual([COCO_PERSON[2], ...COCO_PERSON.slice(5)])
     expect(points[0].points).toEqual([[400, 0]])
-    expect(points[0].flags).toEqual({ blurry: false, difficult: true, ai: true })
+    expect(points[0].flags).toEqual({ blurry: false, ai: true })
     expect(points[1].flags).toEqual({ ai: true })
-    expect(score).toBe(Math.round(((0.5 + 0.9 * 14) / 15) * 1000) / 1000)
+    expect(score).toBe(Math.round(((0.5 + 0.9 * 12) / 13) * 1000) / 1000)
   })
   test("names in the model's own order, and names the class doesn't have, are matched by name", () => {
     const reversed = [...names].reverse()

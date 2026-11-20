@@ -521,3 +521,15 @@ h3 .label-filter { width: auto; max-width: 60%; padding: 2px 6px; font-size: 12p
 .import-bar.busy i { width: 30%; animation: import-slide 1.2s linear infinite; }
 @keyframes import-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
 .import-result { font-weight: 550; }
+
+/* A pose in the Shapes list: one row for the box and its keypoints, opened to the keypoints in order, missing ones too */
+.pose-row, .pose-missing { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; text-align: left; width: 100%; flex: none; cursor: pointer; }
+.pose-row:hover, .pose-missing:hover { background: var(--raised); }
+.pose-row.on, .pose-missing.on { background: var(--selected); }
+.pose-row .fold { display: inline-flex; padding: 0; margin-right: -4px; color: var(--muted); }
+.pose-row input[type="checkbox"] { width: auto; margin: 0; accent-color: var(--accent); }
+.pose-row i, .pose-missing i { width: 10px; height: 10px; border-radius: 3px; flex: none; display: inline-block; }
+.pose-missing i { border-radius: 50%; border: 1.5px dashed; box-sizing: border-box; }
+.pose-row.off .name { color: var(--muted); text-decoration: line-through; }
+.shape.in-pose { padding-left: 26px; }
+.pose-missing { padding-left: 47px; color: var(--muted); }

@@ -108,7 +108,7 @@ export function classForModel(schema: KeypointSchema, names: string[]): string |
 const rounded = (score: number) => Math.round(score * 1000) / 1000
 
 export type PoseFit = {
-  /** The image's size: a point past its edge is hidden, at the nearest place on the image */
+  /** The image's size: a point the model placed past its edge isn't labelled, as COCO leaves a body part outside the photo */
   size: [number, number]
   /** Keypoints scored below this are left out */
   threshold: number
@@ -119,8 +119,11 @@ export type PoseFit = {
 
 /**
  * A pose model's keypoints for one box as AI shapes: a point for each of the class's keypoints
- * the model placed with at least the threshold's score, in the class's order, each with its
- * score; and their mean score, for the box. Keypoints the class doesn't have are left out.
+ * the model placed on the image with at least the threshold's score, in the class's order, each
+ * with its score; and their mean score, for the box. Keypoints the class doesn't have are left
+ * out, and so are those past the image's edge: a person the photo cuts off has their feet guessed
+ * below it, and COCO leaves such parts not labelled (visibility 0) rather than at the edge. Half a
+ * pixel past it is still on the image, at its edge.
  */
 export function aiPosePoints(schema: KeypointSchema, cls: string, names: string[], found: PosePoint[], fit: PoseFit): { points: Shape[]; score: number | null } {
   const [w, h] = fit.size
@@ -129,11 +132,11 @@ export function aiPosePoints(schema: KeypointSchema, cls: string, names: string[
   for (const name of schema.classes[cls] ?? []) {
     const p = found[names.indexOf(name)]
     if (!p || !(p.score >= fit.threshold) || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue
+    if (p.x < -0.5 || p.y < -0.5 || p.x > w + 0.5 || p.y > h + 0.5) continue
     const x = Math.max(0, Math.min(w, p.x)), y = Math.max(0, Math.min(h, p.y))
-    const outside = x !== p.x || y !== p.y
     points.push(newShape(name, 'point', [[x, y]], {
       group_id: fit.group,
-      flags: { ...fit.flagsOf?.(name), ...(outside ? { difficult: true } : {}), ai: true },
+      flags: { ...fit.flagsOf?.(name), ai: true },
       other: { score: rounded(p.score) }
     }))
     sum += p.score

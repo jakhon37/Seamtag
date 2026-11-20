@@ -6,7 +6,7 @@ import { folderKeypoints, keypointsFile, saveFolderKeypoints } from '../../src/m
 import type { KeypointSchema } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
 import { readPoseYaml, writePoseYaml } from '../../src/shared/pose'
-import { builtInKeypoints, COCO_PERSON, isHidden, keypointNames, nextGroupId, poseShapes, posesIn, sidesOf, withKnownLines } from '../../src/shared/skeleton'
+import { builtInKeypoints, COCO_PERSON, isHidden, keypointNames, keypointOnlyNames, nextGroupId, poseShapes, posesIn, sidesOf, withKnownLines } from '../../src/shared/skeleton'
 
 const box = (label: string, group: number | null, type: Shape['shape_type'] = 'rectangle') =>
   newShape(label, type, type === 'rectangle' ? [[10, 10], [50, 60]] : [[10, 10], [50, 10], [50, 60]], { group_id: group })
@@ -159,4 +159,8 @@ describe("a folder's keypoints file", () => {
     await expect(saveFolderKeypoints(root, { classes: { cat: ['nose', 'nose'] } })).rejects.toThrow(/names nose twice/)
     expect(await folderKeypoints(root)).toMatchObject({ file: null, problem: null })
   })
+})
+
+test("keypointOnlyNames: keypoint names that no class has as its name", () => {
+  expect(keypointOnlyNames({ classes: { person: ['nose', 'hand'], hand: ['thumb'] } })).toEqual(new Set(['nose', 'thumb']))
 })

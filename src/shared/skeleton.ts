@@ -76,8 +76,15 @@ export function sidesOf(schema: KeypointSchema, cls: string): Side[] {
 /** A keypoint labelled but hidden: COCO's visibility 1. X-AnyLabeling and Seamtag write it as difficult. */
 export const isHidden = (s: Pick<Shape, 'flags'>) => s.flags.difficult === true || s.flags.occluded === true
 
-/** Every keypoint name of the schema: labels that name keypoints, not classes */
+/** Every keypoint name of the schema */
 export const keypointNames = (schema: KeypointSchema) => new Set(Object.values(schema.classes).flat())
+
+/** Labels that name keypoints and no class: the image and label lists don't count them as classes */
+export function keypointOnlyNames(schema: KeypointSchema) {
+  const names = keypointNames(schema)
+  for (const cls of Object.keys(schema.classes)) names.delete(cls)
+  return names
+}
 
 /** The group_id a new pose gets: one more than the image's largest */
 export const nextGroupId = (shapes: Pick<Shape, 'group_id'>[]) =>
