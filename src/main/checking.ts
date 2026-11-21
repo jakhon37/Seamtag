@@ -18,7 +18,7 @@ import { imageSize } from './images'
 import { folderKeypoints } from './keypoints'
 import { decodeMask } from './masks'
 import { nameKey } from './names'
-import { folderOf, writeAtomic } from './project'
+import { classNames, folderOf, opening, type ProjectInfo, renameClass, writeAtomic } from './project'
 
 /** A pass the window can stop; one of each kind runs on a folder at a time */
 export type Job = 'check' | 'stats' | 'rename'
@@ -80,6 +80,8 @@ export type RenamePlanView = {
   /** The first few label files left alone, and why */
   skipped: { name: string; reason: string }[]
   skippedCount: number
+  /** The classes in .myseg/project.json, Seamline's class list, which a rename changes too; absent when the folder has none */
+  classes?: string[]
 }
 export type RenameDone = {
   stopped: boolean
@@ -91,6 +93,16 @@ export type RenameDone = {
   failed: { name: string; reason: string }[]
   /** Images whose labels have the old name still: their file is shared, failed, or wasn't reached before a stop */
   left: number
+  /**
+   * Seamline's class of the old name in .myseg/project.json, once a label file has the new name: `renamed`, in
+   * its place and with its colour; `kept` as it was, when the new name is a class already. Absent when there's
+   * no such class, or no label file was written.
+   */
+  oldClass?: 'renamed' | 'kept'
+  /** The project as .myseg/project.json has it after the rename, when the folder has one and a label file was written */
+  project?: ProjectInfo
+  /** Why the class of the old name couldn't be renamed in .myseg/project.json, when it couldn't */
+  classError?: string
 }
 
 export type StatsRequest = {
@@ -482,9 +494,10 @@ export async function renamePlan(root: string, from: string, prefer: LabelFormat
   try {
     const images = await readDataset(root, { prefer, signal, onProgress: (done, total) => report({ phase: 'read', done, total }) })
     const plan = plannedFrom(images, from)
+    const classes = await classNames(root)
     return {
       images: plan.images.length, shapes: plan.shapes, names: plan.images.slice(0, 8).map((i) => i.name),
-      skipped: plan.skipped.slice(0, 8), skippedCount: plan.skipped.length
+      skipped: plan.skipped.slice(0, 8), skippedCount: plan.skipped.length, ...(classes ? { classes } : {})
     }
   } catch (e) {
     if (signal.aborted) return { stopped: true }
@@ -500,6 +513,9 @@ export async function renamePlan(root: string, from: string, prefer: LabelFormat
  * together, through rewriteList, so the list is written once, not once an image. The rename
  * is made to what each file holds as it's written, so nothing saved since the read is undone.
  * A stop ends it between files, or in a list's own checks, before the list is written.
+ * Once a file has the new name, stopped or not, a Seamline project's class of the old name takes it
+ * too (renameClass), so the shapes renamed stay a class Seamline trains, not a label it leaves out.
+ * A class of the new name already leaves the class list as it is.
  * `allowed` is the label list when the config allows only its labels (validate_label: exact);
  * the folder's keypoints' names are allowed as well, as the list holds classes, not keypoints.
  * The new name is trimmed, as the window's label dialog trims a label.
@@ -511,6 +527,8 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
   if (allowed && !allowed.includes(name) && !keypointNames((await folderKeypoints(root)).schema).has(name)) {
     throw new Error(`“${name}” isn't in the label list, and only listed labels are allowed.`)
   }
+  // The folder as it's open now: a class list written for it is its next save's starting point while it stays so
+  const opened = opening(root)
   const signal = begin(root, 'rename')
   const report = reporter(send)
   const done: RenameDone = { stopped: false, shapes: 0, changed: [], skipped: { unreadable: 0, shared: 0 }, failed: [], left: 0 }
@@ -558,6 +576,17 @@ export async function renameRun(root: string, from: string, to: string, prefer: 
     done.stopped = signal.aborted
     // A file that can't be read is left alone too, but what it holds isn't known
     done.left = sharing.length + plan.images.length - done.changed.length
+    if (done.changed.length) {
+      // The label files are renamed whatever becomes of the class list, so a failure to write it is told, not thrown
+      const renamed = await renameClass(root, from, name, opened).catch((e) => {
+        done.classError = reason(e)
+        return null
+      })
+      if (renamed) {
+        if (renamed.oldClass) done.oldClass = renamed.oldClass
+        done.project = renamed.project
+      }
+    }
     return done
   } catch (e) {
     if (signal.aborted) return { ...done, stopped: true }

@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, mkdtempSync, promises as fsp, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, promises as fsp, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import sharp from 'sharp'
@@ -10,7 +10,7 @@ import {
 import { forgetDataset, readDataset } from '../../src/main/dataset'
 import { Stale } from '../../src/renderer/src/stale'
 import { encodeMask } from '../../src/main/masks'
-import { closeProject, openProject, setTrash } from '../../src/main/project'
+import { closeProject, type LabelClass, openProject, saveProjectFile, setTrash } from '../../src/main/project'
 import { CHECKS, type CheckOptions, checkDataset } from '../../src/shared/checks'
 import type { DatasetImage, Issue, KeypointSchema, MaskBits } from '../../src/shared/dataset'
 import { newShape, type Shape } from '../../src/shared/labelfile'
@@ -601,6 +601,185 @@ describe('renaming: the new name and what keeps the old one', () => {
     }
     expect(trashed).toEqual([])
     expect(readFileSync(list, 'utf8')).toBe(text)
+  })
+})
+
+describe("renaming in a Seamline project: the class of the old name in .myseg/project.json follows", () => {
+  const projectFile = (root: string) => path.join(root, '.myseg', 'project.json')
+  const writeProject = (root: string, doc: unknown) => {
+    mkdirSync(path.dirname(projectFile(root)), { recursive: true })
+    writeFileSync(projectFile(root), JSON.stringify(doc))
+  }
+  const projectText = (root: string) => readFileSync(projectFile(root), 'utf8')
+  const c = (name: string, color: string, extra: Record<string, unknown> = {}): LabelClass => ({ name, color, ...extra })
+  /** planted()'s folder, d.json holding Cat, opened with Seamline's class list */
+  async function seamline(doc: { name: string; classes: LabelClass[] } & Record<string, unknown>) {
+    const root = await planted()
+    writeProject(root, doc)
+    await openProject(root, null)
+    return root
+  }
+  const toBin = async (file: string) => {
+    renameSync(file, path.join(bin, `${trashed.length}-${path.basename(file)}`))
+    trashed.push(file)
+  }
+  /** Runs `run` with `meanwhile` called as the first label file goes to the trash, in the middle of the rename */
+  async function trashing<T>(meanwhile: () => unknown, run: () => Promise<T>) {
+    let first = true
+    setTrash(async (file) => {
+      if (first) {
+        first = false
+        await meanwhile()
+      }
+      await toBin(file)
+    })
+    try {
+      return await run()
+    } finally {
+      setTrash(toBin)
+    }
+  }
+  const rename = (root: string, from = 'Cat', to = 'cat', send: (p: Progress) => void = () => {}) => renameRun(root, from, to, 'labelme', null, send)
+
+  test('a folder without one is renamed as before, and gets none', async () => {
+    const root = await planted()
+    const plan = await renamePlan(root, 'Cat', 'labelme', () => {})
+    expect(Object.keys(plan)).toEqual(['images', 'shapes', 'names', 'skipped', 'skippedCount'])
+    const done = await rename(root)
+    expect(Object.keys(done).sort()).toEqual(['changed', 'failed', 'left', 'shapes', 'skipped', 'stopped'])
+    expect(done).toMatchObject({ changed: ['d.png'], left: 0, failed: [] })
+    expect(existsSync(path.join(root, '.myseg'))).toBe(false)
+  })
+
+  test('the class takes the new name, in its place and with its colour; the rest of the file stays as it was', async () => {
+    const root = await seamline({ name: 'parts', classes: [c('dog', '#00aa00'), c('Cat', '#c71585', { note: 'kept' }), c('zebra', '#123456')], train: { epochs: 30 } })
+    // The window says so before anything is written
+    expect(await renamePlan(root, 'Cat', 'labelme', () => {})).toMatchObject({ classes: ['dog', 'Cat', 'zebra'] })
+    const done = await rename(root)
+    const classes = [c('dog', '#00aa00'), c('cat', '#c71585'), c('zebra', '#123456')]
+    expect(done).toMatchObject({ changed: ['d.png'], left: 0, failed: [], oldClass: 'renamed', project: { name: 'parts', classes } })
+    expect(done.classError).toBeUndefined()
+    expect(JSON.parse(read(root, 'd.json')).shapes[0].label).toBe('cat')
+    // Written as a save writes the file: every other key kept, and the class's own
+    expect(projectText(root)).toBe(JSON.stringify({
+      name: 'parts', classes: [c('dog', '#00aa00'), c('cat', '#c71585', { note: 'kept' }), c('zebra', '#123456')], train: { epochs: 30 }
+    }, null, 2))
+    // It's the next save's starting point: Seamline deleting cat now deletes it, where the list read at the start would bring it back
+    writeProject(root, { ...JSON.parse(projectText(root)), classes: [c('dog', '#00aa00'), c('zebra', '#123456')] })
+    const saved = await saveProjectFile(root, { name: 'parts', classes: [...done.project!.classes, c('owl', '#00ff00')] })
+    expect(saved.classes).toEqual([c('dog', '#00aa00'), c('zebra', '#123456'), c('owl', '#00ff00')])
+  })
+
+  test('a label that is no class leaves the file as it is', async () => {
+    const root = await seamline({ name: 'parts', classes: [c('dog', '#00aa00')] })
+    const text = projectText(root)
+    expect(await renamePlan(root, 'Cat', 'labelme', () => {})).toMatchObject({ classes: ['dog'] })
+    const done = await rename(root)
+    expect(done).toMatchObject({ changed: ['d.png'], project: { name: 'parts', classes: [c('dog', '#00aa00')] } })
+    expect(done.oldClass).toBeUndefined()
+    expect(projectText(root)).toBe(text)
+  })
+
+  test("what Seamline changes in the file while the rename runs stays: classes added, deleted, moved and recoloured, and its other keys", async () => {
+    const root = await seamline({ name: 'parts', classes: [c('dog', '#00aa00'), c('Cat', '#c71585'), c('zebra', '#123456')], train: { epochs: 30 } })
+    const theirs = { name: 'parts', classes: [c('Cat', '#0000ff'), c('dog', '#ff0000'), c('bird', '#999999')], train: { epochs: 50 }, runs: ['20261120_101500'] }
+    const done = await trashing(() => writeProject(root, theirs), () => rename(root))
+    // Seamline's list, with the one name changed
+    const classes = [c('cat', '#0000ff'), c('dog', '#ff0000'), c('bird', '#999999')]
+    expect(done).toMatchObject({ changed: ['d.png'], oldClass: 'renamed', project: { name: 'parts', classes } })
+    expect(JSON.parse(projectText(root))).toEqual({ ...theirs, classes })
+    // And the next save starts from it: nothing Seamline did meanwhile is undone
+    expect((await saveProjectFile(root, { name: 'parts', classes: [...done.project!.classes, c('owl', '#00ff00')] })).classes)
+      .toEqual([...classes, c('owl', '#00ff00')])
+  })
+
+  test('a class of the new name Seamline adds while the rename runs keeps the two apart; an old class it deletes stays deleted', async () => {
+    const start = { name: 'parts', classes: [c('dog', '#00aa00'), c('Cat', '#c71585')] }
+    let root = await seamline(start)
+    const added = { ...start, classes: [...start.classes, c('cat', '#aaaa00')] }
+    let done = await trashing(() => writeProject(root, added), () => rename(root))
+    expect(done).toMatchObject({ changed: ['d.png'], oldClass: 'kept', project: added })
+    expect(projectText(root)).toBe(JSON.stringify(added))
+    root = await seamline(start)
+    const deleted = { ...start, classes: [c('dog', '#00aa00')] }
+    done = await trashing(() => writeProject(root, deleted), () => rename(root))
+    expect(done.oldClass).toBeUndefined()
+    expect(done.project).toEqual(deleted)
+    expect(projectText(root)).toBe(JSON.stringify(deleted))
+  })
+
+  test('a new name that is a class already leaves the file as it is: the old class stays, with no shapes', async () => {
+    const doc = { name: 'parts', classes: [c('Cat', '#c71585'), c('dog', '#00aa00'), c('cat', '#aaaa00')], train: { epochs: 30 } }
+    const root = await seamline(doc)
+    const text = projectText(root)
+    expect(await renamePlan(root, 'Cat', 'labelme', () => {})).toMatchObject({ classes: ['Cat', 'dog', 'cat'] })
+    const done = await rename(root)
+    expect(done).toMatchObject({ changed: ['d.png'], left: 0, oldClass: 'kept', project: { name: 'parts', classes: doc.classes } })
+    expect(JSON.parse(read(root, 'd.json')).shapes[0].label).toBe('cat')
+    expect(projectText(root)).toBe(text)
+    // Nor does the next save join or delete them
+    expect((await saveProjectFile(root, { name: 'parts', classes: [...done.project!.classes, c('owl', '#00ff00')] })).classes.map((k) => k.name))
+      .toEqual(['Cat', 'dog', 'cat', 'owl'])
+  })
+
+  test('a run that writes no label file, stopped or failing, leaves the class; one stopped after a file is written renames it', async () => {
+    const doc = { name: 'parts', classes: [c('Cat', '#c71585'), c('dog', '#00aa00')] }
+    let root = await seamline(doc)
+    const text = projectText(root)
+    // Stopped once the folder is read
+    let done = await rename(root, 'Cat', 'cat', (p) => {
+      if (p.phase === 'read' && p.done === p.total) stopJob(root, 'rename')
+    })
+    expect(done).toMatchObject({ stopped: true, changed: [] })
+    expect([done.oldClass, done.project]).toEqual([undefined, undefined])
+    expect(projectText(root)).toBe(text)
+    // The one file with Cat can't go to the trash, so it isn't written
+    done = await trashing(() => {
+      throw new Error('The trash is full')
+    }, () => rename(root))
+    expect(done).toMatchObject({ stopped: false, changed: [], left: 1 })
+    expect(done.failed).toHaveLength(1)
+    expect([done.oldClass, done.project]).toEqual([undefined, undefined])
+    expect(projectText(root)).toBe(text)
+    // Stopped as the first of two files is written: that one has the new name, and so has the class
+    root = await seamline(doc)
+    write(root, { 'h.json': labelme('h.png', [box('Cat', 1, 1, 5, 5)]) })
+    done = await trashing(() => stopJob(root, 'rename'), () => rename(root))
+    expect(done).toMatchObject({ stopped: true, changed: ['d.png'], left: 1, oldClass: 'renamed' })
+    expect(JSON.parse(projectText(root)).classes).toEqual([c('cat', '#c71585'), c('dog', '#00aa00')])
+    expect(read(root, 'h.json')).toContain('"Cat"')
+  })
+
+  test("a class list that can't be written is told, and the label files stay renamed", async () => {
+    const root = await seamline({ name: 'parts', classes: [c('Cat', '#c71585')] })
+    const text = projectText(root)
+    const writeFile = fsp.writeFile.bind(fsp)
+    vi.spyOn(fsp, 'writeFile').mockImplementation(async (file, ...rest) => {
+      if (String(file).startsWith(projectFile(root))) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })
+      return writeFile(file, ...rest)
+    })
+    try {
+      const done = await rename(root)
+      expect(done).toMatchObject({ changed: ['d.png'], left: 0, classError: 'EACCES: permission denied' })
+      expect([done.oldClass, done.project]).toEqual([undefined, undefined])
+    } finally {
+      vi.restoreAllMocks()
+    }
+    expect(projectText(root)).toBe(text)
+    expect(readdirSync(path.join(root, '.myseg'))).toEqual(['project.json'])
+    expect(JSON.parse(read(root, 'd.json')).shapes[0].label).toBe('cat')
+  })
+
+  test('a folder opened again while the rename ran keeps the class list it read as the starting point of its saves', async () => {
+    const root = await seamline({ name: 'parts', classes: [c('Cat', '#c71585'), c('dog', '#00aa00')] })
+    const done = await trashing(async () => {
+      closeProject(root)
+      await openProject(root, null)
+    }, () => rename(root))
+    expect(done.oldClass).toBe('renamed')
+    // That opening read Cat, and shows it until it reads the file again: its save takes cat as Seamline's, and brings no Cat back
+    const saved = await saveProjectFile(root, { name: 'parts', classes: [c('Cat', '#c71585'), c('dog', '#00aa00'), c('owl', '#00ff00')] })
+    expect(saved.classes.map((k) => k.name)).toEqual(['dog', 'owl', 'cat'])
   })
 })
 

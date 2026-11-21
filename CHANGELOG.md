@@ -24,6 +24,10 @@ Keypoints and poses: the Pose tool, skeletons on the canvas, AI pose with RTMPos
 - Pascal VOC, YOLO and CreateML leave points out, where they made them boxes with no size: a pose keeps its box, and the window says how many points were left out.
 - Export dataset's pose formats start from the folder's keypoints file, or COCO's person, so no file need be chosen. A keypoint given twice in one pose is left out with a warning, rather than stopping the export.
 - AI pose keeps its own model in memory beside SAM2's, so SAM2 doesn't encode the image again after a pose.
+- Renaming a label across a Seamline project renames Seamline's class of that name in `.myseg/project.json` too, in its place and with its colour, as soon as a label file has the new name, even when the rename is stopped or some files can't be renamed. 3.3.0 renamed the class only once no label file had the old name. The rename writes the class list itself, merged with the file as it is then, so classes Seamline added, deleted or recoloured meanwhile, and the file's other keys, stay as Seamline left them. The rename window says before anything is written that the class is renamed too, and the message after the rename says it was. Folders without `.myseg/project.json` are renamed as before.
+
+### Fixed
+- Renaming a label to the name of another class in a Seamline project deleted the old class from `.myseg/project.json`, joining the two, which changes the outputs of the model Seamline trains. Both classes now stay as they are: the rename window says the old class will have no shapes, and the message after the rename says it's empty.
 
 ## [3.3.0] - 2026-11-19
 

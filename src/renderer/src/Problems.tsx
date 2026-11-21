@@ -430,6 +430,9 @@ export function RenameDialog({ root, from, to: start, prefer, labels, totals, al
   const box = useRef<HTMLFormElement>(null)
   useModal(box, close)
   const joins = name && name !== from ? totals[name] ?? 0 : 0
+  // Seamline's class of the old name gets the new one too, unless that is a class already: then the class list stays as it is
+  const isClass = (n: string) => !!plan?.classes?.includes(n)
+  const asClass = !plan?.images || !name || refusal || !isClass(from) ? null : isClass(name) ? 'kept' : 'renamed'
 
   return (
     <div className="modal-back" onMouseDown={(e) => e.target === e.currentTarget && close()}>
@@ -454,6 +457,13 @@ export function RenameDialog({ root, from, to: start, prefer, labels, totals, al
                 {plan.images > plan.names.length ? ` and ${number(plan.images - plan.names.length)} more` : ''}.
               </p>
               {joins > 0 && <p className="muted">“{name}” has {counted(joins, 'shape')} already: these join them.</p>}
+              {asClass === 'renamed' && <p className="rename-class muted">Seamline's class “{from}” is renamed too, keeping its place and colour.</p>}
+              {asClass === 'kept' && (
+                <p className="rename-class">
+                  “{name}” is a class already, so Seamline's class “{from}” stays as it is, with no shapes once they're renamed: joining two
+                  classes would change the model's outputs.
+                </p>
+              )}
               <p className="muted">Each changed label file is rewritten in its own format, and its old copy goes to the trash.</p>
             </>
           )}

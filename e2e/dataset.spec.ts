@@ -518,65 +518,115 @@ test('the label list follows a rename once no label file has the old name', asyn
   const renameCat = async () => {
     await dock.locator('.problems-group[data-code="label-variants"]').getByRole('button', { name: 'Rename…', exact: true }).click()
     await expect(rename.getByLabel('New name')).toHaveValue('cat')
+    // Seamline's class of that name goes with it, which the window says before anything is written
+    await expect(rename.locator('.rename-class')).toHaveText("Seamline's class “Cat” is renamed too, keeping its place and colour.")
     await rename.getByRole('button', { name: 'Rename 1 shape' }).click()
     await expect(rename).toHaveCount(0)
   }
   await renameCat()
   await expect(page.locator('.error')).toContainText("1 label file couldn't be renamed. d.png: d.json couldn't go to the trash")
   await expect(page.locator('.loading.notice')).toContainText('Renamed 0 shapes in 0 images from “Cat” to “cat”.')
-  // The label list is saved a moment after it changes: it hasn't
-  await page.waitForTimeout(500)
-  expect(classes()).toEqual([{ name: 'Cat', color: '#c71585' }])
+  // No label file has the new name, so the class keeps the old one
   await expect(page.locator('.loading.notice')).toContainText('“Cat” stays in the label list while 1 image has it.')
+  await expect(page.locator('.loading.notice')).not.toContainText("Seamline's class")
+  expect(classes()).toEqual([{ name: 'Cat', color: '#c71585' }])
   expect(shapesIn(dir, 'd')[0].label).toBe('Cat')
   await expect(page.locator('section[aria-label="Labels"] .class .name', { hasText: /^Cat$/ })).toHaveCount(1)
-  // Again, with the trash taking it: the label list's Cat becomes cat, its colour kept
+  // Again, with the trash taking it: the class Cat becomes cat, its colour kept
   await renameCat()
-  await expect(page.locator('.loading.notice')).toContainText('Renamed 1 shape in 1 image from “Cat” to “cat”.')
+  await expect(page.locator('.loading.notice')).toContainText(
+    "Renamed 1 shape in 1 image from “Cat” to “cat”. Seamline's class “Cat” was renamed too, keeping its place and colour.")
   expect(shapesIn(dir, 'd')[0].label).toBe('cat')
-  await expect.poll(classes).toEqual([{ name: 'cat', color: '#c71585' }])
+  expect(classes()).toEqual([{ name: 'cat', color: '#c71585' }])
   await expect(page.locator('section[aria-label="Labels"] .class .name', { hasText: /^Cat$/ })).toHaveCount(0)
   await finish(app, errors)
 })
 
+/**
+ * Renames a label from Statistics, from a row of one shape; `classLine` is what the window says of Seamline's class, if anything.
+ * Statistics shows the old name after it with `left` objects, when it's still in the label list, or not at all.
+ */
+async function renameFromStats(page: Page, from: string, to: string, classLine: string | null, left: number | null = null) {
+  await menu(page, 'Dataset', 'Statistics…')
+  const stats = page.getByRole('dialog', { name: 'Statistics' })
+  const row = stats.locator(`.stats-labels tbody tr[data-label="${from}"]`)
+  await row.getByRole('button', { name: 'Rename…' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Rename a label' })
+  await expect(dialog).toContainText('Renames 1 shape in 1 image')
+  await dialog.getByLabel('New name').fill(to)
+  if (classLine === null) await expect(dialog.locator('.rename-class')).toHaveCount(0)
+  else await expect(dialog.locator('.rename-class')).toHaveText(classLine)
+  await dialog.getByRole('button', { name: 'Rename 1 shape' }).click()
+  await expect(dialog).toHaveCount(0)
+  if (left === null) await expect(row).toHaveCount(0)
+  else await expect(row.locator('td').nth(1)).toHaveText(String(left))
+  await page.keyboard.press('Escape')
+  await expect(stats).toHaveCount(0)
+}
+
 test('after a rename the label list no longer offers the old name, and new shapes still get the label picked for them', async () => {
+  // Labels found in the label files alone, with no class list, which a rename doesn't make. The list takes them as the
+  // images are counted, sorted within each batch: the images go in the labels' order, so it's the same however they're batched.
   const dir = await project('dataset-label-list', {
-    a: doc('a', [square('dgo', 20, 20, 120, 120)]), b: doc('b', [square('dog', 30, 30, 90, 90)]), c: doc('c', [square('cow', 40, 40, 140, 140)])
-  }, [{ name: 'dgo', color: '#aa0000' }, { name: 'cow', color: '#00aa00' }, { name: 'dog', color: '#0000aa' }, { name: 'cat', color: '#aaaa00' }])
+    a: doc('a', [square('cat', 50, 50, 150, 150)]), b: doc('b', [square('cow', 40, 40, 140, 140)]), c: doc('c', [square('dgo', 20, 20, 120, 120)]),
+    d: doc('d', [square('dog', 30, 30, 90, 90)])
+  })
   const { app, page, errors } = await launch(dir)
   await fakeTrash(app, path.join(BASE, 'dataset-label-list-trash'))
   const names = page.locator('section[aria-label="Labels"] .class .name')
   const active = page.locator('section[aria-label="Labels"] .class.on .name')
-  const rename = async (from: string, to: string) => {
-    await menu(page, 'Dataset', 'Statistics…')
-    const stats = page.getByRole('dialog', { name: 'Statistics' })
-    await stats.locator(`.stats-labels tbody tr[data-label="${from}"]`).getByRole('button', { name: 'Rename…' }).click()
-    const dialog = page.getByRole('dialog', { name: 'Rename a label' })
-    await expect(dialog).toContainText('Renames 1 shape in 1 image')
-    await dialog.getByLabel('New name').fill(to)
-    await dialog.getByRole('button', { name: 'Rename 1 shape' }).click()
-    await expect(dialog).toHaveCount(0)
-    await expect(stats.locator(`.stats-labels tbody tr[data-label="${from}"]`)).toHaveCount(0)
-    await page.keyboard.press('Escape')
-    await expect(stats).toHaveCount(0)
-  }
-  await expect(names).toHaveText(['dgo', 'cow', 'dog', 'cat'])
-  // The typo is the label new shapes get, on key 1
-  await page.keyboard.press('1')
+  await expect(names).toHaveText(['cat', 'cow', 'dgo', 'dog'])
+  // The typo is the label new shapes get, on key 3
+  await page.keyboard.press('3')
   await expect(active).toHaveText('dgo')
-  await rename('dgo', 'dog')
+  await renameFromStats(page, 'dgo', 'dog', null)
   await expect(page.locator('.loading.notice')).toContainText('Renamed 1 shape in 1 image from “dgo” to “dog”.')
   // It's gone from the list and its number key, and new shapes get the name it was given
-  await expect(names).toHaveText(['cow', 'dog', 'cat'])
+  await expect(names).toHaveText(['cat', 'cow', 'dog'])
   await expect(active).toHaveText('dog')
   // A label above it in the list goes: new shapes still get dog, not the label that moves up into its place
-  await rename('cow', 'cat')
-  await expect(names).toHaveText(['dog', 'cat'])
+  await renameFromStats(page, 'cow', 'cat', null)
+  await expect(names).toHaveText(['cat', 'dog'])
   await expect(active).toHaveText('dog')
-  await page.keyboard.press('2')
+  await page.keyboard.press('1')
+  await expect(active).toHaveText('cat')
+  expect([shapesIn(dir, 'c')[0].label, shapesIn(dir, 'b')[0].label]).toEqual(['dog', 'cat'])
+  expect(existsSync(path.join(dir, '.myseg', 'project.json'))).toBe(false)
+  await finish(app, errors)
+})
+
+test("a rename into one of Seamline's classes leaves both classes, the old one empty, and new shapes get the new name", async () => {
+  const dir = await project('dataset-class-into-class', {
+    a: doc('a', [square('dgo', 20, 20, 120, 120)]), b: doc('b', [square('dog', 30, 30, 90, 90)]), c: doc('c', [square('cow', 40, 40, 140, 140)])
+  }, [{ name: 'dgo', color: '#aa0000' }, { name: 'cow', color: '#00aa00' }, { name: 'dog', color: '#0000aa' }, { name: 'cat', color: '#aaaa00' }])
+  const file = path.join(dir, '.myseg', 'project.json')
+  const before = readFileSync(file, 'utf8')
+  const { app, page, errors } = await launch(dir)
+  await fakeTrash(app, path.join(BASE, 'dataset-class-into-class-trash'))
+  const names = page.locator('section[aria-label="Labels"] .class .name')
+  const active = page.locator('section[aria-label="Labels"] .class.on .name')
+  const notice = page.locator('.loading.notice')
+  // Each class is an output of the model Seamline trains: joining two, or deleting one, would change them
+  const stays = (from: string, to: string) =>
+    `“${to}” is a class already, so Seamline's class “${from}” stays as it is, with no shapes once they're renamed: joining two classes would change the model's outputs.`
+  await expect(names).toHaveText(['dgo', 'cow', 'dog', 'cat'])
+  await page.keyboard.press('1')
+  await expect(active).toHaveText('dgo')
+  // Statistics lists the empty class, with no objects
+  await renameFromStats(page, 'dgo', 'dog', stays('dgo', 'dog'), 0)
+  await expect(notice).toContainText("Renamed 1 shape in 1 image from “dgo” to “dog”. Seamline's class “dgo” is empty now: “dog” was a class already, " +
+    "and joining two classes would change the model's outputs, so the class list is left as it is.")
+  // The class stays in the list, in its place, and new shapes get the name the label was given
+  await expect(names).toHaveText(['dgo', 'cow', 'dog', 'cat'])
+  await expect(active).toHaveText('dog')
+  await renameFromStats(page, 'cow', 'cat', stays('cow', 'cat'), 0)
+  await expect(notice).toContainText("Seamline's class “cow” is empty now")
+  await expect(names).toHaveText(['dgo', 'cow', 'dog', 'cat'])
+  await expect(active).toHaveText('dog')
+  await page.keyboard.press('4')
   await expect(active).toHaveText('cat')
   expect([shapesIn(dir, 'a')[0].label, shapesIn(dir, 'c')[0].label]).toEqual(['dog', 'cat'])
-  await expect.poll(() => JSON.parse(readFileSync(path.join(dir, '.myseg', 'project.json'), 'utf8')).classes.map((c: { name: string }) => c.name)).toEqual(['dog', 'cat'])
+  expect(readFileSync(file, 'utf8')).toBe(before)
   await finish(app, errors)
 })
 

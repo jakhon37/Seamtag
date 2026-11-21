@@ -547,6 +547,48 @@ export async function reloadProjectFile(dir: string) {
   })
 }
 
+/** The names of the classes in .myseg/project.json as it is now; null when it lists none */
+export async function classNames(dir: string) {
+  return (await readProjectDoc(dir)).classes?.map((c) => c.name) ?? null
+}
+
+/**
+ * What a label renamed across the folder made of Seamline's class of that name: `renamed`, it has the new
+ * name; `kept`, it's as it was, as the new name is a class already; null, there's no class of that name.
+ * `project` is the project as .myseg/project.json has it now.
+ */
+export type ClassRename = { oldClass: 'renamed' | 'kept' | null; project: ProjectInfo }
+
+/**
+ * A label renamed across the folder, in Seamline's class list in .myseg/project.json: the class `from` takes
+ * the name `to`, in its place and with its colour. The change is made to the file as it is now, in a save's
+ * turn, so the classes Seamline added, deleted or recoloured since, the file's other keys and each class's
+ * other keys stay as they are. When `to` is a class already, the file is left as it is: joining the two
+ * classes, or deleting one, would change the outputs of the model Seamline trains. The classes as the file
+ * then has them are the starting point of the folder's next save, as after a save or a read, while the folder
+ * is open as it was when the rename began (`opened`). Null, with nothing written, when the file lists no classes.
+ */
+export async function renameClass(dir: string, from: string, to: string, opened = opening(dir)): Promise<ClassRename | null> {
+  return serial(async () => {
+    const { doc, classes } = await readProjectDoc(dir)
+    if (!doc || !classes) return null
+    let oldClass: ClassRename['oldClass'] = null
+    let now = classes
+    if (from !== to && classes.some((c) => c.name === from)) {
+      oldClass = classes.some((c) => c.name === to) ? 'kept' : 'renamed'
+      if (oldClass === 'renamed') {
+        const named = (c: unknown): c is Record<string, unknown> => typeof c === 'object' && c !== null && (c as { name?: unknown }).name === from
+        const list = (doc.classes as unknown[]).map((c) => (named(c) ? { ...c, name: to } : c))
+        await writeAtomic(meta(dir, 'project.json'), JSON.stringify({ ...doc, classes: list }, null, 2))
+        now = classes.map((c) => (c.name === from ? { ...c, name: to } : c))
+      }
+    }
+    const r = roots.get(dir)
+    if (r && r === opened) r.classes = now
+    return { oldClass, project: { name: typeof doc.name === 'string' ? doc.name : path.basename(dir), classes: now } }
+  })
+}
+
 function sharedStems(names: string[]) {
   const seen = new Set<string>()
   const shared = new Set<string>()
