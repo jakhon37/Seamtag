@@ -99,6 +99,8 @@ type Props = {
   setSettings: (fn: (s: Settings) => Settings) => void
   /** `shown`: the label list, whose colours a folder's first class list takes */
   setProject: (p: ProjectInfo, shown?: LabelClass[]) => void
+  /** The class list as a rename across the folder wrote it to .myseg/project.json: shown, not saved again */
+  tookProject: (root: string, p: ProjectInfo) => void
   setImages: (fn: (images: ImageItem[]) => ImageItem[]) => void
   discovered: string[]
   /** A label no label file has any more, after a rename: it goes from those found in the files */
@@ -199,7 +201,7 @@ function maskCanvas(mask: string, color: string, onReady: () => void) {
 }
 
 const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
-  const { data, config, settings, setSettings, setProject, setImages, discovered, forgetLabel, mac, onError, onShown, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
+  const { data, config, settings, setSettings, setProject, tookProject, setImages, discovered, forgetLabel, mac, onError, onShown, onOpenMenu, onChange, onChangeOutput, onNextToImages } = props
   const { project, images, root } = data
   const [index, setIndex] = useState(() => Math.max(0, data.select ? images.findIndex((i) => i.name === data.select) : 0))
   const [query, setQuery] = useState(config.file_search ?? '')
@@ -2421,22 +2423,30 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
     if (!alive.current) return
     const { to } = done
     setRenaming(null)
-    // The project's label list follows once no label file has the old name: it gives way to the new, keeping its colour
-    const has = (n: string) => project.classes.some((c) => c.name === n)
-    if (has(from) && !done.left && done.changed.length) {
-      setProject({ ...project, classes: has(to) ? project.classes.filter((c) => c.name !== from) : project.classes.map((c) => (c.name === from ? { ...c, name: to } : c)) })
-    }
-    // So do the labels found in the files, and the label new shapes get. The config's labels stay listed.
-    if (!done.left && done.changed.length) {
-      forgetLabel(from)
-      // The label list keeps its order: the new name takes the old one's place
+    // Seamline's class list as the rename left it, which renamed the class of the old name itself, in its place and with
+    // its colour, or left it as it was when the new name is a class already: shown, not saved again
+    if (done.project) tookProject(root, done.project)
+    const wasClass = project.classes.some((c) => c.name === from)
+    // No label file has the old name now
+    const gone = !done.left && done.changed.length > 0
+    // The label new shapes get follows the new name once no label file has the old one, or the class has the new one
+    if (gone || done.oldClass === 'renamed') {
+      // The label list keeps its order: the new name takes the old one's place, unless that stays a class
       const kept = keptLabels.current
-      if (kept) keptLabels.current = kept.includes(to) ? kept.filter((l) => l !== from) : kept.map((l) => (l === from ? to : l))
+      if (kept && done.oldClass !== 'kept') keptLabels.current = kept.includes(to) ? kept.filter((l) => l !== from) : kept.map((l) => (l === from ? to : l))
       setActive((a) => ((a === undefined ? classes[0]?.name : a) === from ? to : a))
     }
+    // The labels found in the files go without it. The config's labels stay listed, and so do the classes.
+    if (gone) forgetLabel(from)
     if (done.changed.length) reloadImages(done.changed)
     setLabelsChanged((n) => n + 1)
     const told = [`${done.stopped ? 'Stopped after renaming' : 'Renamed'} ${counted(done.shapes, 'shape')} in ${counted(done.changed.length, 'image')} from “${from}” to “${to}”.`]
+    if (done.oldClass === 'renamed') told.push(`Seamline's class “${from}” was renamed too, keeping its place and colour.`)
+    // Joining the two classes, or deleting the old one, would change the outputs of the model Seamline trains
+    if (done.oldClass === 'kept') {
+      told.push(gone ? `Seamline's class “${from}” is empty now: “${to}” was a class already, and joining two classes would change the model's outputs, so the class list is left as it is.`
+        : `Seamline's class “${from}” is left as it is: “${to}” was a class already, and joining two classes would change the model's outputs.`)
+    }
     // Why files were left alone: one that can't be read is left whatever it holds, and isn't to be taken for one with the label
     const { unreadable, shared, file } = done.skipped
     if (unreadable) {
@@ -2446,12 +2456,15 @@ const Labeler = forwardRef<LabelerHandle, Props>(function Labeler(props, ref) {
       told.push(file ? `${file} holds the labels of several images, so it was left alone.`
         : `${counted(shared, 'label file that several images share was', 'label files that several images share were')} left alone.`)
     }
-    if (has(from) && done.left) told.push(`“${from}” stays in the label list while ${counted(done.left, 'image has', 'images have')} it.`)
+    if (wasClass && done.left) told.push(`“${from}” stays in the label list while ${counted(done.left, 'image has', 'images have')} it.`)
     setNotice(told.join(' '))
+    const failed: string[] = []
     if (done.failed.length) {
       const [first] = done.failed
-      onError(`${counted(done.failed.length, "label file couldn't", "label files couldn't")} be renamed. ${first.name}: ${first.reason}`)
+      failed.push(`${counted(done.failed.length, "label file couldn't", "label files couldn't")} be renamed. ${first.name}: ${first.reason}`)
     }
+    if (done.classError) failed.push(`Seamline's class “${from}” couldn't be renamed in .myseg/project.json: ${done.classError}`)
+    if (failed.length) onError(failed.join(' '))
   }
   const openStats = async () => {
     if (!(await canLeave({ stay: true }))) return
