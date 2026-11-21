@@ -58,7 +58,10 @@ export const DEFAULT_CONFIG = {
     default: 'Sam2 (balanced)',
     text_model: 'yoloworld:latest',
     // Drop AI shapes that cover a shape already drawn, and point out that shape instead
-    suppress_existing_shape_matches: false
+    suppress_existing_shape_matches: false,
+    // AI pose: the model, until one is picked in the AI menu, and the score a keypoint needs to be kept
+    pose_model: 'rtmpose-m',
+    pose_score: 0.3
   },
 
   flag_dock: { ...DOCK },
@@ -141,6 +144,14 @@ export const DEFAULT_CONFIG = {
     create_linestrip: null as Shortcut,
     create_ai_points_to_shape: null as Shortcut,
     create_ai_box_to_shape: null as Shortcut,
+    // Seamtag's poses: a box and its keypoints
+    create_pose: 'K' as Shortcut,
+    create_ai_pose: 'Shift+K' as Shortcut,
+    toggle_keypoint_hidden: 'Q' as Shortcut,
+    swap_keypoint_sides: 'M' as Shortcut,
+    mirror_pose: 'Shift+M' as Shortcut,
+    next_keypoint: 'N' as Shortcut,
+    prev_keypoint: 'Shift+N' as Shortcut,
     create_brush: 'B' as Shortcut,
     create_eraser: 'E' as Shortcut,
     edit_shape: ['Ctrl+Shift+C', 'V', 'Ctrl+J'] as Shortcut,
@@ -247,6 +258,12 @@ function validate(path: string[], value: unknown) {
   }
   if (at === 'ai.text_model' && value !== null && !AI_TEXT_MODELS.includes(value as string)) {
     throw new Error(`Unexpected AI Text Prompt model: ${JSON.stringify(value)}`)
+  }
+  if (at === 'ai.pose_model' && !(typeof value === 'string' && value.trim())) {
+    throw new Error(`ai.pose_model must be a model's name, such as rtmpose-m, but got ${JSON.stringify(value)}`)
+  }
+  if (at === 'ai.pose_score' && !(typeof value === 'number' && value >= 0 && value <= 1)) {
+    throw new Error(`ai.pose_score must be a number from 0 to 1, but got ${JSON.stringify(value)}`)
   }
   if (key === 'validate_label' && value !== null && value !== 'exact') {
     throw new Error(`Unexpected value for config key 'validate_label': ${JSON.stringify(value)}`)

@@ -194,10 +194,12 @@ test('export every format through the window, with a check of what goes in befor
   expect(json(coco, 'annotations/instances_test.json').annotations.length).toBe(4)
   expect(existsSync(path.join(DIR, 'inside'))).toBe(false)
 
-  // COCO with keypoints: a keypoints file made from the folder's posed objects
+  // COCO with keypoints: the folder's own, COCO's person as it has no keypoints file, then a file made from its posed objects
   dialog = await openExport(page)
   await choose(dialog, 'COCO with keypoints')
-  await expect(dialog.locator('.export-group.is-error')).toContainText('No keypoints file')
+  await expect(dialog.locator('.export-errors')).toHaveCount(0)
+  await expect(dialog.locator('.export-options')).toContainText("COCO's person, built in")
+  await expect(dialog.locator('.export-options')).toContainText('person: 17 keypoints · flip pairs · skeleton')
   const keypoints = path.join(OUT, 'keypoints.yaml')
   await answer(app, 'saves', keypoints)
   await change(dialog, () => dialog.getByRole('button', { name: 'Make a keypoints file…' }).click())
@@ -543,11 +545,12 @@ test('in the smallest window an error that stops the export shows first, with th
   await expect(dialog.locator('#export-why')).toHaveText('Choose another folder')
   expect(await page.evaluate(() => !!document.querySelector('.export-dialog')?.contains(document.activeElement))).toBe(true)
 
-  // YOLO pose with no keypoints file: making one is a click away in the error, in view
+  // YOLO pose starts from the folder's keypoints, COCO's person as it has no file, so nothing stops it; making a file is under them
   await change(dialog, () => dialog.locator('label.export-format', { hasText: 'YOLO pose' }).click())
-  const missing = dialog.locator('.export-errors .export-group', { hasText: 'No keypoints file' })
-  const make = missing.getByRole('button', { name: 'Make one…' })
-  for (const part of [missing.getByRole('button', { name: 'Choose one…' }), make]) expect(await inView(column, part)).toBe(true)
+  await expect(dialog.locator('.export-errors')).toHaveCount(0)
+  await expect(dialog.locator('.export-options')).toContainText('person: 17 keypoints · flip pairs · skeleton')
+  const make = dialog.getByRole('button', { name: 'Make a keypoints file…' })
+  await make.scrollIntoViewIfNeeded()
   await page.screenshot({ path: `${SHOTS}/export-keypoints-dark-960.png` })
   const keypoints = path.join(OUT, 'small-keypoints.yaml')
   rmSync(keypoints, { force: true })
@@ -683,5 +686,51 @@ test("an opened group's messages grow in the column, which alone scrolls, an err
     }
   }
   await closeDialog(dialog)
+  await finish(app, errors)
+})
+
+test("a pose export starts from the folder's own keypoints file; a file chosen instead can be put back, and one that can't be read stops it", async () => {
+  const pose = [
+    shape('person', 'rectangle', [[100, 50], [200, 250]], { group_id: 1 }), shape('nose', 'point', [[150, 80]], { group_id: 1 }),
+    shape('left_eye', 'point', [[160, 70]], { group_id: 1 }), shape('right_eye', 'point', [[140, 70]], { group_id: 1, flags: { difficult: true } })
+  ]
+  const dir = await project('export-folder-keypoints', { a: doc('a', pose) })
+  const own = path.join(dir, '.myseg', 'keypoints.yaml')
+  mkdirSync(path.dirname(own), { recursive: true })
+  writeFileSync(own, 'classes:\n  person: [nose, left_eye, right_eye]\nflip:\n  person: [[left_eye, right_eye]]\n')
+  mkdirSync(OUT, { recursive: true })
+  const other = path.join(OUT, 'other-keypoints.yaml')
+  writeFileSync(other, 'classes:\n  person: [nose, tail]\n')
+  const { app, page, errors } = await launch(dir)
+  await stubDialogs(app)
+  let dialog = await openExport(page)
+  await choose(dialog, 'YOLO pose')
+  const file = dialog.locator('.export-options .export-file').nth(1)
+  await expect(file).toContainText("This folder's keypoints.yaml")
+  await expect(dialog.locator('.export-options')).toContainText('person: 3 keypoints · flip pairs')
+  // Another file, then the folder's again
+  await answer(app, 'opens', other)
+  await change(dialog, () => file.getByRole('button', { name: 'Choose…' }).click())
+  await expect(file).toContainText('other-keypoints.yaml')
+  await expect(dialog.locator('.export-options')).toContainText('person: 2 keypoints')
+  await change(dialog, () => file.getByRole('button', { name: "This folder's" }).click())
+  await expect(file).toContainText("This folder's keypoints.yaml")
+  await expect(file.getByRole('button', { name: "This folder's" })).toHaveCount(0)
+  const out = await exportTo(app, dialog, 'folder-pose')
+  await closeDialog(dialog)
+  expect(rows(out, 'labels/a.txt')).toEqual(['0 0.375000 0.500000 0.250000 0.666667 0.375000 0.266667 2 0.400000 0.233333 2 0.350000 0.233333 1'])
+  expect(readFileSync(path.join(out, 'data.yaml'), 'utf8')).toContain('kpt_shape: [3, 3]\nflip_idx: [0, 2, 1]\n')
+  // A folder's file that can't be read stops the export, rather than COCO's person going in its place
+  writeFileSync(own, 'classes: [nose\n')
+  dialog = await openExport(page)
+  await expect(file).toContainText("This folder's keypoints file")
+  const error = dialog.locator('.export-errors .export-group')
+  await expect(error.locator('.export-group-head')).toContainText("The keypoints file can't be read")
+  // The path as the system writes it: .myseg\keypoints.yaml on Windows
+  await expect(error.locator('.export-rows li')).toHaveText(/^\.myseg[\\/]keypoints\.yaml: The keypoints file isn't valid YAML/)
+  await expect(error.getByRole('button', { name: 'Choose another…' })).toBeVisible()
+  await page.screenshot({ path: `${SHOTS}/export-folder-keypoints-unreadable-dark.png` })
+  await dialog.getByRole('button', { name: 'Cancel' }).click()
+  await expect(dialog).toHaveCount(0)
   await finish(app, errors)
 })

@@ -21,12 +21,17 @@ import { closeImport, type ImportPolicy, type ImportRequest, importRows, readImp
 import { modelInfo, prelabel, stopPrelabel } from './prelabel'
 import {
   closeProject, hasLabelsIn, imagePath, type LabelClass, labelsChanged, LabelsChanged, labelsFile, loadLabels, meta, openHere, openProject, type ProjectInfo,
-  readLabelFile, refreshProject, reloadProjectFile, rootsOpen, saveLabels, saveProjectFile, type SaveRequest, serial, setTrash, summarizeAll, trashImage,
+  readLabelFile, refreshProject, reloadProjectFile, rootsOpen, saveLabels, saveProjectFile, type SaveRequest, serial, setKeypointsReader, setTrash, summarizeAll, trashImage,
   trashLabels
 } from './project'
 import { runModels } from './runs'
+import { folderKeypoints, saveFolderKeypoints } from './keypoints'
+import { poseInBoxes } from './rtmpose'
+import type { KeypointSchema } from '../shared/dataset'
+import { type PoseRequest, withKnownLines } from '../shared/skeleton'
 
 const NAME = 'Seamtag'
+
 app.setName(NAME)
 // macOS and Windows put the profile where the system says, whatever HOME is, so tests name their own
 if (process.env.SEAMTAG_USER_DATA) app.setPath('userData', process.env.SEAMTAG_USER_DATA)
@@ -258,6 +263,7 @@ function registerIpc() {
   ipcMain.handle('ai:cancel', (_e, name: string) => cancelDownload(name))
   ipcMain.handle('ai:remove', (_e, name: string) => removeModel(name))
   ipcMain.handle('ai:assist', (_e, req: AssistRequest) => assist(req))
+  ipcMain.handle('ai:pose', (_e, req: PoseRequest) => poseInBoxes(req))
   ipcMain.handle('shapes:merge-masks', (_e, shapes: { points: number[][]; mask: string }[]) => mergeMasks(shapes))
   // A model that finds boxes only, asked for masks, is the user's choice to change, not a failure
   ipcMain.handle('ai:text', (_e, req: TextRequest) => fromTexts(req).catch((e) => {
@@ -361,6 +367,38 @@ function registerIpc() {
     const summary = await saveKeypoints(r.filePath, schema)
     keypointFiles.add(summary.file)
     return summary
+  })
+  // The folder's keypoints file (.myseg/keypoints.yaml), which the editor draws poses with and
+  // Export starts from; COCO's person until there is one. Only open folders, and its file is one
+  // an export may read.
+  const openRoot = (root: string) => {
+    if (!rootsOpen().includes(root)) throw new Error("That folder isn't open in Seamtag")
+    return root
+  }
+  const trustKeypoints = <T extends { file: string | null }>(k: T) => {
+    if (k.file) keypointFiles.add(k.file)
+    return k
+  }
+  // New keypoints change which shapes are a pose's keypoints rather than of a class, so the image and label lists are counted again
+  const recount = <T extends { file: string | null }>(root: string, k: T) => {
+    summarizeAll(root, (batch) => send('project:summaries', batch), loaded?.config.label_format).catch(() => {})
+    return trustKeypoints(k)
+  }
+  ipcMain.handle('keypoints:get', async (_e, root: string) => trustKeypoints(await folderKeypoints(openRoot(root))))
+  ipcMain.handle('keypoints:set', async (_e, root: string, schema: KeypointSchema) => recount(root, await saveFolderKeypoints(openRoot(root), schema)))
+  ipcMain.handle('keypoints:choose', async (_e, root: string) => {
+    openRoot(root)
+    const r = await dialog.showOpenDialog(win!, { title: 'Choose a keypoints file for this folder', properties: ['openFile'], filters: keypointsFilter })
+    if (r.canceled || !r.filePaths[0]) return null
+    // X-AnyLabeling's COCO person file has no lines or flip pairs: COCO's are added, as a file made here has them
+    const { schema } = await readKeypoints(r.filePaths[0])
+    return recount(root, await saveFolderKeypoints(root, withKnownLines(schema)))
+  })
+  ipcMain.handle('keypoints:make', async (_e, root: string, prefer: LabelFormat) => {
+    const schema = await keypointsFromFolder(openRoot(root), prefer)
+    if (!schema) throw new Error('The folder has no posed objects to make a keypoints file from: give a box and its points one group_id')
+    // In COCO's order when it's COCO's person: the folder's points give the order they come in
+    return recount(root, await saveFolderKeypoints(root, withKnownLines(schema, true)))
   })
   ipcMain.handle('export:run', (_e, root: string, options: ExportOptions, out: string) => job((async () => {
     const result = await runExport(root, exportOptions(options), out, exportJob())
@@ -466,6 +504,7 @@ app.whenReady().then(async () => {
     configError = e.message
   }
   setTrash((file) => shell.trashItem(file))
+  setKeypointsReader(async (root) => (await folderKeypoints(root)).schema)
   protocol.handle('myseg', async (request) => {
     const file = path.resolve(decodeURIComponent(new URL(request.url).pathname.slice(1)))
     const allowed = [...rootsOpen(), cacheRoot()].some((dir) => dir && file.startsWith(dir + path.sep))

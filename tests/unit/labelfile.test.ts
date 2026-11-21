@@ -116,6 +116,28 @@ describe('AI shapes', () => {
     const s = summarize([ai(0.9), ai(0.4), newShape('dog', 'point', [[0, 0]])])
     expect(s).toEqual({ count: 1, ai: 2, score: 0.4, classes: { dog: 1 }, labelled: true })
   })
+
+  test("a pose counts once, by its box: its keypoints are neither counted nor classes; a shape named like a keypoint outside a pose is", () => {
+    const keypoints = { classes: { person: ['nose', 'left_eye'] } }
+    const pose = [
+      newShape('person', 'rectangle', [[0, 0], [9, 9]], { group_id: 1 }), newShape('nose', 'point', [[5, 2]], { group_id: 1 }),
+      newShape('nose', 'point', [[1, 1]]), newShape('left_eye', 'rectangle', [[2, 2], [3, 3]])
+    ]
+    expect(summarize(pose, true, keypoints)).toEqual({ count: 3, ai: 0, score: null, classes: { person: 1, nose: 1, left_eye: 1 }, labelled: true })
+    expect(summarize(pose)).toEqual({ count: 4, ai: 0, score: null, classes: { person: 1, nose: 2, left_eye: 1 }, labelled: true })
+  })
+})
+
+describe("an AI pose on a box of the image's own", () => {
+  test('is one proposal, scored by its keypoints\' mean; the box is the image\'s, counted as before', () => {
+    const keypoints = { classes: { person: ['nose', 'left_eye', 'right_eye'] } }
+    const ai = (label: string, x: number, score: number) => newShape(label, 'point', [[x, 5]], { group_id: 1, flags: { ai: true }, other: { score } })
+    const shapes = [newShape('person', 'polygon', [[0, 0], [9, 0], [9, 9]], { group_id: 1 }), ai('nose', 4, 0.6), ai('left_eye', 3, 0.8)]
+    expect(summarize(shapes, true, keypoints)).toEqual({ count: 1, ai: 1, score: 0.7, classes: { person: 1 }, labelled: true })
+    // An AI box stands for its keypoints: one proposal, with the box's score
+    const box = newShape('person', 'rectangle', [[0, 0], [9, 9]], { group_id: 1, flags: { ai: true }, other: { score: 0.5 } })
+    expect(summarize([box, ...shapes.slice(1)], true, keypoints)).toMatchObject({ count: 0, ai: 1, score: 0.5 })
+  })
 })
 
 describe('labelme 7', () => {

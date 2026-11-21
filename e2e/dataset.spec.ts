@@ -1223,8 +1223,9 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
   }
   await open()
   const cells = (label: string) => stats.locator(`.stats-labels tbody tr[data-label="${label}"] td`)
-  await expect(stats.locator('.stats-labels thead th')).toHaveText(['Label', 'Objects', 'Images', 'Polygon', 'Point', ''])
-  await expect(cells('cat')).toHaveText(['cat', '1', '1', '2', '0', 'Rename…'])
+  // A pose's keypoints are the keypoints table's, so no label here has a point
+  await expect(stats.locator('.stats-labels thead th')).toHaveText(['Label', 'Objects', 'Images', 'Polygon', ''])
+  await expect(cells('cat')).toHaveText(['cat', '1', '1', '2', 'Rename…'])
   await expect(stats.getByText(/^Objects are grouped as the exports group them/)).toHaveText('Objects are grouped as the exports group them: shapes with one label and ' +
     'one group ID are one object, and points grouped with a box are its keypoints, not objects. Lines and other points count as objects here, ' +
     'though the COCO and YOLO exports leave them out. The columns by shape type count shapes.')
@@ -1233,13 +1234,13 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
   await expect(stats.locator('.stats-column[title="1 image with 1 object"]')).toHaveCount(1)
   await expect(stats.locator('.stats-sizes tbody tr')).toHaveText(['Small under 32 × 32 px205205', 'Medium 32 × 32 to 96 × 96 px11', 'Large 96 × 96 px and over22'])
   await expect(stats).not.toContainText('no area here')
-  // The labels with no objects come last, past the first 200 rows
+  // The rows past the first 200 come with Show the other 8
   await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(200)
-  await expect(stats.locator('.stats-table .problems-more')).toHaveText('Show the other 10')
+  await expect(stats.locator('.stats-table .problems-more')).toHaveText('Show the other 8')
   await stats.locator('.stats-table .problems-more').click()
-  await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(210)
-  await expect(cells('person')).toHaveText(['person', '1', '1', '1', '0', 'Rename…'])
-  await expect(cells('nose')).toHaveText(['nose', '0', '1', '0', '1', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr')).toHaveCount(208)
+  await expect(cells('person')).toHaveText(['person', '1', '1', '1', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr[data-label="nose"]')).toHaveCount(0)
 
   // The labels table takes no more than a third of a short window, so the counts under it show too
   for (const theme of ['dark', 'light']) {
@@ -1256,6 +1257,64 @@ test("Statistics count objects as the exports do: a label's shapes in one group 
       await open()
     }
   }
+  await finish(app, errors)
+})
+
+test("Statistics count each keypoint of the folder's poses seen, hidden or not labelled, in the labels table's place, and save them in the CSV", async () => {
+  mkdirSync(SHOTS, { recursive: true })
+  const box = (label: string, x0: number, y0: number, x1: number, y1: number, group: number) => ({ ...rect(label, x0, y0, x1, y1), group_id: group })
+  const point = (label: string, x: number, y: number, group: number, hidden = false) =>
+    ({ label, shape_type: 'point', group_id: group, description: '', points: [[x, y]], flags: hidden ? { difficult: true } : {} })
+  const files: Record<string, string> = {
+    // A person with every keypoint, the left eye hidden; another with a nose only; and a cat
+    a: doc('a', [box('person', 50, 40, 200, 280, 1), point('nose', 120, 70, 1), point('left_eye', 130, 60, 1, true), point('right_eye', 110, 60, 1), square('cat', 250, 50, 350, 150)]),
+    b: doc('b', [box('person', 60, 30, 210, 290, 2), point('nose', 130, 60, 2)])
+  }
+  const dir = await project('dataset-stats-keypoints', files)
+  await paint(dir, Object.keys(files))
+  // The folder's own keypoints file
+  mkdirSync(path.join(dir, '.myseg'), { recursive: true })
+  writeFileSync(path.join(dir, '.myseg', 'keypoints.yaml'), 'classes:\n  person: [nose, left_eye, right_eye]\nflip:\n  person: [[left_eye, right_eye]]\n')
+  const csv = path.join(BASE, 'dataset-stats-keypoints.csv')
+  rmSync(csv, { force: true })
+  const { app, page, errors } = await launch(dir)
+  await app.evaluate(({ dialog }, file) => {
+    dialog.showSaveDialog = (async () => ({ canceled: false, filePath: file })) as any
+  }, csv)
+  await menu(page, 'Dataset', 'Statistics…')
+  const stats = page.getByRole('dialog', { name: 'Statistics' })
+  await expect(stats.locator('[data-tile="total"] b')).toHaveText('2')
+  // The labels table first, as in a folder with no poses
+  await expect(stats.locator('.stats-labels tbody tr').first()).toHaveAttribute('data-label', 'person')
+  await stats.getByRole('radio', { name: 'Keypoints' }).click()
+  const rows = stats.locator('.stats-keypoints tbody tr')
+  await expect(rows).toHaveCount(4)
+  const expected = [['person', '2 poses', '', ''], ['nose', '2', '0', '0'], ['left_eye', '0', '1', '1'], ['right_eye', '1', '0', '1']]
+  for (const [k, texts] of expected.entries()) await expect(rows.nth(k).locator('td')).toHaveText(texts)
+  await expect(stats.locator('.stats-keypoints thead th')).toHaveText(['Keypoint', 'Seen', 'Hidden', 'Not labelled'])
+  await expect(stats.locator('.stats-labels:not(.stats-keypoints)')).toHaveCount(0)
+  await expect(stats.getByText(/^Each class's poses as the pose exports find them/)).toBeVisible()
+  // Seen, most first, within each class; again, fewest first
+  await stats.getByRole('button', { name: 'Seen', exact: true }).click()
+  await expect(rows.locator('td:first-child')).toHaveText(['person', 'nose', 'right_eye', 'left_eye'])
+  await stats.getByRole('button', { name: 'Seen', exact: true }).click()
+  await expect(rows.locator('td:first-child')).toHaveText(['person', 'left_eye', 'right_eye', 'nose'])
+  for (const theme of ['dark', 'light']) {
+    for (const [width, height] of [[1500, 940], [960, 600]]) {
+      await resize(app, page, width, height)
+      expect(await fits(page, '.dialog.stats')).toEqual({ inside: true, page: true, onScreen: true })
+      await shot(page, `stats-keypoints-${width}-${theme}.png`)
+    }
+    if (theme === 'dark') await page.evaluate(() => { document.documentElement.dataset.theme = 'light' })
+  }
+  await stats.getByRole('button', { name: 'Save as CSV…' }).click()
+  await expect(stats).toContainText('Saved as dataset-stats-keypoints.csv')
+  expect(readFileSync(csv, 'utf8').split('\r\n\r\n')[1]).toBe('class,keypoint,seen,hidden,not_labelled\r\nperson,nose,2,0,0\r\nperson,left_eye,0,1,1\r\nperson,right_eye,1,0,1\r\n')
+  // And back to the labels, which leave the poses' keypoints to the keypoints table
+  await stats.getByRole('radio', { name: 'Labels' }).click()
+  await expect(stats.locator('.stats-keypoints')).toHaveCount(0)
+  await expect(stats.locator('.stats-labels tbody tr[data-label="person"] td')).toHaveText(['person', '2', '2', '0', '2', 'Rename…'])
+  await expect(stats.locator('.stats-labels tbody tr[data-label="nose"]')).toHaveCount(0)
   await finish(app, errors)
 })
 

@@ -18,8 +18,10 @@ import type { LabelFormat } from '../shared/formats'
 import { isAi } from '../shared/labelfile'
 import { CLOSED_TYPES } from '../shared/outline'
 import { poseInstances, readPoseYaml, writePoseYaml } from '../shared/pose'
+import { builtInKeypoints, withKnownLines } from '../shared/skeleton'
 import { isYoloImage, labelPathFor, labelRows, poseYamlKeys, type YoloTask, writeDataYaml } from '../shared/ultralytics'
 import { labelFileClashes, readDataset } from './dataset'
+import { keypointsFile } from './keypoints'
 import { nameKey } from './names'
 import { folderOf, imagePath, isEmbedded, readDoc, renameRetrying, writeAtomic } from './project'
 
@@ -27,10 +29,7 @@ import { folderOf, imagePath, isEmbedded, readDoc, renameRetrying, writeAtomic }
 export const EXPORT_FORMATS = ['coco', 'coco-keypoints', 'yolo-detect', 'yolo-segment', 'yolo-pose', 'yolo-obb'] as const
 export type ExportFormat = (typeof EXPORT_FORMATS)[number]
 const TASKS: Partial<Record<ExportFormat, YoloTask>> = { 'yolo-detect': 'detect', 'yolo-segment': 'segment', 'yolo-pose': 'pose', 'yolo-obb': 'obb' }
-const FORMAT_WORDS: Record<ExportFormat, string> = {
-  coco: 'COCO', 'coco-keypoints': 'COCO with keypoints', 'yolo-detect': 'YOLO detect', 'yolo-segment': 'YOLO segment', 'yolo-pose': 'YOLO pose', 'yolo-obb': 'YOLO OBB'
-}
-/** Does this format need a keypoints file, for each class's keypoint names? */
+/** Does this format need keypoints, for each class's keypoint names? */
 export const needsKeypoints = (format: ExportFormat) => format === 'coco-keypoints' || format === 'yolo-pose'
 
 /**
@@ -49,7 +48,11 @@ export type ExportOptions = {
   backgrounds: boolean
   /** AI proposals not yet accepted are left out, rather than stopping the export */
   leaveAi: boolean
-  /** The keypoints file (X-AnyLabeling's pose YAML), for COCO with keypoints and YOLO pose */
+  /**
+   * For COCO with keypoints and YOLO pose, a keypoints file (X-AnyLabeling's pose YAML) chosen in
+   * one of main's dialogs; null for the folder's own, .myseg/keypoints.yaml, or COCO's person
+   * until it has one, as the window draws poses with
+   */
   keypoints: string | null
   /** The window's save format: an image with label files in two formats is read in this one */
   prefer: LabelFormat
@@ -88,6 +91,7 @@ export type Preflight = {
   counts: Record<Severity, number>
   /** An error stops the export */
   blocked: boolean
+  /** The keypoints file a pose export reads; null for one that takes none, or that takes COCO's person, built in */
   keypoints: KeypointsSummary | null
   /** What the export does beyond the files themselves, said before it does it */
   notes: string[]
@@ -111,7 +115,6 @@ export type ExportResult = {
 // What each kind of issue is called in the window, sentence case; a severity of its own where a
 // code has two
 const TITLES: Record<string, string> = {
-  'export-no-keypoints': 'No keypoints file',
   'export-keypoints-unreadable': "The keypoints file can't be read",
   'export-nothing': 'Nothing to export',
   'export-no-classes': 'No classes',
@@ -544,13 +547,16 @@ async function gather(root: string, options: ExportOptions, ctx: Context): Promi
 
   let schema: KeypointSchema | null = null, keypoints: KeypointsSummary | null = null
   if (needsKeypoints(options.format)) {
-    if (!options.keypoints) add('error', 'export-no-keypoints', null, `${FORMAT_WORDS[options.format]} needs a keypoints file naming each class's keypoints: choose one, or make one from the folder's posed objects`)
-    else {
-      try {
-        ;({ schema, summary: keypoints } = await readKeypoints(options.keypoints))
-      } catch (e) {
-        add('error', 'export-keypoints-unreadable', null, `${path.basename(options.keypoints)}: ${reason(e)}`)
-      }
+    // The file chosen, or the folder's own. Read here, not through keypoints.ts' folderKeypoints, which
+    // puts COCO's person in the place of a folder's file it can't read: an export stops on it instead.
+    const file = options.keypoints ?? keypointsFile(root)
+    try {
+      ;({ schema, summary: keypoints } = await readKeypoints(file))
+      // As the window draws them: COCO's person gets COCO's lines and flip pairs, which YOLO pose's flip_idx comes from
+      schema = withKnownLines(schema)
+    } catch (e) {
+      if (!options.keypoints && (e as NodeJS.ErrnoException).code === 'ENOENT') schema = builtInKeypoints()
+      else add('error', 'export-keypoints-unreadable', null, `${options.keypoints ? path.basename(file) : path.relative(root, file)}: ${reason(e)}`)
     }
   }
 
@@ -780,7 +786,7 @@ const globalIssues = (g: Gathered): Issue[] => TASKS[g.options.format] ? []
 /** An image's YOLO label file, and its tally */
 function yoloRows(g: Gathered, i: Item): { text: string; tally: Tally } {
   const task = TASKS[g.options.format]!
-  // With no keypoints file there are no pose rows to make: the check says so, and nothing is exported
+  // With no keypoints, as when their file can't be read, there are no pose rows to make: the check says so, and nothing is exported
   if (task === 'pose' && !g.schema) return { text: '', tally: { issues: [], objects: [], background: false, posed: 0, held: true } }
   const rows = labelRows(i.image, task, g.classes, g.schema ?? undefined)
   const objects: string[] = []

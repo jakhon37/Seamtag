@@ -170,13 +170,13 @@ describe('posed objects in an image', () => {
       ['warning', 'pose-no-box', "a.jpg: group 2 has keypoints of hand but no box, and the box around its one point has no area: add a box with the class's label"]
     ])
   })
-  test('shapes of two classes in a group, unknown keypoint names and repeated ones are errors, which stop a pose export', () => {
+  test('shapes of two classes in a group and unknown keypoint names are errors, which stop a pose export; a repeated keypoint is a warning, and left out', () => {
     const { instances, issues } = poseInstances(image([
       box('person', 1), box('hand', 1), point('nose', 1, 20, 20),
       box('person', 2), point('tail', 2, 20, 20), point('nose', 2, 20, 20), point('nose', 2, 25, 25)
     ]), SCHEMA)
     expect(issues.map((i) => [i.severity, i.code, i.shape])).toEqual([
-      ['error', 'pose-two-classes', 1], ['error', 'pose-unknown-keypoint', 4], ['error', 'pose-repeated-keypoint', 6]
+      ['error', 'pose-two-classes', 1], ['error', 'pose-unknown-keypoint', 4], ['warning', 'pose-repeated-keypoint', 6]
     ])
     expect(issues[0].message).toBe("a.jpg: group 1 has shapes of person and hand, so it's left out: give each object its own group")
     expect(instances).toEqual([{ label: 'person', group: 2, box: [10, 10, 50, 60], keypoints: [[20, 20, 2], null, null], shapes: [3, 5] }])

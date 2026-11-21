@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Keypoints and poses: the Pose tool, skeletons on the canvas, AI pose with RTMPose, and checks and statistics for poses.
+
+### Added
+- The Pose tool (`K`): a box, then each keypoint as it's asked for, by the pointer with the keys; Shift+click for a hidden one, `X` to skip one, `Backspace` to go back, `Enter` to finish, and `Escape` on a new box with nothing placed drops it. A faint guide shows where the last pose's keypoints went, mirrored for someone facing the other way.
+- Poses drawn as skeletons: lines between the keypoints, left, right and middle in their own colours, hidden points hollow, sized to the pose on screen at any zoom. With a pose selected, the others dim, its keypoints show their numbers when it's tall enough for them, and Display labels names them; a pose's box marks it and isn't filled.
+- A pose selected by its box moves, nudges, copies, pastes, duplicates and deletes as one; a copy takes a new group ID, after a pose being placed. Its keypoints are grabbed before its outline's points, whose handles stay hidden. `Q` hides or shows a keypoint, `M` swaps left and right, `Shift+M` mirrors a pose in its box, `N` and `Shift+N` step through its keypoints.
+- The Shapes list folds each pose into one row with its count of keypoints, opened to its keypoints in order, missing ones included.
+- AI pose (`Shift+K`) and Pose every person: RTMPose-m or RTMPose-l finds a person's 17 keypoints in a box, or in each person of the image without keypoints, a group's shapes of the class as one (found with YOLO-World, from a score of 0.25, on an image with none). Points scored below `ai.pose_score` are left out, as are points past the photo's edge, and so is a pose with fewer than 5 points. A pose is reviewed as one, by its mean score, and accepted or rejected as one; an edit to any of it accepts it. The models are downloaded from OpenMMLab when you agree, with Hugging Face's copy if OpenMMLab can't be reached.
+- The folder's keypoints file, `.myseg/keypoints.yaml`, set under Dataset → Keypoints… from a file or made from the folder's poses; COCO's 17-point person until there is one. A file of COCO's person without lines or left-right pairs, as X-AnyLabeling writes it, is read with COCO's, and one made from the folder's poses keeps COCO's order.
+- Check labels finds keypoints outside their box, repeated (with a Fix) or not their class's, keypoints with no group or no box, and a likely left-right swap.
+- Statistics counts each keypoint seen, hidden and not labelled, in the window and the CSV; its labels table leaves a pose's keypoints to that table.
+
 ### Changed
+- A pose's keypoints aren't shapes of a class: the Labels list, its keys and counts and the image list's counts leave them out, and `validate_label: exact` takes the keypoints file's names. A box or a point named like a keypoint outside a pose is of a class as before.
+- Pascal VOC, YOLO and CreateML leave points out, where they made them boxes with no size: a pose keeps its box, and the window says how many points were left out.
+- Export dataset's pose formats start from the folder's keypoints file, or COCO's person, so no file need be chosen. A keypoint given twice in one pose is left out with a warning, rather than stopping the export.
+- AI pose keeps its own model in memory beside SAM2's, so SAM2 doesn't encode the image again after a pose.
 - Renaming a label across a Seamline project renames Seamline's class of that name in `.myseg/project.json` too, in its place and with its colour, as soon as a label file has the new name, even when the rename is stopped or some files can't be renamed. 3.3.0 renamed the class only once no label file had the old name. The rename writes the class list itself, merged with the file as it is then, so classes Seamline added, deleted or recoloured meanwhile, and the file's other keys, stay as Seamline left them. The rename window says before anything is written that the class is renamed too, and the message after the rename says it was. Folders without `.myseg/project.json` are renamed as before.
 
 ### Fixed

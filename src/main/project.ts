@@ -6,7 +6,9 @@ import {
   writeCreateML, writeVoc, writeYolo, YOLO_CLASSES
 } from '../shared/formats'
 import { FORMAT_VERSION, isAi, type LabelDoc, LabelFileError, parseLabelFile, serializeLabelFile, type Shape } from '../shared/labelfile'
+import type { KeypointSchema } from '../shared/dataset'
 import { EMPTY_SUMMARY, hasArea, type Summary, summarize } from '../shared/labels'
+import { posePoints, posesIn } from '../shared/skeleton'
 import { nameKey } from './names'
 
 // What Chromium or libvips can show. labelme takes whatever Qt can read, which is much the same.
@@ -238,6 +240,15 @@ export async function readLabelFile(dir: string, name: string, file: string, siz
 
 // Label files that are replaced go to the trash: the window sets the system's, tests use none
 let trash = (file: string) => fs.rm(file, { force: true })
+// The folder's keypoints file, read by keypoints.ts (which uses this module): main sets the reader
+// at start. A pose's keypoints are shapes the image list counts, but not shapes of a class.
+let keypointsReader: (root: string) => Promise<KeypointSchema | null> = async () => null
+export function setKeypointsReader(fn: (root: string) => Promise<KeypointSchema | null>) {
+  keypointsReader = fn
+}
+/** The folder's keypoints, or null when they can't be had */
+export const keypointsOf = (root: string) => keypointsReader(root).catch(() => null)
+
 export function setTrash(fn: (file: string) => Promise<void>) {
   trash = fn
 }
@@ -771,6 +782,10 @@ export async function summarizeAll(
   dir: string, send: (batch: { root: string; items: ImageItem[]; labels: string[] }) => void, prefer: LabelFormat = 'labelme', changedOnly = false,
   only?: string[]
 ) {
+  // A pose's keypoints aren't shapes of a class: left out of each image's classes and the label list.
+  // A summary made with other keypoints is made again, and a refresh tells it again.
+  const keypoints = await keypointsOf(dir)
+  const keypointsKey = keypoints ? sha1(Buffer.from(JSON.stringify(keypoints))) : ''
   const r = getRoot(dir)
   const names = only ? only.filter((n) => r.images.has(n)) : [...r.images.keys()]
   let batch: ImageItem[] = []
@@ -794,13 +809,13 @@ export async function summarizeAll(
   }
   const one = async (name: string) => {
     // Every label file the image has or could have, by size and time: a refresh skips images whose files are as they were
-    const seen = (await Promise.all([...[...labelFiles(dir, name).keys()].map(stamp), classesStamp(yoloClasses(labelPath(dir, name, 'yolo')))])).join('\0')
+    const seen = [...(await Promise.all([...[...labelFiles(dir, name).keys()].map(stamp), classesStamp(yoloClasses(labelPath(dir, name, 'yolo')))])), keypointsKey].join('\0')
     if (changedOnly && r.sent.get(name) === seen) return
     const found = await findLabels(dir, name, prefer).catch(() => null)
     const stat = found && await fs.stat(found.file).catch(() => null)
     // YOLO's names come from classes.txt, so a change there counts too
     const classes = found?.format === 'yolo' ? await classesStamp(yoloClasses(found.file)) : ''
-    const key = found && stat ? `${found.format}:${stat.size}:${stat.mtimeMs}:${classes}` : 'none'
+    const key = found && stat ? `${found.format}:${stat.size}:${stat.mtimeMs}:${classes}\0${keypointsKey}` : 'none'
     // By image too: one CreateML file can hold every image's labels
     const id = `${found?.file ?? ''}\0${name}`
     let cached = summaryCache.get(id)
@@ -810,8 +825,10 @@ export async function summarizeAll(
       if (found && stat) {
         try {
           const read = await readLabels(dir, name, found, anySize)
-          item = { ...summarize(read?.doc.shapes ?? [], !!read), verified: read?.verified || undefined }
-          labels = (read?.doc.shapes ?? []).map((s) => s.label)
+          const shapes = read?.doc.shapes ?? []
+          const keypointAt = keypoints ? posePoints(posesIn(shapes, keypoints)) : null
+          item = { ...summarize(shapes, !!read, keypoints), verified: read?.verified || undefined }
+          labels = shapes.filter((_, i) => !keypointAt?.has(i)).map((s) => s.label)
         } catch (e: any) {
           item = { ...EMPTY_SUMMARY, labelled: true, broken: e.message }
         }
@@ -1018,7 +1035,7 @@ export async function saveLabels(dir: string, name: string, req: SaveRequest, fr
         kept = `${path.basename(old)} couldn't go to the trash: ${e.message}`
       }
     }
-    const item: ImageItem = { ...summarize(req.shapes, true), name, embedded: embedded || undefined, verified: verified || undefined }
+    const item: ImageItem = { ...summarize(req.shapes, true, await keypointsOf(dir)), name, embedded: embedded || undefined, verified: verified || undefined }
     if (!req.target) r.images.set(name, item)
     return { file, item, format, replaced, kept }
   })

@@ -1,4 +1,6 @@
+import type { KeypointSchema } from './dataset'
 import { isAi, scoreOf, type Shape } from './labelfile'
+import { posePoints, posesIn } from './skeleton'
 
 export type Summary = {
   /** Accepted shapes. AI shapes stay out of the counts until accepted, as in training. */
@@ -6,26 +8,47 @@ export type Summary = {
   ai: number
   /** The least certain AI shape's score */
   score: number | null
+  /** Accepted shapes of each class, which the Labels dock adds up across the folder */
   classes: Record<string, number>
   /** A label file exists, so the image has been looked at: zero shapes means truly empty */
   labelled: boolean
 }
 
-// What the image list shows
-export function summarize(shapes: Shape[], labelled = true): Summary {
+/**
+ * What the image list shows. With the folder's `keypoints`, its poses' keypoints (skeleton.ts'
+ * posePoints) are left out of the count and of `classes`: a pose counts once, by its box, and
+ * its keypoints name keypoints, not classes. Any other shape labelled like a keypoint is of a
+ * class as usual.
+ */
+export function summarize(shapes: Shape[], labelled = true, keypoints?: KeypointSchema | null): Summary {
   const classes: Record<string, number> = {}
   let ai = 0
   let score: number | null = null
-  for (const s of shapes) {
-    if (isAi(s)) {
-      ai++
-      const v = scoreOf(s)
-      if (v !== undefined) score = score === null ? v : Math.min(score, v)
-    } else {
+  const proposal = (v: number | undefined) => {
+    ai++
+    if (v !== undefined) score = score === null ? v : Math.min(score, v)
+  }
+  const poses = keypoints ? posesIn(shapes, keypoints) : []
+  const keypointAt = posePoints(poses)
+  let count = 0
+  for (const [i, s] of shapes.entries()) {
+    if (keypointAt.has(i)) continue
+    if (isAi(s)) proposal(scoreOf(s))
+    else {
+      count++
       classes[s.label] = (classes[s.label] ?? 0) + 1
     }
   }
-  return { count: shapes.length - ai, ai, score, classes, labelled }
+  // Keypoints the AI proposed for a box of the image's own are one proposal, as an AI pose's box would be,
+  // scored by their mean as its box is; an AI box counted above stands for its keypoints
+  for (const p of poses) {
+    if (p.box !== null && isAi(shapes[p.box])) continue
+    const proposed = p.points.filter((k): k is number => k !== null && isAi(shapes[k]))
+    if (!proposed.length) continue
+    const scores = proposed.map((k) => scoreOf(shapes[k])).filter((v): v is number => v !== undefined)
+    proposal(scores.length ? scores.reduce((a, b) => a + b, 0) / scores.length : undefined)
+  }
+  return { count, ai, score, classes, labelled }
 }
 
 export const EMPTY_SUMMARY: Summary = { count: 0, ai: 0, score: null, classes: {}, labelled: false }

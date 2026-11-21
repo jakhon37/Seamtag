@@ -32,11 +32,13 @@ export function flagsFor(label: string, labelFlags: Config['label_flags'], curre
 type Props = {
   request: LabelRequest
   labels: string[]
+  /** The keypoints file's keypoint names: not classes, so validate_label: exact lets them through */
+  keypoints?: ReadonlySet<string>
   config: Config
   onDone: (choice: LabelChoice | null) => void
 }
 
-export default function LabelDialog({ request, labels, config, onDone }: Props) {
+export default function LabelDialog({ request, labels, keypoints, config, onDone }: Props) {
   const locked = request.locked ?? {}
   const [text, setText] = useState(request.text)
   const [flags, setFlags] = useState<Record<string, boolean>>(() => ({
@@ -82,7 +84,8 @@ export default function LabelDialog({ request, labels, config, onDone }: Props) 
   }, [])
 
   const label = text.trim()
-  const invalid = !locked.text && config.validate_label === 'exact' && label && !labels.includes(label)
+  const allowed = (l: string) => labels.includes(l) || !!keypoints?.has(l)
+  const invalid = !locked.text && config.validate_label === 'exact' && label && !allowed(label)
   const groupValue = group.trim() === '' ? null : Number(group)
   const groupBad = groupValue !== null && !Number.isInteger(groupValue)
   const canAccept = (locked.text || !!label) && !invalid && !groupBad
@@ -90,7 +93,7 @@ export default function LabelDialog({ request, labels, config, onDone }: Props) 
   const accept = (value = label) => {
     if (!locked.text && !value) return
     if (!canAccept && value === label) return
-    if (config.validate_label === 'exact' && !locked.text && !labels.includes(value)) return
+    if (config.validate_label === 'exact' && !locked.text && !allowed(value)) return
     onDone({ text: value, flags, group_id: groupValue, description })
   }
 

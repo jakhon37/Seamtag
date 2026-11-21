@@ -140,17 +140,35 @@ export async function imageData(root: string, name: string): Promise<string> {
   return out.toString('base64')
 }
 
-/** RGB pixels of an image, upright, no bigger than maxSide; with the size of the whole image */
-export async function rgbPixels(root: string, name: string, maxSide?: number) {
+/** The file AI tools read an image from, and the image's size upright */
+export async function aiImage(root: string, name: string) {
   const file = isEmbedded(root, name) ? await embeddedFile(imagePath(root, name)) : imagePath(root, name)
   if (path.extname(file).toLowerCase() === '.bmp') throw new Error("AI tools can't read BMP files yet")
   const info = await sharp(file, { limitInputPixels: false }).metadata()
   const swapped = (info.orientation ?? 1) >= 5
-  const fullWidth = swapped ? info.height! : info.width!
-  const fullHeight = swapped ? info.width! : info.height!
-  let image = sharp(file, { limitInputPixels: false }).rotate().removeAlpha().toColourspace('srgb')
+  return { file, width: swapped ? info.height! : info.width!, height: swapped ? info.width! : info.height! }
+}
+
+async function rgb(image: sharp.Sharp) {
+  const { data, info } = await image.removeAlpha().toColourspace('srgb').raw().toBuffer({ resolveWithObject: true })
+  if (info.channels !== 3) throw new Error(`Expected RGB pixels, got ${info.channels} channels`)
+  return { data, width: info.width, height: info.height }
+}
+
+/** RGB pixels of an image, upright, no bigger than maxSide; with the size of the whole image */
+export async function rgbPixels(root: string, name: string, maxSide?: number) {
+  const { file, width: fullWidth, height: fullHeight } = await aiImage(root, name)
+  let image = sharp(file, { limitInputPixels: false }).rotate()
   if (maxSide) image = image.resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
-  const { data, info: out } = await image.raw().toBuffer({ resolveWithObject: true })
-  if (out.channels !== 3) throw new Error(`Expected RGB pixels, got ${out.channels} channels`)
-  return { data, width: out.width, height: out.height, fullWidth, fullHeight }
+  return { ...(await rgb(image)), fullWidth, fullHeight }
+}
+
+/**
+ * RGB pixels of a region of an image file, in the upright image's pixels, shrunk to `size` when
+ * given. Only the region is kept, so a large image's region costs no more memory than its own size.
+ */
+export async function rgbRegion(file: string, region: sharp.Region, size?: [number, number]) {
+  let image = sharp(file, { limitInputPixels: false }).rotate().extract(region)
+  if (size) image = image.resize(size[0], size[1], { fit: 'fill' })
+  return rgb(image)
 }

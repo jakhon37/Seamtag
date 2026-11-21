@@ -37,6 +37,8 @@ shortcuts:
 | `ai.default` | `Sam2 (balanced)` | The model for AI points and AI box, until one is picked in the AI menu: `EfficientSam (speed)`, `EfficientSam (accuracy)`, `Sam2 (speed)`, `Sam2 (balanced)` or `Sam2 (accuracy)`, as labelme's config names them. `Sam (…)` models can't run in this app, so they get SAM2 (balanced). |
 | `ai.text_model` | `yoloworld:latest` | The model for the text prompt. `sam3:latest` is accepted too, but SAM 3 can't run in this app, so YOLO-World is used. |
 | `ai.suppress_existing_shape_matches` | `false` | AI points and AI box leave out objects already drawn, and select those shapes instead. |
+| `ai.pose_model` | `rtmpose-m` | The model for AI pose, until one is picked in the AI menu. |
+| `ai.pose_score` | `0.3` | From 0 to 1: the score a keypoint AI pose finds needs to be kept. The AI pose toolbar changes it for the session. |
 | `flag_dock.show`, `label_dock.show`, `shape_dock.show`, `file_dock.show` | `true` | Which side lists show at first. |
 | `show_label_text_field` | `true` | Show the text box in the label dialog. |
 | `label_completion` | `startswith` | Or `contains`. |
@@ -74,6 +76,9 @@ Written as Qt writes them, a key or a list of keys, `null` for none. As in Qt, `
 | `create_polygon`, `create_rectangle`, `create_oriented_rectangle` | `[Ctrl+Shift+V, P]`, `[Ctrl+Shift+B, R]`, none |
 | `create_circle`, `create_line`, `create_point`, `create_linestrip` | none |
 | `create_ai_points_to_shape`, `create_ai_box_to_shape` | none |
+| `create_pose`, `create_ai_pose` | `K`, `Shift+K` |
+| `toggle_keypoint_hidden`, `swap_keypoint_sides`, `mirror_pose` | `Q`, `M`, `Shift+M` |
+| `next_keypoint`, `prev_keypoint` | `N`, `Shift+N` |
 | `create_brush`, `create_eraser` | `B`, `E` |
 | `draw_squares`, `display_labels` | `Ctrl+Shift+R`, `Ctrl+Shift+P` |
 | `edit_shape`, `edit_label`, `lock_shape` | `[Ctrl+Shift+C, V, Ctrl+J]`, `[Ctrl+Shift+X, Ctrl+E]`, `Ctrl+Shift+L` |
@@ -90,7 +95,7 @@ Written as Qt writes them, a key or a list of keys, `null` for none. As in Qt, `
 | `review_accept`, `review_accept_all`, `review_reject`, `review_skip` | `W`, `Shift+W`, `S`, `Tab` |
 | `brush_smaller`, `brush_larger` | `[`, `]` |
 
-`1` to `9` pick a label, arrow keys move the selection (Shift for 10 pixels), `Space` finishes a polygon, line strip or AI points shape being drawn, and `Escape` cancels what's being drawn. On a Mac, macOS keeps ⌘H and ⌘A for itself, so there `F` shows and hides shapes.
+`1` to `9` pick a label, arrow keys move the selection (Shift for 10 pixels), `Space` finishes a polygon, line strip or AI points shape being drawn, and `Escape` cancels what's being drawn. While a pose's keypoints are placed, one at a time, Shift+click places a hidden one, `X` skips one, `Backspace` goes back one, and `Enter`, `Space` or `Escape` ends the pose, keeping what's placed. On a Mac, macOS keeps ⌘H and ⌘A for itself, so there `F` shows and hides shapes.
 
 ## LabelImg's keys
 

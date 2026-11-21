@@ -101,6 +101,9 @@ describe('config', () => {
     expect(() => mergeConfig(defaultConfig(), { shortcuts: 'oops' })).toThrow(/must be a mapping/)
     expect(() => mergeConfig(defaultConfig(), { mask_polygonization: { detail: 101 } })).toThrow(/between 0 and 100/)
     expect(() => mergeConfig(defaultConfig(), { ai: { text_model: 'sam2:latest' } })).toThrow(/AI Text Prompt model/)
+    expect(() => mergeConfig(defaultConfig(), { ai: { pose_model: '' } })).toThrow(/ai.pose_model/)
+    expect(() => mergeConfig(defaultConfig(), { ai: { pose_score: 1.5 } })).toThrow(/ai.pose_score must be a number from 0 to 1/)
+    expect(() => mergeConfig(defaultConfig(), { ai: { pose_score: '0.3' } })).toThrow(/ai.pose_score/)
     expect(() => mergeConfig(defaultConfig(), { label_flags: { '.*': 'occluded' } })).toThrow(/label_flags/)
   })
 

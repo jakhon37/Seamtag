@@ -1,7 +1,8 @@
 import { ChevronDown, ChevronRight, CircleAlert, CircleCheck, FolderOpen, Info, TriangleAlert, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { ExportFormat, ExportOptions, ExportProgress, ExportResult, IssueGroup, KeypointsSummary, Preflight, SplitCount } from '../../main/export'
-import type { Issue, Severity } from '../../shared/dataset'
+import type { Issue, KeypointSchema, Severity } from '../../shared/dataset'
+import type { FolderKeypoints } from '../../shared/skeleton'
 import { useModal } from './Modal'
 import { showMore } from './Problems'
 import Radios from './Radios'
@@ -49,6 +50,13 @@ const n = (v: number) => v.toLocaleString('en-GB')
 const count = (v: number, one: string, many = `${one}s`) => `${n(v)} ${v === 1 ? one : many}`
 const baseName = (file: string) => file.split(/[\\/]/).filter(Boolean).pop() ?? file
 const parentOf = (file: string) => file.replace(/[\\/]+[^\\/]*[\\/]*$/, '') || '/'
+const somePairs = (pairs?: Record<string, unknown[]>) => !!pairs && Object.values(pairs).some((p) => p.length > 0)
+/** What keypoints hold, in a line: each class's count of them, and whether they have flip pairs and lines */
+const keypointsLine = ({ classes, flip, skeleton }: Omit<KeypointsSummary, 'file'>) =>
+  `${classes.map((c) => `${c.name}: ${count(c.keypoints, 'keypoint')}`).join(' · ')}${flip ? ' · flip pairs' : ''}${skeleton ? ' · skeleton' : ''}`
+const summaryOf = (schema: KeypointSchema): Omit<KeypointsSummary, 'file'> => ({
+  classes: Object.entries(schema.classes).map(([name, names]) => ({ name, keypoints: names.length })), flip: somePairs(schema.flip), skeleton: somePairs(schema.skeleton)
+})
 
 // Choices the window keeps for next time, in this window's profile only
 const KEPT = 'seamtag:export'
@@ -65,6 +73,8 @@ function readKept(): Kept {
 export default function ExportDialog({ root, format: prefer, labels, onClose }: Props) {
   const [kept, setKept] = useState<Kept>(readKept)
   const [out, setOut] = useState<{ path: string; problem: string | null } | null>(null)
+  // The folder's own keypoints, which a pose export reads unless another file is chosen here
+  const [folder, setFolder] = useState<FolderKeypoints | null>(null)
   const [keypoints, setKeypoints] = useState<KeypointsSummary | null>(null)
   // Whether the keypoints file chosen is one the window made, which may lack keypoints no image has
   const [made, setMade] = useState(false)
@@ -90,6 +100,11 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
 
   const coco = kept.format.startsWith('coco')
   const posed = kept.format === 'coco-keypoints' || kept.format === 'yolo-pose'
+  // With no file chosen, keypoints: null exports with the folder's own. A folder's file that can't be read is the check's
+  // error, so it's named but not described; until the folder's are read, nothing is named.
+  const own = folder && !folder.problem ? folder : null
+  const keypointsName = keypoints ? baseName(keypoints.file) : own?.file ? `This folder's ${baseName(own.file)}` : own ? "COCO's person, built in"
+    : folder?.problem ? "This folder's keypoints file" : null
   const images = !coco && kept.images === 'leave' ? 'copy' : kept.images
   const shares = [kept.train, kept.val, kept.test]
   const sharesBad = kept.mode === 'ratio' && (shares.some((p) => !Number.isInteger(p) || p < 0) || shares.reduce((a, b) => a + b, 0) !== 100 || kept.train === 0)
@@ -111,6 +126,12 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
     }
   }, [kept])
   useEffect(() => window.api.onExportProgress(setProgress), [])
+  // Main reads the same file when the export does: this only says what it holds
+  useEffect(() => {
+    let live = true
+    window.api.keypointsGet(root).then((k) => live && setFolder(k), () => live && setFolder(null))
+    return () => { live = false }
+  }, [root])
   // A check still running when the window closes is stopped, and what the checks kept is let go
   useEffect(() => () => void window.api.exportClose(), [])
   useEffect(() => {
@@ -170,7 +191,6 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
   const checkAgain: Fix[] = [{ label: 'Check again', run: () => setReread((r) => r + 1) }]
   const fixes: Record<string, Fix[]> = {
     'export-ai-pending': [{ label: 'Leave them out', run: () => set({ leaveAi: true }) }],
-    'export-no-keypoints': [{ label: 'Choose one…', run: () => pickKeypoints(false) }, { label: 'Make one…', run: () => pickKeypoints(true) }],
     'export-keypoints-unreadable': [{ label: 'Choose another…', run: () => pickKeypoints(false) }],
     'export-in-label-file': [{ label: 'Copy the images instead', run: () => set({ images: 'copy' }) }],
     'coco-broken-labels': checkAgain, 'yolo-broken': checkAgain, 'coco-unreadable-image': checkAgain, 'yolo-no-size': checkAgain
@@ -279,15 +299,13 @@ export default function ExportDialog({ root, format: prefer, labels, onClose }: 
                 <>
                   <h4>Keypoints file</h4>
                   <div className="export-file">
-                    <span className={keypoints ? '' : 'muted'} title={keypoints?.file}>{keypoints ? baseName(keypoints.file) : 'Each class and its keypoints, in order'}</span>
+                    <span className={keypointsName ? '' : 'muted'} title={keypoints?.file ?? own?.file ?? undefined}>{keypointsName ?? 'Each class and its keypoints, in order'}</span>
+                    {keypoints && folder && (
+                      <button className="ghost" onClick={() => { setKeypoints(null); setMade(false) }} title="Use this folder's keypoints again">This folder's</button>
+                    )}
                     <button className="ghost" onClick={() => pickKeypoints(false)}>Choose…</button>
                   </div>
-                  {keypoints && (
-                    <p className="export-hint">
-                      {keypoints.classes.map((c) => `${c.name}: ${count(c.keypoints, 'keypoint')}`).join(' · ')}
-                      {keypoints.flip ? ' · flip pairs' : ''}{keypoints.skeleton ? ' · skeleton' : ''}
-                    </p>
-                  )}
+                  {(keypoints || own) && <p className="export-hint">{keypointsLine(keypoints ?? summaryOf(own!.schema))}</p>}
                   <button className="ghost export-make" onClick={() => pickKeypoints(true)}>Make a keypoints file…</button>
                   <p className="export-hint" ref={keypointsHint}>
                     {made && keypoints

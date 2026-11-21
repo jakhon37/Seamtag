@@ -144,8 +144,10 @@ describe('COCO', () => {
     expect(schema).toEqual({ classes: { person: ['nose', 'left_eye'] } })
     const file = path.join(folder(), 'keypoints.yaml')
     writeFileSync(file, writePoseYaml({ classes: { person: ['nose', 'left_eye', 'right_eye'] }, flip: { person: [['left_eye', 'right_eye']] } }))
-    const blocked = await preflight(dir, options({ format: 'coco-keypoints' }))
-    expect(codes(blocked)).toContainEqual(['error', 'export-no-keypoints', 1])
+    // With none chosen, the folder's own: COCO's person, as it has no file
+    const own = await preflight(dir, options({ format: 'coco-keypoints' }))
+    expect(own).toMatchObject({ blocked: false, keypoints: null })
+    expect(own.splits[0].posed).toBe(1)
     const check = await preflight(dir, options({ format: 'coco-keypoints', keypoints: file }))
     expect(check.blocked).toBe(false)
     expect(check.keypoints).toEqual({ file, classes: [{ name: 'person', keypoints: 3 }], flip: true, skeleton: false })
@@ -326,11 +328,26 @@ describe('YOLO', () => {
     expect((await preflight(dir, options({ backgrounds: true }))).blocked).toBe(false)
   })
 
-  test('pose with no keypoints file: the check says the file is needed, rather than failing', async () => {
+  test("pose with no file chosen: the folder's keypoints file, COCO's person until it has one, and one that can't be read stops the export", async () => {
     const dir = await folderWith({ 'a.png': [shape('person', 'rectangle', [[4, 4], [20, 24]], { group_id: 2 }), shape('nose', 'point', [[12, 10]], { group_id: 2 })] })
+    // COCO's person, built in: its 17 keypoints, mirrored as Ultralytics mirrors COCO's
+    expect(await preflight(dir, options({ format: 'yolo-pose' }))).toMatchObject({ blocked: false, keypoints: null })
+    const out = newFolder()
+    await runExport(dir, options({ format: 'yolo-pose' }), out)
+    expect(yaml.load(text(out, 'data.yaml'))).toMatchObject({ kpt_shape: [17, 3], flip_idx: [0, 2, 1, 4, 3, 6, 5, 8, 7, 10, 9, 12, 11, 14, 13, 16, 15], names: { 0: 'person' } })
+    expect(text(out, 'labels/a.txt').split(' ')).toHaveLength(5 + 17 * 3)
+    // The folder's own file
+    const own = path.join(dir, '.myseg', 'keypoints.yaml')
+    mkdirSync(path.dirname(own), { recursive: true })
+    writeFileSync(own, writePoseYaml({ classes: { person: ['nose', 'tail'] } }))
     const check = await preflight(dir, options({ format: 'yolo-pose' }))
-    expect(check.blocked).toBe(true)
-    expect(codes(check)).toEqual([['error', 'export-no-keypoints', 1]])
+    expect(check.keypoints).toEqual({ file: own, classes: [{ name: 'person', keypoints: 2 }], flip: false, skeleton: false })
+    expect(check.splits[0]).toMatchObject({ objects: 1, posed: 1 })
+    // One that can't be read stops the export, rather than COCO's person going in its place
+    writeFileSync(own, 'classes: [nose\n')
+    const broken = await preflight(dir, options({ format: 'yolo-pose' }))
+    expect(codes(broken)).toEqual([['error', 'export-keypoints-unreadable', 1]])
+    expect(broken.groups[0].issues[0].message).toMatch(/^\.myseg[\\/]keypoints\.yaml: The keypoints file isn't valid YAML/)
   })
 
   test("shapes labelled __ignore__ or _background_ are left out under the label file's numbers, and the label list's are no classes", async () => {

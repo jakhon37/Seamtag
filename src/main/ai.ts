@@ -1,25 +1,32 @@
 import { createHash } from 'crypto'
-import { createWriteStream, existsSync, promises as fs, readFileSync } from 'fs'
+import { createReadStream, createWriteStream, existsSync, promises as fs, readFileSync } from 'fs'
 import { homedir } from 'os'
 import path from 'path'
 import { gunzipSync } from 'zlib'
 import { app, net } from 'electron'
 import { InferenceSession, Tensor } from 'onnxruntime-node'
 import type { Grid } from '../shared/polygonize'
+import { COCO_PERSON } from '../shared/skeleton'
 import { Tokenizer } from './clip'
 import { nms, roundHalfEven } from './detections'
 import { rgbPixels } from './images'
 import { pilResize } from './resize'
+import { extractEntry } from './zip'
 
 // labelme 7's AI models, run as osam runs them: the same files from the same addresses, kept
 // in osam's cache so either app can use a download. SAM2 and EfficientSAM outline one object
 // from clicks or a box; YOLO-World finds boxes for words. labelme's SAM and SAM 3 aren't here:
 // their encoders need single blocks of memory larger than Electron's allocator gives in this
 // process (between 512 and 768 MiB; SAM's global attention takes about 800 MB, SAM 3's 1.7 GB),
-// and past that it stops the app.
+// and past that it stops the app. Beside them, RTMPose finds a person's keypoints in a box.
 
-type Blob = { url: string; hash: string; size: number }
-type Kind = 'sam2' | 'efficientsam' | 'yoloworld'
+/**
+ * A file a model needs, kept in osam's cache by its hash. One published only in a zip has the
+ * zip's address as `url`, and in `zip` the zip's own hash and size and the file's whole path in it;
+ * only the file is kept. `mirror` is another address for the same download, tried when the first fails.
+ */
+type Blob = { url: string; hash: string; size: number; zip?: { hash: string; size: number; entry: string }; mirror?: string }
+type Kind = 'sam2' | 'efficientsam' | 'yoloworld' | 'rtmpose'
 export type License = { name: string; url: string }
 type ModelDef = {
   name: string
@@ -33,6 +40,10 @@ type ModelDef = {
   text: boolean
   /** labelme's name for it among the text prompt's models */
   textTitle?: string
+  /** A pose model's keypoints, in the order it gives them; its one blob is `model` */
+  keypoints?: string[]
+  /** What to know before downloading it, beyond its licence */
+  note?: string
 }
 
 const EFFICIENT = 'https://github.com/labelmeai/efficient-sam/releases/download/onnx-models-20231225'
@@ -42,6 +53,22 @@ const APACHE = (url: string): License => ({ name: 'Apache License 2.0', url })
 const EFFICIENT_LICENSE = APACHE('https://github.com/wkentaro/efficient-sam/blob/6aebcba09318c4dfe2f9560f7a3f8c42d8b01657/LICENSE')
 const SAM2_LICENSE = APACHE('https://github.com/facebookresearch/sam2/blob/3a7889d905e38ca043c9b5a571ec1635bab678ac/LICENSE')
 const PROMPTABLE = { points: true, box: true, text: false }
+
+// OpenMMLab's RTMPose for COCO's 17 person keypoints, exported to ONNX with MMDeploy, as rtmlib
+// downloads it: each in a zip with the files it was exported with. rtmlib's mirror on Hugging Face
+// (rtmlib/tools/file.py) holds the same zips.
+const RTMPOSE = 'https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk'
+const RTMPOSE_MIRROR = 'https://huggingface.co/Tau-J/RTMPose/resolve/main/rtmposev1/onnx_sdk'
+/** One of OpenMMLab's RTMPose zips, by its name: the ONNX file inside it, and the zip itself */
+const rtmposeZip = (name: string, onnx: { hash: string; size: number }, zip: { hash: string; size: number }): Blob => ({
+  url: `${RTMPOSE}/${name}.zip`, mirror: `${RTMPOSE_MIRROR}/${name}.zip`, ...onnx,
+  zip: { ...zip, entry: `20230831/rtmpose_onnx/${name}/end2end.onnx` }
+})
+// The weights carry no licence of their own; they're published by MMPose, which is under Apache-2.0
+const POSE = {
+  points: false, box: false, text: false, keypoints: COCO_PERSON, license: APACHE('https://github.com/open-mmlab/mmpose/blob/759b39c13fea6ba094afc1fa932f51dc1b11cbf9/LICENSE'),
+  note: 'Its weights are published by OpenMMLab with MMPose. It was trained on a mix of public pose datasets (Body7), whose own terms vary.'
+}
 
 export const MODELS: ModelDef[] = [
   {
@@ -86,12 +113,29 @@ export const MODELS: ModelDef[] = [
       textual: { url: 'https://clip-as-service.s3.us-east-2.amazonaws.com/models/onnx/ViT-B-32/textual.onnx', hash: 'sha256:55c85d8cbb096023781c1d13c557eb95d26034c111bd001b7360fdb7399eec68', size: 254120034 },
       yolo: { url: 'https://github.com/wkentaro/yolo-world-onnx/releases/download/v0.1.0/yolo_world_v2_xl_vlpan_bn_2e-3_100e_4x8gpus_obj365v1_goldg_train_lvis_minival.onnx', hash: 'sha256:92660c6456766439a2670cf19a8a258ccd3588118622a15959f39e253731c05d', size: 418730806 }
     }
+  },
+  {
+    name: 'rtmpose-m', title: 'RTMPose-m (speed)', kind: 'rtmpose', ...POSE,
+    blobs: {
+      model: rtmposeZip('rtmpose-m_simcc-body7_pt-body7_420e-256x192-e48f03d0_20230504',
+        { hash: 'sha256:5c0a4bf67953e6d2ac43ce15e77dc9d5d354ae18430a47d2c5963a7bc5683e3c', size: 54330655 },
+        { hash: 'sha256:f7fbb6c5c11a1bb70f3d445e4ddec5d144ea89ad5649c081ef976f9b24a0b741', size: 50799818 })
+    }
+  },
+  {
+    name: 'rtmpose-l', title: 'RTMPose-l (accuracy)', kind: 'rtmpose', ...POSE,
+    blobs: {
+      model: rtmposeZip('rtmpose-l_simcc-body7_pt-body7_420e-384x288-3f5a1437_20230504',
+        { hash: 'sha256:62425affc6b9edba8f8a65f55f5e278fec5d905d0c90578e0f8503bdf3954587', size: 111117190 },
+        { hash: 'sha256:fed40dcfafdbadaebaa9681569f6594220313bd90f29d8ff039256076745f349', size: 103712404 })
+    }
   }
 ]
 
 // Bigger images are segmented on a smaller copy: the models work at 1024 or less anyway, and
-// EfficientSAM takes the image as it is, which costs memory
-const MAX_SIDE: Record<Kind, number> = { sam2: 4096, efficientsam: 2048, yoloworld: 4096 }
+// EfficientSAM takes the image as it is, which costs memory. A pose model reads only the part of
+// the image a box needs, shrunk when that's bigger.
+const MAX_SIDE: Record<Kind, number> = { sam2: 4096, efficientsam: 2048, yoloworld: 4096, rtmpose: 4096 }
 
 const cacheDir = () => process.env.SEAMTAG_MODELS || path.join(homedir(), '.cache', 'osam', 'models', 'blobs')
 // osam names a blob by its hash, "sha256-…" since Windows can't have ":" in a name.
@@ -109,14 +153,47 @@ export function modelDef(name: string) {
 }
 
 const blobsOf = (m: ModelDef) => Object.values(m.blobs)
-const sizeOf = (m: ModelDef) => blobsOf(m).reduce((s, b) => s + b.size, 0)
+/** What's downloaded for a blob: the file, or the zip it comes in */
+const downloadSize = (b: Blob) => b.zip?.size ?? b.size
+const sizeOf = (m: ModelDef) => blobsOf(m).reduce((s, b) => s + downloadSize(b), 0)
 const isDownloaded = (m: ModelDef) => blobsOf(m).every((b) => existsSync(blobPath(b)))
 
 export function listModels() {
   return MODELS.map((m) => ({
     name: m.name, title: m.title, textTitle: m.textTitle, size: sizeOf(m), downloaded: isDownloaded(m), downloading: downloading.has(m.name),
-    license: m.license, points: m.points, box: m.box, text: m.text
+    license: m.license, points: m.points, box: m.box, text: m.text, pose: m.keypoints !== undefined, keypoints: m.keypoints, note: m.note
   }))
+}
+
+async function sha256Of(file: string) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(file)) hash.update(chunk)
+  return `sha256:${hash.digest('hex')}`
+}
+
+/** Streams `url` into `file`; a download that doesn't match `hash` is never used */
+async function fetchFile(url: string, file: string, hash: string, signal: AbortSignal, progress: (done: number) => void) {
+  const response = await net.fetch(url, { signal })
+  if (!response.ok || !response.body) throw new Error(`${path.basename(url)}: HTTP ${response.status}`)
+  const digest = createHash('sha256')
+  const out = createWriteStream(file)
+  let done = 0
+  try {
+    const reader = response.body.getReader()
+    for (;;) {
+      const { done: end, value } = await reader.read()
+      if (end) break
+      digest.update(value)
+      if (!out.write(value)) await new Promise<void>((r) => out.once('drain', () => r()))
+      done += value.length
+      progress(done)
+    }
+    await new Promise<void>((resolve, reject) => out.end((e?: Error | null) => (e ? reject(e) : resolve())))
+  } catch (e) {
+    out.destroy()
+    throw e
+  }
+  if (`sha256:${digest.digest('hex')}` !== hash) throw new Error(`${path.basename(url)} didn't match its checksum`)
 }
 
 async function fetchBlob(blob: Blob, signal: AbortSignal, progress: (done: number) => void) {
@@ -124,30 +201,26 @@ async function fetchBlob(blob: Blob, signal: AbortSignal, progress: (done: numbe
   if (existsSync(target)) return
   await fs.mkdir(path.dirname(target), { recursive: true })
   const tmp = `${target}.${process.pid}.part`
-  const response = await net.fetch(blob.url, { signal })
-  if (!response.ok || !response.body) throw new Error(`${path.basename(blob.url)}: HTTP ${response.status}`)
-  const hash = createHash('sha256')
-  const out = createWriteStream(tmp)
-  let done = 0
+  // A zip is downloaded beside it, checked, and deleted once its file is out and checked too
+  const zip = blob.zip && { ...blob.zip, file: `${tmp}.zip` }
   try {
-    const reader = response.body.getReader()
-    for (;;) {
-      const { done: end, value } = await reader.read()
-      if (end) break
-      hash.update(value)
-      if (!out.write(value)) await new Promise<void>((r) => out.once('drain', () => r()))
-      done += value.length
-      progress(done)
+    const from = (url: string) => fetchFile(url, zip?.file ?? tmp, zip?.hash ?? blob.hash, signal, progress)
+    // The mirror, when the first address fails for any reason; that failure is the one told
+    await from(blob.url).catch((e) => {
+      if (!blob.mirror || signal.aborted) throw e
+      return from(blob.mirror).catch(() => { throw e })
+    })
+    if (zip) {
+      await extractEntry(zip.file, zip.entry, tmp)
+      if (signal.aborted) throw new Error('Download cancelled')
+      if ((await sha256Of(tmp)) !== blob.hash) throw new Error(`${path.basename(zip.entry)} in ${path.basename(blob.url)} didn't match its checksum`)
     }
-    await new Promise<void>((resolve, reject) => out.end((e?: Error | null) => (e ? reject(e) : resolve())))
-    const digest = `sha256:${hash.digest('hex')}`
-    // A download that doesn't match is never used
-    if (digest !== blob.hash) throw new Error(`${path.basename(blob.url)} didn't match its checksum`)
     await fs.rename(tmp, target)
   } catch (e) {
-    out.destroy()
     await fs.rm(tmp, { force: true })
     throw signal.aborted ? new Error('Download cancelled') : e
+  } finally {
+    if (zip) await fs.rm(zip.file, { force: true })
   }
 }
 
@@ -161,7 +234,7 @@ export function download(name: string, progress: (p: { name: string; model: stri
       let before = 0
       for (const blob of blobsOf(m)) {
         await fetchBlob(blob, abort.signal, (d) => progress({ name: m.title, model: name, done: before + d, total }))
-        before += blob.size
+        before += downloadSize(blob)
       }
       progress({ name: m.title, model: name, done: total, total })
     })().finally(() => downloading.delete(name))
@@ -178,7 +251,8 @@ export function cancelDownload(name: string) {
 export async function removeModel(name: string) {
   const m = modelDef(name)
   if (downloading.has(name)) throw new Error(`${m.title} is still downloading`)
-  if (loaded?.name === name) await release()
+  if (loaded?.name === name) await releaseLoaded()
+  if (posing?.name === name) await releasePose()
   for (const b of blobsOf(m)) {
     await fs.rm(path.join(cacheDir(), b.hash.replace('sha256:', 'sha256-')), { force: true })
     if (process.platform !== 'win32') await fs.rm(path.join(cacheDir(), b.hash), { force: true })
@@ -191,28 +265,58 @@ let loaded: { name: string; parts: Map<string, Promise<InferenceSession>> } | nu
 type Embedding = { key: string; width: number; height: number; full: [number, number]; tensors: Record<string, Tensor> }
 const embeddings: Embedding[] = []
 
+// No memory arena or memory pattern: each tensor has a block of its own, freed after the run
+// (the largest, in Sam2 (balanced) and Sam2 (accuracy), is 512 MiB). With them, both closed
+// the app on their second image: the pattern asks for all of a run's tensors in one block, 820
+// and 896 MiB, and to hold it the arena, which grows in regions of up to 1 GiB, asked for 1 GiB.
+// Electron's allocator rounds an aligned request that size up to 2 GiB, more than it gives in
+// one block, and stops the app rather than fail the request.
+const SESSION_OPTIONS: InferenceSession.SessionOptions = {
+  executionProviders: ['cpu'], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false
+}
+
 async function part(m: ModelDef, key: string): Promise<InferenceSession> {
   if (!isDownloaded(m)) throw new Error(`${m.title} isn't downloaded yet`)
   if (loaded?.name !== m.name) {
-    await release()
+    await releaseLoaded()
     loaded = { name: m.name, parts: new Map() }
   }
   let session = loaded.parts.get(key)
   if (!session) {
-    // No memory arena or memory pattern: each tensor has a block of its own, freed after the run
-    // (the largest, in Sam2 (balanced) and Sam2 (accuracy), is 512 MiB). With them, both closed
-    // the app on their second image: the pattern asks for all of a run's tensors in one block, 820
-    // and 896 MiB, and to hold it the arena, which grows in regions of up to 1 GiB, asked for 1 GiB.
-    // Electron's allocator rounds an aligned request that size up to 2 GiB, more than it gives in
-    // one block, and stops the app rather than fail the request.
-    const opts: InferenceSession.SessionOptions = {
-      executionProviders: ['cpu'], graphOptimizationLevel: 'all', enableCpuMemArena: false, enableMemPattern: false
-    }
-    session = InferenceSession.create(blobPath(m.blobs[key]), opts)
+    session = InferenceSession.create(blobPath(m.blobs[key]), SESSION_OPTIONS)
     loaded.parts.set(key, session)
     session.catch(() => loaded?.parts.delete(key))
   }
   return session
+}
+
+// A pose model has a session of its own beside that one model, so a pose found between two clicks
+// of SAM2 leaves SAM2 loaded and the images it has encoded kept
+let posing: { name: string; session: Promise<InferenceSession> } | null = null
+
+/** A pose model, loaded when first needed: its session, its keypoints, and the longest side it reads a box's part of an image at */
+export async function poseModel(name: string) {
+  const m = modelDef(name)
+  if (!m.keypoints) throw new Error(`${m.title} doesn't find poses`)
+  if (!isDownloaded(m)) throw new Error(`${m.title} isn't downloaded yet`)
+  let current = posing
+  if (current?.name !== m.name) {
+    // Taken at once, so a second call meanwhile shares it; the model it replaces is let go after
+    const before = current?.session
+    const session = InferenceSession.create(blobPath(m.blobs.model), SESSION_OPTIONS)
+    current = posing = { name: m.name, session }
+    session.catch(() => {
+      if (posing?.session === session) posing = null
+    })
+    await (await before?.catch(() => null))?.release()
+  }
+  return { session: await current.session, keypoints: m.keypoints, maxSide: MAX_SIDE[m.kind] }
+}
+
+async function releasePose() {
+  const session = posing?.session
+  posing = null
+  await (await session?.catch(() => null))?.release()
 }
 
 let tokenizer: Tokenizer | null = null
@@ -402,9 +506,15 @@ export async function generateFromTexts(root: string, name: string, model: strin
   return { annotations: await yoloWorld(m, image, texts), width: image.width, height: image.height, full: [image.fullWidth, image.fullHeight] }
 }
 
-export async function release() {
+async function releaseLoaded() {
   embeddings.length = 0
   const parts = loaded?.parts
   loaded = null
   for (const s of parts?.values() ?? []) await (await s.catch(() => null))?.release()
+}
+
+/** Frees every model's memory */
+export async function release() {
+  await releaseLoaded()
+  await releasePose()
 }

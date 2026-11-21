@@ -1,6 +1,7 @@
 import type { ExportOptions, ExportProgress, ExportResult, KeypointsSummary, Preflight } from '../../main/export'
 import type { AiOutput, Config } from '../../shared/config'
-import type { Issue } from '../../shared/dataset'
+import type { Issue, KeypointSchema } from '../../shared/dataset'
+import type { FolderKeypoints, PoseAnswer, PoseRequest } from '../../shared/skeleton'
 import type { LabelFormat } from '../../shared/formats'
 import type { LabelDoc, Shape } from '../../shared/labelfile'
 import type { LegalKind, LegalText } from '../../shared/legal'
@@ -68,6 +69,10 @@ export type ModelInfo = {
   license: { name: string; url: string }
   /** What it takes: clicks, a box, words */
   points: boolean; box: boolean; text: boolean
+  /** A pose model: finds the keypoints (named in `keypoints`, in its own order) of a person in a box */
+  pose?: boolean; keypoints?: string[]
+  /** What to know before downloading it, beyond its licence, such as where its training data's terms differ */
+  note?: string
 }
 /** A shape the AI proposes; a mask shape's pixels as labelme's base64 PNG */
 export type ProposedShape = { label?: string; shape_type: AiOutput; points: number[][]; mask?: string; description?: string; group_id?: number | null }
@@ -131,6 +136,7 @@ declare global {
       aiRemove(name: string): Promise<void>
       aiAssist(req: AssistRequest): Promise<Proposal>
       aiText(req: TextRequest): Promise<Proposal>
+      aiPose(req: PoseRequest): Promise<PoseAnswer>
       mergeMasks(shapes: { points: number[][]; mask: string }[]): Promise<{ points: number[][]; mask: string }>
       prelabelPick(root?: string): Promise<PrelabelModel | null>
       prelabelInfo(path: string): Promise<PrelabelModel>
@@ -158,6 +164,13 @@ declare global {
       exportFolder(root: string): Promise<{ path: string; problem: string | null } | null>
       exportKeypoints(): Promise<KeypointsSummary | null>
       exportMakeKeypoints(root: string, prefer: LabelFormat): Promise<KeypointsSummary | null>
+      /** The folder's keypoints file, or COCO's person until it has one */
+      keypointsGet(root: string): Promise<FolderKeypoints>
+      keypointsSet(root: string, schema: KeypointSchema): Promise<FolderKeypoints>
+      /** A keypoints file chosen, copied in as the folder's own; null when the dialog is cancelled */
+      keypointsChoose(root: string): Promise<FolderKeypoints | null>
+      /** The folder's own keypoints file, made from its posed objects */
+      keypointsMake(root: string, prefer: LabelFormat): Promise<FolderKeypoints>
       exportRun(root: string, options: ExportOptions, out: string): Promise<ExportResult>
       exportStop(): Promise<void>
       exportClose(): Promise<void>

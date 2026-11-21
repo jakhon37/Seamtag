@@ -1,13 +1,15 @@
 // Checks over a folder's labels, as research weighed them against labelme 7.9.1, Ultralytics
 // 8.4.211, pycocotools 2.0.11, Datumaro 1.13.12 and X-AnyLabeling 4.3.2: what can't be read,
-// shapes that are broken or doubtful, and labels that drift apart. All of it is plain
-// functions over what src/main/dataset.ts read, so the window can run it again and apply the
-// fixes that change nothing but the problem.
+// shapes that are broken or doubtful, labels that drift apart, and poses whose keypoints don't
+// add up. All of it is plain functions over what src/main/dataset.ts read, so the window can run
+// it again and apply the fixes that change nothing but the problem.
 import ClipperLib from 'clipper-lib'
-import { type DatasetImage, type Issue, type MaskBits, type Severity, sizeText } from './dataset'
+import { type DatasetImage, type Issue, type KeypointSchema, type MaskBits, type Severity, sizeText } from './dataset'
 import { boxOf } from './formats'
 import { isAi, type Shape, type ShapeType } from './labelfile'
 import { CLOSED_TYPES, outlineOf } from './outline'
+import { shapeBox } from './pose'
+import { isHidden, keypointNames, type PoseGroup, posesIn, sidesOf } from './skeleton'
 
 /** Every check by its code: how much it matters, and what the window calls a list of them */
 export const CHECKS = {
@@ -24,12 +26,18 @@ export const CHECKS = {
   'outside-image': { severity: 'warning', title: 'Shapes reaching outside the image' },
   'duplicate-shape': { severity: 'warning', title: 'Exact copies of a shape' },
   'near-duplicate': { severity: 'warning', title: 'Shapes almost on top of another of their label' },
+  'keypoint-no-group': { severity: 'warning', title: 'Keypoints with no group' },
+  'keypoint-no-box': { severity: 'warning', title: 'Poses with no box' },
+  'keypoint-unknown': { severity: 'warning', title: "Points in a pose that aren't its class's keypoints" },
+  'keypoint-repeated': { severity: 'warning', title: 'Keypoints given twice in one pose' },
+  'keypoint-outside-box': { severity: 'warning', title: "Keypoints outside their pose's box" },
   'unknown-label': { severity: 'warning', title: 'Labels not in the label list' },
   'label-variants': { severity: 'warning', title: 'One label written several ways' },
   'ai-pending': { severity: 'warning', title: 'AI proposals not yet accepted' },
   'orphan-label-file': { severity: 'warning', title: 'Label files without their image' },
   'image-path-mismatch': { severity: 'warning', title: 'Label files that name another image' },
   'duplicate-image': { severity: 'warning', title: 'Identical image files' },
+  'keypoint-swapped': { severity: 'info', title: 'Poses whose left and right may be swapped' },
   'never-labelled': { severity: 'info', title: 'Images never labelled' },
   'labelled-empty': { severity: 'info', title: 'Images labelled with no shapes' },
   'not-verified': { severity: 'info', title: 'Images not verified' },
@@ -50,6 +58,17 @@ export type OrphanFile = { file: string; names: string | null; holdsImage?: bool
 export type CheckOptions = {
   /** The label list (config's labels, or the project's classes); null when none is set */
   labels: string[] | null
+  /**
+   * The folder's keypoints. The labels naming its keypoints aren't classes, so the label list
+   * needn't have them, and its poses are checked; without it, poses aren't.
+   */
+  keypoints?: KeypointSchema | null
+  /**
+   * The keypoints are the folder's own file's, not COCO's person standing in for one. With COCO's
+   * person, points named like its keypoints but in no group are a pose's only in an image with a
+   * pose: a folder of face landmarks named nose and eyes has none, and is left alone.
+   */
+  ownKeypoints?: boolean
   clashes?: Clash[]
   /** Groups of identical image files (findDuplicateImages) */
   duplicates?: string[][]
@@ -97,6 +116,16 @@ const COPY = 0.01
 const NEAR = 0.9
 // Less than a square pixel marks nothing a model can learn from
 const MIN_AREA = 1
+// A box is drawn round what's seen of an object, and a keypoint placed by hand can land a little
+// past it: one is told once it's further out than this share of the box's longer side, or a pixel
+const KEYPOINT_SLACK = 0.05
+// A flip pair's two points closer than this share of their pose's shorter side, or a pixel, don't
+// say which way round the pose is, as when an object is seen side on
+const SIDE_GAP = 0.05
+// Flip pairs that must say which way round their pose is before one saying otherwise is told
+const SIDE_VOTES = 3
+// A pair says otherwise when it points more than 120 degrees away from every other pair
+const OPPOSED = -0.5
 
 // labelme 7.9.1 refuses files whose shapes have another exact count (_label_file.py,
 // _validate_shape_semantics), and polygons and line strips need 3 and 2 (_shape/_model.py)
@@ -425,22 +454,146 @@ function overreach(s: Shape, width: number, height: number) {
 /** A label as it reads once case, spaces, _ and - stop mattering */
 const variantKey = (label: string) => label.toLowerCase().replace(/[\s_-]+/g, ' ').trim()
 
+/** The box exports give a pose: around its group's closed shapes labelled with its class, as poseInstances takes them */
+function poseBox(image: DatasetImage, pose: PoseGroup): Box | null {
+  let box: Box | null = null
+  for (const [k, s] of image.shapes.entries()) {
+    if (s.group_id !== pose.group || s.label !== pose.cls || !CLOSED_TYPES.has(s.shape_type) || pointsWrong(s)) continue
+    const b = shapeBox(s, image.masks[k])
+    if (b) box = box ? [Math.min(box[0], b[0]), Math.min(box[1], b[1]), Math.max(box[2], b[2]), Math.max(box[3], b[3])] : b
+  }
+  return box
+}
+
+/**
+ * The flip pair of a pose whose left and right look swapped, with how many pairs say otherwise.
+ * Pairs placed and seen far enough apart say which way round the pose is; with SIDE_VOTES of them
+ * or more, one pointing away from each of the rest while the rest agree is the odd one out. Their
+ * ways are compared in the image's plane, not only across it, so a pose seen from behind, upside
+ * down or lying down agrees with itself as one facing the camera does. Hidden keypoints are
+ * guesses, so they say nothing.
+ */
+function swappedPair(shapes: Shape[], schema: KeypointSchema, pose: PoseGroup, box: Box | null) {
+  const order = schema.classes[pose.cls]
+  const sides = sidesOf(schema, pose.cls)
+  // Keypoints at the skeleton's ends, such as wrists and ankles, which folded arms and crossed legs put on the other side
+  const lines = schema.skeleton?.[pose.cls] ?? []
+  const degree = new Map<string, number>()
+  for (const [a, b] of lines) for (const n of [a, b]) degree.set(n, (degree.get(n) ?? 0) + 1)
+  const end = (name: string) => lines.length > 0 && (degree.get(name) ?? 0) <= 1
+  const seen = (k: number | null) => (k === null || isHidden(shapes[k]) || pointsWrong(shapes[k]) ? null : shapes[k].points[0])
+  const placed = pose.points.map(seen).filter((p) => p !== null)
+  if (placed.length < 2 * SIDE_VOTES) return null
+  // Without a box, the pose's size is that of the box around its points
+  const size = box ?? ringBox(placed)
+  const gap = Math.max(OUTSIDE, SIDE_GAP * Math.min(size[2] - size[0], size[3] - size[1]))
+  const ways: { left: number; right: number; x: number; y: number }[] = []
+  for (const [a, b] of schema.flip?.[pose.cls] ?? []) {
+    if (end(a) || end(b)) continue
+    const ka = order.indexOf(a), kb = order.indexOf(b)
+    const [l, r] = sides[ka] === 'left' ? [pose.points[ka], pose.points[kb]] : [pose.points[kb], pose.points[ka]]
+    const pl = seen(l ?? null), pr = seen(r ?? null)
+    if (!pl || !pr) continue
+    const length = Math.hypot(pl[0] - pr[0], pl[1] - pr[1])
+    if (length >= gap) ways.push({ left: l!, right: r!, x: (pl[0] - pr[0]) / length, y: (pl[1] - pr[1]) / length })
+  }
+  if (ways.length < SIDE_VOTES) return null
+  const along = (p: (typeof ways)[number], q: (typeof ways)[number]) => p.x * q.x + p.y * q.y
+  for (const odd of ways) {
+    const rest = ways.filter((w) => w !== odd)
+    if (rest.every((w) => along(odd, w) < OPPOSED) && rest.every((w) => rest.every((v) => along(w, v) > 0))) return { ...odd, others: rest.length }
+  }
+  return null
+}
+
+/**
+ * What's wrong with an image's poses, as posesIn finds them: keypoints in no group, groups of
+ * keypoints with no box, points a pose has no place for or has already, and, where the image's
+ * points are measured, keypoints well outside their pose's box and a flip pair that looks swapped
+ */
+function poseProblems(image: DatasetImage, schema: KeypointSchema, measured: boolean, own: boolean, add: (code: CheckCode, message: string, shape: number) => void) {
+  const { shapes } = image
+  const names = keypointNames(schema)
+  const poses = posesIn(shapes, schema)
+  // Groups with a closed shape of a class the keypoints don't cover (a dog's box with its nose and eyes) are that class's, not poses
+  const otherClass = new Set(shapes.filter((s) => s.group_id !== null && CLOSED_TYPES.has(s.shape_type) && !Object.hasOwn(schema.classes, s.label)).map((s) => s.group_id!))
+  // The points named for keypoints: those of no group, and each group's
+  const loose: number[] = []
+  const named = new Map<number, number[]>()
+  shapes.forEach((s, k) => {
+    if (s.shape_type !== 'point' || !names.has(s.label)) return
+    if (s.group_id === null) loose.push(k)
+    else if (named.has(s.group_id)) named.get(s.group_id)!.push(k)
+    else named.set(s.group_id, [k])
+  })
+  // A folder whose points were never grouped has dozens an image: they're one problem
+  if (loose.length && (own || poses.length)) {
+    add('keypoint-no-group', loose.length === 1
+      ? `${what(shapes[loose[0]], loose[0])} is a keypoint with no group, so it's in no pose, and pose exports leave it out`
+      : `${loose.length} keypoints have no group (shapes ${listed(loose.map((k) => String(k + 1)))}), so they're in no pose, and pose exports leave them out`, loose[0])
+  }
+  const posed = new Set(poses.map((p) => p.group))
+  // Groups posesIn gives no class: with no box, no class has all their keypoints, or several have
+  for (const [group, points] of named) {
+    if (posed.has(group) || otherClass.has(group)) continue
+    const fits = Object.keys(schema.classes).filter((c) => points.every((k) => schema.classes[c].includes(shapes[k].label)))
+    add('keypoint-no-box', `Group ${group} has keypoints but no box, and ${fits.length ? `they fit ${listed(fits)}` : 'no class has all of them'}, ` +
+      'so pose exports leave it out: add a box labelled with its class', points[0])
+  }
+  for (const pose of poses) {
+    const { group, cls } = pose
+    for (const k of pose.extra) {
+      const s = shapes[k]
+      if (schema.classes[cls].includes(s.label)) add('keypoint-repeated', `${what(s, k)} repeats group ${group}'s ${s.label}, so pose exports leave it out`, k)
+      else add('keypoint-unknown', `${what(s, k)} in group ${group} isn't one of ${cls}'s keypoints, so pose exports stop on it`, k)
+    }
+    const box = pose.box === null ? null : poseBox(image, pose)
+    if (pose.box === null) {
+      // As poseInstances boxes it: around the points named for keypoints
+      const points = named.get(group)!.filter((k) => !pointsWrong(shapes[k]))
+      const [x0, y0, x1, y1] = ringBox(points.map((k) => shapes[k].points[0]))
+      add('keypoint-no-box', x1 > x0 && y1 > y0
+        ? `Group ${group} has keypoints of ${cls} but no box, so pose exports use the box around its points: add a box labelled ${cls}`
+        : `Group ${group} has keypoints of ${cls} but no box, and the box around ${points.length === 1 ? 'its one point' : 'its points, which lie in a line,'} ` +
+          `has no area: add a box labelled ${cls}`, named.get(group)![0])
+    }
+    if (!measured) continue
+    if (box) {
+      const slack = Math.max(OUTSIDE, KEYPOINT_SLACK * Math.max(box[2] - box[0], box[3] - box[1]))
+      for (const k of pose.points) {
+        if (k === null || pointsWrong(shapes[k])) continue
+        const [x, y] = shapes[k].points[0]
+        const edges: [string, number][] = [['left', box[0] - x], ['top', box[1] - y], ['right', x - box[2]], ['bottom', y - box[3]]]
+        const [edge, by] = edges.sort((a, b) => b[1] - a[1])[0]
+        if (by > slack) add('keypoint-outside-box', `${what(shapes[k], k)} lies ${num(by)} px past the ${edge} edge of its pose's box (group ${group})`, k)
+      }
+    }
+    const swap = swappedPair(shapes, schema, pose, box)
+    if (swap) {
+      add('keypoint-swapped', `Shapes ${swap.left + 1} and ${swap.right + 1} (${shapes[swap.left].label} and ${shapes[swap.right].label}) may be swapped: ` +
+        `group ${group}'s other ${swap.others} pairs seen have left and right the other way round`, swap.left)
+    }
+  }
+}
+
 /**
  * Every problem in a folder's labels, the worst first, then in the folder's order. Each names
  * its image (null for the folder as a whole) and, where it's one shape's, the shape's index.
  */
-export function checkDataset(images: DatasetImage[], { labels, clashes = [], duplicates = [], orphans = [], tally }: CheckOptions): Issue[] {
+export function checkDataset(images: DatasetImage[], { labels, keypoints = null, ownKeypoints = false, clashes = [], duplicates = [], orphans = [], tally }: CheckOptions): Issue[] {
   const issues: Issue[] = []
   const add = (code: CheckCode, image: string | null, message: string, shape?: number) =>
     issues.push({ severity: CHECKS[code].severity, code, image, ...(shape === undefined ? {} : { shape }), message })
   const listedLabels = labels ? new Set(labels) : null
+  // Labels that name keypoints, which the label list needn't hold
+  const keypointLabels = keypoints ? keypointNames(keypoints) : new Set<string>()
   const clashed = clashesByImage(clashes)
   // Verification is in use once any image is verified; until then, saying so of every image is noise
   const verifying = images.some((i) => i.verified)
 
   // Labels across the folder
   const { uses, accepted } = tally ?? tallyLabels(images)
-  // Variants of one label: the one in the label list wins, then the most used
+  // Variants of one label: the one in the label list or naming a keypoint wins, then the most used
   const variants = new Map<string, string[]>()
   for (const label of uses.keys()) {
     const key = variantKey(label)
@@ -449,7 +602,7 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
   const preferred = new Map<string, string>()
   for (const group of variants.values()) {
     if (group.length < 2) continue
-    const rank = (l: string) => (listedLabels?.has(l) ? 1e12 : 0) + uses.get(l)!
+    const rank = (l: string) => (listedLabels?.has(l) || keypointLabels.has(l) ? 1e12 : 0) + uses.get(l)!
     const winner = [...group].sort((a, b) => rank(b) - rank(a) || a.localeCompare(b))[0]
     for (const l of group) if (l !== winner) preferred.set(l, winner)
   }
@@ -489,7 +642,7 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
       if (!s.label.trim()) add('empty-label', name, `${shape} has no label, so no export can name its class`, k)
       else if (preferred.has(s.label)) {
         if (!odd.has(s.label)) odd.set(s.label, k)
-      } else if (listedLabels && !listedLabels.has(s.label)) unknown.set(s.label, [...(unknown.get(s.label) ?? []), k])
+      } else if (listedLabels && !listedLabels.has(s.label) && !keypointLabels.has(s.label)) unknown.set(s.label, [...(unknown.get(s.label) ?? []), k])
       if (s.shape_type === 'mask' && !image.masks[k]) {
         add('mask-undecodable', name, s.mask ? `${shape} is a mask whose pixels can't be read, so it can't be exported` : `${shape} is a mask, but the file holds no pixels for it`, k)
       }
@@ -526,8 +679,10 @@ export function checkDataset(images: DatasetImage[], { labels, clashes = [], dup
       const to = preferred.get(label)!
       add('label-variants', name, listedLabels?.has(to)
         ? `Label “${label}” looks like “${to}” from the label list, written another way`
-        : `Label “${label}” looks like “${to}” written another way (${counted(uses.get(to)!, 'shape uses', 'shapes use')} “${to}”)`, k)
+        : keypointLabels.has(to) ? `Label “${label}” looks like the keypoint “${to}” written another way`
+          : `Label “${label}” looks like “${to}” written another way (${counted(uses.get(to)!, 'shape uses', 'shapes use')} “${to}”)`, k)
     }
+    if (keypoints) poseProblems(image, keypoints, geometry, ownKeypoints, (code, message, shape) => add(code, name, message, shape))
     if (!geometry) continue
     const copyOf = copiesOf(image.shapes, image.masks)
     copyOf.forEach((keep, k) => {
@@ -620,11 +775,24 @@ export function boxesClipped(shapes: Shape[], width: number, height: number, onl
   return changed ? next : null
 }
 
+/**
+ * Deletes a keypoint its pose has already: the point given, when an earlier point of its group
+ * has its label. The pose keeps the first, as posesIn and the exports read it, and pose exports
+ * stop on the second, so it changes nothing but that.
+ */
+export function withoutRepeatedKeypoint(shapes: Shape[], only?: number): Shape[] | null {
+  const s = only === undefined ? undefined : shapes[only]
+  if (!s || s.shape_type !== 'point' || s.group_id === null) return null
+  const first = shapes.findIndex((o) => o.shape_type === 'point' && o.group_id === s.group_id && o.label === s.label)
+  return first < only! ? shapes.filter((_, k) => k !== only) : null
+}
+
 /** The safe fixes by the code of the issue they fix */
 export const FIXES: Partial<Record<CheckCode, (image: DatasetImage, shape?: number) => Shape[] | null>> = {
   'repeated-points': (image, shape) => withoutRepeatedPoints(image.shapes, shape),
   'duplicate-shape': (image) => withoutDuplicates(image.shapes, image.masks),
-  'outside-image': (image, shape) => boxesClipped(image.shapes, image.width, image.height, shape)
+  'outside-image': (image, shape) => boxesClipped(image.shapes, image.width, image.height, shape),
+  'keypoint-repeated': (image, shape) => withoutRepeatedKeypoint(image.shapes, shape)
 }
 
 /** The image's shapes with an issue fixed, or null when there's no safe fix for it */
